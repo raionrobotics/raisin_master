@@ -63,7 +63,7 @@ def install_command(targets, build_type):
 
     while install_queue:
         target_spec = install_queue.pop(0)
-        # print( f"🔄 Processing target specifier: '{target_spec}'")
+        print(f"🔄 Processing target specifier: '{target_spec}'")
 
         match = re.match(r"^\s*([a-zA-Z0-9_.-]+)\s*(.*)\s*$", target_spec)
         if not match:
@@ -208,7 +208,7 @@ def install_command(targets, build_type):
 
             release_data = best_release
             version = release_data["tag_name"]
-            if package_name in processed_packages.keys():
+            if package_name in processed_packages:
                 installed_version = processed_packages[package_name]
                 if parse_version(version) <= parse_version(installed_version):
                     print(
