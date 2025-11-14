@@ -97,6 +97,7 @@ def install_command(targets, build_type):
             is_valid = False
             dependencies = []
             release_yaml_path = path / "release.yaml"
+            version_str = None
             if not release_yaml_path.is_file():
                 if not spec_str:
                     is_valid = True
@@ -120,7 +121,7 @@ def install_command(targets, build_type):
             if is_valid:
                 if dependencies:
                     install_queue.extend(dependencies)
-                if "version_str" in locals() and version_str:
+                if version_str:
                     print(
                         f"✅ Found suitable {package_type} package '{package_name}=={version_str}'"
                     )
