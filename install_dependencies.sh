@@ -35,6 +35,31 @@ if [[ $EUID -eq 0 ]]; then
     PIP_FLAGS="--break-system-packages"
 fi
 
+echo -e "${YELLOW}Checking and installing core Python...${NC}"
+echo "-------------------------------------------------"
+if ! command -v python3 &> /dev/null || ! python3 -m pip --version &> /dev/null; then
+    echo "Python3 or pip not found. Attempting installation..."
+    if command -v apt-get &> /dev/null; then
+        echo "Attempting to install with apt..."
+        $SUDO apt-get update > /dev/null
+        $SUDO apt-get install -y python3 python3-pip lsb-release
+        echo -e "${GREEN}✅ Python 3 and pip installed via apt.${NC}"
+    elif command -v dnf &> /dev/null; then
+        echo "Attempting to install with dnf..."
+        $SUDO dnf install -y python3 python3-pip redhat-lsb-core
+        echo -e "${GREEN}✅ Python 3 and pip installed via dnf.${NC}"
+    elif command -v pacman &> /dev/null; then
+        echo "Attempting to install with pacman..."
+        $SUDO pacman -S --noconfirm python python-pip lsb-release
+        echo -e "${GREEN}✅ Python 3 and pip installed via pacman.${NC}"
+    else
+        echo -e "${RED}❌ Could not find a supported package manager (apt, dnf, pacman). Please install Python 3 and pip manually.${NC}"
+        exit 1
+    fi
+else
+    echo -e "${GREEN}✅ Python 3 and pip are already installed.${NC}"
+fi
+
 echo -e "${YELLOW}Checking and installing development tools...${NC}"
 echo "-------------------------------------------------"
 
@@ -217,7 +242,18 @@ fi
 echo "-------------------------------------------------"
 echo -e "${GREEN}Setup check complete. Now installing dependencies of each packages${NC}"
 
-bash install/install_dependencies.sh || {
-  echo "Failed to install dependencies: You forgot to call 'python3 ./raisin.py'."
+# cli dependency pip installation
+pip3 install $PIP_FLAGS PyYAML Click requests packaging
+
+# copy configuration_setting file
+if [ -f "configuration_setting_example.yaml" ]; then
+    cp -n configuration_setting_example.yaml configuration_setting.yaml
+fi
+
+# make install/install_dependencies.sh
+python3 ./raisin.py setup
+
+$SUDO bash install/install_dependencies.sh || {
+  echo "Failed to install sub-project dependencies. Please check the output above for errors."
   exit 1
 }

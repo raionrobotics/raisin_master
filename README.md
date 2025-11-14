@@ -23,7 +23,7 @@ Before you begin, ensure your system meets the following requirements.
 #### For Linux
 The provided shell script automates the entire dependency installation process. Simply run:
 ```bash
-bash install_dependencies.sh
+sudo bash install_dependencies.sh
 ```
 
 #### For Windows
