@@ -208,7 +208,7 @@ def install_command(targets, build_type):
 
             release_data = best_release
             version = release_data["tag_name"]
-            if package_name in processed_packages.keys():
+            if package_name in processed_packages:
                 installed_version = processed_packages[package_name]
                 if parse_version(version) <= parse_version(installed_version):
                     print(
