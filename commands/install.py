@@ -57,13 +57,13 @@ def install_command(targets, build_type):
         if local_src_packages:
             print(f"  -> Found local packages to process: {local_src_packages}")
             install_queue.extend(local_src_packages)
-
-    processed_packages = set()
+    processed_packages = dict()
     session = requests.Session()
     is_successful = True
 
     while install_queue:
         target_spec = install_queue.pop(0)
+        # print( f"🔄 Processing target specifier: '{target_spec}'")
 
         match = re.match(r"^\s*([a-zA-Z0-9_.-]+)\s*(.*)\s*$", target_spec)
         if not match:
@@ -120,6 +120,11 @@ def install_command(targets, build_type):
             if is_valid:
                 if dependencies:
                     install_queue.extend(dependencies)
+                if "version_str" in locals() and version_str:
+                    print(
+                        f"✅ Found suitable {package_type} package '{package_name}=={version_str}'"
+                    )
+                    processed_packages[package_name] = version_str
                 return True
             return False
 
@@ -203,10 +208,14 @@ def install_command(targets, build_type):
 
             release_data = best_release
             version = release_data["tag_name"]
-
-            if (package_name, version) in processed_packages:
-                continue
-            processed_packages.add((package_name, version))
+            if package_name in processed_packages.keys():
+                installed_version = processed_packages[package_name]
+                if parse_version(version) <= parse_version(installed_version):
+                    print(
+                        f"ℹ️  '{package_name}' version '{installed_version}' is already installed. Skipping."
+                    )
+                    continue
+            processed_packages[package_name] = version
 
             asset_name = f"{package_name}-{os_type}-{os_version}-{architecture}-{build_type}-{version}.zip"
             asset_api_url = next(
