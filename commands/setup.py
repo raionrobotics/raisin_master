@@ -1777,6 +1777,8 @@ def setup(package_name="", build_type="", build_dir=""):
     delete_directory(Path(g.script_directory) / install_dir)
     os.makedirs(Path(g.script_directory) / install_dir, exist_ok=True)
 
+    deploy_install_packages()
+
     if build_dir:
         os.makedirs(build_dir, exist_ok=True)
 
@@ -1866,8 +1868,6 @@ def setup(package_name="", build_type="", build_dir=""):
         Path(g.script_directory) / install_dir / "generated",
         dirs_exist_ok=True,
     )
-
-    deploy_install_packages()
 
     shutil.copy2(
         Path(g.script_directory) / "templates/install_dependencies.sh",
