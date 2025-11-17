@@ -39,7 +39,13 @@ def install_command(targets, build_type):
     script_dir_path = Path(script_directory)
 
     # Load configuration
-    all_repositories, tokens, user_type, _ = load_configuration()
+    (
+        all_repositories,
+        tokens,
+        user_type,
+        _,
+        repos_to_ignore,
+    ) = load_configuration()
     if not all_repositories:
         print("❌ Error: No repositories found in configuration_setting.yaml")
         return
@@ -51,9 +57,14 @@ def install_command(targets, build_type):
     install_queue = list(targets)
 
     src_dir = script_dir_path / "src"
+    repo_ignore_set = set(repos_to_ignore or [])
     if src_dir.is_dir():
         print(f"🔍 Scanning for local source packages in '{src_dir}'...")
-        local_src_packages = [path.name for path in src_dir.iterdir() if path.is_dir()]
+        local_src_packages = [
+            path.name
+            for path in src_dir.iterdir()
+            if path.is_dir() and path.name not in repo_ignore_set
+        ]
         if local_src_packages:
             print(f"  -> Found local packages to process: {local_src_packages}")
             install_queue.extend(local_src_packages)

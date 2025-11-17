@@ -60,7 +60,7 @@ def list_all_available_packages():
         return
 
     # Load all repository configurations
-    all_repositories, tokens, user_type, _ = load_configuration()
+    all_repositories, tokens, user_type, _, _ = load_configuration()
 
     if not all_repositories:
         print("🤷 No packages found in configuration_setting.yaml.")
@@ -193,7 +193,7 @@ def list_github_release_versions(package_name):
         return
 
     # Load Repository and Secrets Configuration
-    all_repositories, tokens, user_type, _ = load_configuration()
+    all_repositories, tokens, user_type, _, _ = load_configuration()
 
     if not all_repositories:
         print("❌ Error: No repositories found in configuration_setting.yaml")
@@ -294,7 +294,6 @@ def index_local_command():
     Scans both src/ and release/install/ directories for packages.
     """
     script_directory = g.script_directory
-
     targets_to_process = find_target_yamls(
         Path(script_directory) / "src", Path(script_directory) / "release" / "install"
     )

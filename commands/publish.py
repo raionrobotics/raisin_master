@@ -54,7 +54,13 @@ def publish(target, build_type):
     try:
         with open(release_file_path, "r") as file:
             details = yaml.safe_load(file)
-            repositories, secrets_config, user_type, _ = load_configuration()
+            (
+                repositories,
+                secrets_config,
+                user_type,
+                _,
+                _,
+            ) = load_configuration()
 
             print(f"\n--- Setting up build for '{target}' ---")
             build_dir = Path(g.script_directory) / "release" / "build" / target
@@ -148,7 +154,7 @@ def publish(target, build_type):
             )
             print(f"✅ Successfully created archive: {archive_file}.zip")
 
-            repositories, secrets, _, _ = load_configuration()
+            repositories, secrets, _, _, _ = load_configuration()
             if not secrets:
                 print(
                     "❌ Error: GitHub tokens not found in configuration. Cannot upload to GitHub."

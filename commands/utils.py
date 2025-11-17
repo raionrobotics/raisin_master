@@ -10,7 +10,7 @@ import yaml
 import shutil
 import platform
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional, Union
 
 # Import globals
 from commands import globals as g
@@ -21,7 +21,7 @@ def load_configuration():
     Load configuration from configuration_setting.yaml and repositories.yaml.
 
     Returns:
-        tuple: (all_repositories, tokens, user_type, packages_to_ignore)
+        tuple: (all_repositories, tokens, user_type, packages_to_ignore, repos_to_ignore)
     """
     script_dir_path = Path(g.script_directory)
     config_path = script_dir_path / "configuration_setting.yaml"
@@ -38,6 +38,7 @@ def load_configuration():
     tokens = {}
     user_type = None
     packages_to_ignore = []
+    repos_to_ignore = []
 
     if config_path.is_file():
         with open(config_path, "r") as f:
@@ -45,6 +46,7 @@ def load_configuration():
             tokens = config.get("gh_tokens", {})
             user_type = config.get("user_type")
             packages_to_ignore = config.get("packages_to_ignore", [])
+            repos_to_ignore = config.get("repos_to_ignore", [])
     else:
         secrets_path = script_dir_path / "secrets.yaml"
         if secrets_path.is_file():
@@ -66,7 +68,13 @@ def load_configuration():
         )
         sys.exit(1)
 
-    return all_repositories, tokens, user_type, packages_to_ignore
+    return (
+        all_repositories,
+        tokens,
+        user_type,
+        packages_to_ignore,
+        repos_to_ignore,
+    )
 
 
 def delete_directory(directory):
@@ -78,6 +86,29 @@ def delete_directory(directory):
     """
     if os.path.exists(directory):
         shutil.rmtree(directory)
+
+
+def get_repo_name_from_path(path: Union[str, Path]) -> Optional[str]:
+    """
+    Determine the top-level repository name (direct child of src/) for a path.
+
+    Args:
+        path: File system path to evaluate.
+
+    Returns:
+        Optional[str]: Repository name if the path is under src/, otherwise None.
+    """
+    if not path:
+        return None
+
+    try:
+        src_root = (Path(g.script_directory) / "src").resolve(strict=False)
+        rel_path = Path(path).resolve(strict=False).relative_to(src_root)
+    except Exception:
+        return None
+
+    parts = rel_path.parts
+    return parts[0] if parts else None
 
 
 def is_root():
