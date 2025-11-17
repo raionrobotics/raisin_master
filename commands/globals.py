@@ -36,6 +36,7 @@ def init_globals(**kwargs):
         ninja_path: Path to ninja (Windows)
         visual_studio_path: Path to Visual Studio (Windows)
         developer_env: Developer environment variables (Windows)
+        always_yes: always yes to all prompts
     """
     global os_type, architecture, os_version, script_directory
     global ninja_path, visual_studio_path, developer_env, always_yes
