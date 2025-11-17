@@ -210,7 +210,7 @@ def get_os_info() -> Tuple[str, str, str, str, str, dict]:
     return os_type2, arch, os_version2, vs_path2, ninja_path2, developer_env2
 
 
-def init_environment(script_file_path, yes_flag=False):
+def init_environment(script_file_path, yes_flag):
     """
     Initialize the environment and global state.
 
