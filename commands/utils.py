@@ -104,7 +104,7 @@ def get_repo_name_from_path(path: Union[str, Path]) -> Optional[str]:
     try:
         src_root = (Path(g.script_directory) / "src").resolve(strict=False)
         rel_path = Path(path).resolve(strict=False).relative_to(src_root)
-    except Exception:
+    except ValueError:
         return None
 
     parts = rel_path.parts
