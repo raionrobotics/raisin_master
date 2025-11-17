@@ -38,7 +38,7 @@ def init_globals(**kwargs):
         developer_env: Developer environment variables (Windows)
     """
     global os_type, architecture, os_version, script_directory
-    global ninja_path, visual_studio_path, developer_env
+    global ninja_path, visual_studio_path, developer_env, always_yes
 
     os_type = kwargs.get("os_type", "")
     architecture = kwargs.get("architecture", "")
@@ -47,3 +47,4 @@ def init_globals(**kwargs):
     ninja_path = kwargs.get("ninja_path", "")
     visual_studio_path = kwargs.get("visual_studio_path", "")
     developer_env = kwargs.get("developer_env", {})
+    always_yes = kwargs.get("always_yes", False)
