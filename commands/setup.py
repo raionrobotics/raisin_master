@@ -1484,6 +1484,8 @@ def deploy_install_packages():
         g.script_directory (str): The absolute path to the base directory.
     """
 
+    repos_to_ignore = set(get_repos_to_ignore())
+
     # Create a glob pattern to find all build directories for the current system
     # e.g., .../release/install/*/linux/x86_64/*
     source_pattern = os.path.join(
@@ -1516,15 +1518,16 @@ def deploy_install_packages():
             if not os.path.isdir(source_dir):
                 continue
 
-            if os.path.isdir(
-                Path(g.script_directory) / "src" / Path(source_dir).parts[-5]
-            ):
-                continue
-
             # Use pathlib to easily get the 'target' name from the path
             # The path is .../install/{target}/{os}/{g.os_version}/{arch}/{build_type}
             p = Path(source_dir)
             target_name = p.parents[3].name
+            local_src_dir = Path(g.script_directory) / "src" / target_name
+            if local_src_dir.is_dir():
+                repo_name = get_repo_name_from_path(local_src_dir) or target_name
+                if repo_name not in repos_to_ignore:
+                    continue
+
             final_dest_dir = os.path.join(g.script_directory, "install")
             generated_dest_dir = os.path.join(g.script_directory, "generated")
 
