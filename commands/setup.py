@@ -21,7 +21,11 @@ from typing import List, Tuple, Dict, Any, Set, Optional
 # Import globals, constants, and utilities
 from commands import globals as g
 from commands.constants import Colors, TYPE_MAPPING, STRING_TYPES
-from commands.utils import load_configuration, delete_directory
+from commands.utils import (
+    load_configuration,
+    delete_directory,
+    get_repo_name_from_path,
+)
 
 
 # ============================================================================
@@ -63,9 +67,20 @@ def process_build_targets(targets):
     based on the requested targets.
     """
     script_directory = g.script_directory
+    repos_to_ignore = set(get_repos_to_ignore())
 
     # Check if targets specify a directory path
     if len(targets) > 1 and (Path(script_directory) / "src" / targets[0]).exists():
+        repo_name = get_repo_name_from_path(
+            Path(script_directory) / "src" / targets[0]
+        )
+        if repo_name and repo_name in repos_to_ignore:
+            click.echo(
+                f"⚠️  Repository '{repo_name}' is configured to be ignored. Skipping."
+            )
+            g.build_pattern = []
+            return
+
         g.build_pattern = [
             name
             for name in os.listdir(Path(script_directory) / "src" / targets[0])
@@ -80,6 +95,10 @@ def process_build_targets(targets):
         )
 
         for filepath in glob.glob(yaml_search_path, recursive=True):
+            repo_name = get_repo_name_from_path(filepath)
+            if repo_name and repo_name in repos_to_ignore:
+                continue
+
             with open(filepath, "r") as f:
                 try:
                     yaml_content = yaml.safe_load(f)
@@ -407,7 +426,9 @@ def find_topic_directories(search_directories):
     return topic_directories
 
 
-def find_project_directories(search_directories, install_dir, packages_to_ignore=None):
+def find_project_directories(
+    search_directories, install_dir, packages_to_ignore=None, repos_to_ignore=None
+):
     """
     Search for all subdirectories in <g.script_directory> containing 'CMakeLists.txt'.
     Return a list of these directories.
@@ -420,6 +441,7 @@ def find_project_directories(search_directories, install_dir, packages_to_ignore
 
     if packages_to_ignore is None:
         packages_to_ignore = []
+    repo_ignore_set = set(repos_to_ignore or [])
     project_directories = []
 
     # Walk through the specified directories
@@ -427,6 +449,11 @@ def find_project_directories(search_directories, install_dir, packages_to_ignore
         search_path = os.path.join(g.script_directory, search_dir)
 
         for root, dirs, files in os.walk(search_path):
+            if repo_ignore_set:
+                repo_name = get_repo_name_from_path(root)
+                if repo_name and repo_name in repo_ignore_set:
+                    dirs.clear()
+                    continue
             project_name = os.path.basename(root)
             if project_name in packages_to_ignore:
                 dirs.clear()
@@ -465,7 +492,12 @@ def find_project_directories(search_directories, install_dir, packages_to_ignore
     return project_directories
 
 
-def find_interface_files(search_directories, interface_types, packages_to_ignore=None):
+def find_interface_files(
+    search_directories,
+    interface_types,
+    packages_to_ignore=None,
+    repos_to_ignore=None,
+):
     """
     Finds ROS interface files (e.g., .action, .msg, .srv) in specified directories.
 
@@ -481,6 +513,7 @@ def find_interface_files(search_directories, interface_types, packages_to_ignore
     """
     if packages_to_ignore is None:
         packages_to_ignore = []
+    repo_ignore_set = set(repos_to_ignore or [])
 
     # This dictionary maps an interface type (e.g., 'action') to its file extension
     # and the list where its found files will be stored.
@@ -494,6 +527,11 @@ def find_interface_files(search_directories, interface_types, packages_to_ignore
             continue
 
         for root, dirs, files in os.walk(search_path):
+            if repo_ignore_set:
+                repo_name = get_repo_name_from_path(root)
+                if repo_name and repo_name in repo_ignore_set:
+                    dirs.clear()
+                    continue
             # Prune the search if the package directory should be ignored
             if os.path.basename(root) in packages_to_ignore:
                 dirs.clear()
@@ -1123,7 +1161,7 @@ def get_packages_to_ignore():
 
     # Get packages from configuration_setting.yaml
     try:
-        _, _, _, config_ignore = load_configuration()
+        _, _, _, config_ignore, _ = load_configuration()
         ignore_packages.extend(config_ignore)
     except Exception:
         pass  # If configuration loading fails, continue with file-based approach
@@ -1147,6 +1185,33 @@ def get_packages_to_ignore():
 
     # Remove duplicates while preserving order
     return list(dict.fromkeys(ignore_packages))
+
+
+def get_repos_to_ignore():
+    """
+    Gets repositories to ignore from configuration_setting.yaml.
+
+    Returns:
+        list: Names of src/ subdirectories to skip entirely.
+    """
+    try:
+        _, _, _, _, repos_to_ignore = load_configuration()
+        return repos_to_ignore or []
+    except Exception:
+        return []
+
+
+def _print_ignore_lists(packages_to_ignore, repos_to_ignore):
+    """
+    Display the currently configured package/repo ignore lists.
+    """
+    def format_list(items):
+        return ", ".join(sorted(items)) if items else "none"
+
+    click.echo(
+        f"🚫 packages_to_ignore: {format_list(packages_to_ignore)} | "
+        f"repos_to_ignore: {format_list(repos_to_ignore)}"
+    )
 
 
 def find_git_repos(base_dir):
@@ -1360,7 +1425,7 @@ def copy_resource(install_dir):
                     shutil.copy2(s, d)
 
 
-def copy_installers(src_dir, install_dir) -> int:
+def copy_installers(src_dir, install_dir, repos_to_ignore=None) -> int:
     """
     Scan <g.script_directory>/src/*/ for install_dependencies.sh files and copy
     each one to <g.script_directory>/install/<subdir>/install_dependencies.sh.
@@ -1378,6 +1443,7 @@ def copy_installers(src_dir, install_dir) -> int:
     script_dir = Path(g.script_directory).expanduser().resolve()
     dst_root = script_dir / install_dir
     src_root = Path(g.script_directory) / src_dir
+    repo_ignore_set = set(repos_to_ignore or [])
 
     copied = 0
     if not src_root.is_dir():  # not building from source
@@ -1387,6 +1453,10 @@ def copy_installers(src_dir, install_dir) -> int:
     for child in src_root.iterdir():
         if not child.is_dir():
             continue  # skip non-directories
+        if repo_ignore_set:
+            repo_name = get_repo_name_from_path(child)
+            if repo_name and repo_name in repo_ignore_set:
+                continue
         src_installer = child / "install_dependencies.sh"
         if not src_installer.is_file():
             continue  # nothing to copy in this subdir
@@ -1506,7 +1576,7 @@ def deploy_install_packages():
         print(f"❌ An error occurred during deployment: {e}")
 
 
-def collect_src_vcpkg_dependencies():
+def collect_src_vcpkg_dependencies(repos_to_ignore=None):
     """
     Scans subdirectories in '{g.script_directory}/src' for 'release.yaml' files.
 
@@ -1518,6 +1588,7 @@ def collect_src_vcpkg_dependencies():
         set: A set containing all unique vcpkg dependency strings found.
     """
     src_path = Path(g.script_directory) / "src"
+    repo_ignore_set = set(repos_to_ignore or [])
     if not src_path.is_dir():
         print(f"🤷 Source directory not found at: {src_path}")
         return
@@ -1529,6 +1600,10 @@ def collect_src_vcpkg_dependencies():
         # Process only if the item is a directory
         if not project_dir.is_dir():
             continue
+        if repo_ignore_set:
+            repo_name = get_repo_name_from_path(project_dir)
+            if repo_name and repo_name in repo_ignore_set:
+                continue
 
         release_yaml_path = project_dir / "release.yaml"
 
@@ -1611,7 +1686,8 @@ def guard_require_version_bump_for_src_packages():
     script_dir = Path(g.script_directory)
     src_dir = script_dir / "src"
 
-    repositories, tokens, user_type, _ = load_configuration()
+    repositories, tokens, user_type, _, repos_to_ignore = load_configuration()
+    repo_ignore_set = set(repos_to_ignore or [])
 
     if not src_dir.is_dir():
         return  # nothing to check
@@ -1619,6 +1695,8 @@ def guard_require_version_bump_for_src_packages():
     violations = []
 
     for pkg_dir in sorted([p for p in src_dir.iterdir() if p.is_dir()]):
+        if repo_ignore_set and pkg_dir.name in repo_ignore_set:
+            continue
         package_name = pkg_dir.name
         release_yaml = pkg_dir / "release.yaml"
         if not release_yaml.is_file():
@@ -1783,11 +1861,15 @@ def setup(package_name="", build_type="", build_dir=""):
         os.makedirs(build_dir, exist_ok=True)
 
     packages_to_ignore = get_packages_to_ignore()
+    repos_to_ignore = get_repos_to_ignore()
+    _print_ignore_lists(packages_to_ignore, repos_to_ignore)
 
-    action_files = find_interface_files(["src"], ["action"], packages_to_ignore)[0]
+    action_files = find_interface_files(
+        ["src"], ["action"], packages_to_ignore, repos_to_ignore
+    )[0]
 
     project_directories = find_project_directories(
-        [src_dir], install_dir, packages_to_ignore
+        [src_dir], install_dir, packages_to_ignore, repos_to_ignore
     )
 
     # Handle .action files
@@ -1795,7 +1877,7 @@ def setup(package_name="", build_type="", build_dir=""):
         create_action_file(action_file, Path(action_file).parent.parent, install_dir)
 
     msg_files, srv_files = find_interface_files(
-        ["src", "temp"], ["msg", "srv"], packages_to_ignore
+        ["src", "temp"], ["msg", "srv"], packages_to_ignore, repos_to_ignore
     )
 
     # Handle .msg files
@@ -1809,7 +1891,7 @@ def setup(package_name="", build_type="", build_dir=""):
     # Update the CMakeLists.txt based on the template
     update_cmake_file(project_directories, build_dir)
 
-    copy_installers(src_dir, install_dir)
+    copy_installers(src_dir, install_dir, repos_to_ignore)
 
     if package_name == "":  # this means we are not in the release mode
         copy_resource(install_dir)
@@ -1874,8 +1956,9 @@ def setup(package_name="", build_type="", build_dir=""):
         Path(g.script_directory) / "install/install_dependencies.sh",
     )
 
-    collect_src_vcpkg_dependencies()
+    collect_src_vcpkg_dependencies(repos_to_ignore)
     generate_vcpkg_json()
+    click.secho("✅ Setup finished successfully.", fg="green")
 
 
 def _repo_slug_from_cfg(

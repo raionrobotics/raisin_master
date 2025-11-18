@@ -78,7 +78,7 @@ def _ensure_github_token():
     # Import here to avoid circular dependency
     from commands.install import load_configuration
 
-    _, tokens, _, _ = load_configuration()
+    _, tokens, _, _, _ = load_configuration()
     return tokens
 
 
