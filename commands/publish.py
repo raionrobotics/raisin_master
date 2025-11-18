@@ -350,7 +350,13 @@ def publish(target, build_type):
     show_default=True,
     help="Build type",
 )
-def publish_command(target, build_type):
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Auto-confirm all prompts (e.g., overwriting release assets)",
+)
+def publish_command(target, build_type, yes):
     """
     Build, package, and upload a release to GitHub.
 
@@ -363,5 +369,9 @@ def publish_command(target, build_type):
     \b
     Note: Previously called 'release' command.
     """
+    if yes:
+        click.echo("⚠️  Auto-confirm enabled: All prompts will be accepted.")
+        g.always_yes = True
+
     click.echo(f"📦 Publishing {target} ({build_type} build)...")
     publish(target, build_type)
