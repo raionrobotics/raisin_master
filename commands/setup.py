@@ -71,9 +71,7 @@ def process_build_targets(targets):
 
     # Check if targets specify a directory path
     if len(targets) > 1 and (Path(script_directory) / "src" / targets[0]).exists():
-        repo_name = get_repo_name_from_path(
-            Path(script_directory) / "src" / targets[0]
-        )
+        repo_name = get_repo_name_from_path(Path(script_directory) / "src" / targets[0])
         if repo_name and repo_name in repos_to_ignore:
             click.echo(
                 f"⚠️  Repository '{repo_name}' is configured to be ignored. Skipping."
@@ -1205,6 +1203,7 @@ def _print_ignore_lists(packages_to_ignore, repos_to_ignore):
     """
     Display the currently configured package/repo ignore lists.
     """
+
     def format_list(items):
         return ", ".join(sorted(items)) if items else "none"
 
