@@ -25,7 +25,7 @@ from commands.setup import (
 )
 
 
-def publish(target, build_type):
+def publish(target, build_type, skip_confirm=False):
     """
     Builds the project, creates a release archive, and uploads it to GitHub,
     prompting for overwrite if the asset already exists.
@@ -261,8 +261,8 @@ def publish(target, build_type):
                     f"✅ Successfully created new release and uploaded '{archive_filename}'."
                 )
             elif asset_exists:
-                should_overwrite = g.always_yes or release_is_prerelease
-                if release_is_prerelease and not g.always_yes:
+                should_overwrite = skip_confirm or release_is_prerelease
+                if release_is_prerelease and not skip_confirm:
                     print(
                         "ℹ️ Release is marked as prerelease; overwriting existing asset without confirmation."
                     )
@@ -371,7 +371,7 @@ def publish_command(target, build_type, yes):
     """
     if yes:
         click.echo("⚠️  Auto-confirm enabled: All prompts will be accepted.")
-        g.always_yes = True
+        skip_confirm = True
 
     click.echo(f"📦 Publishing {target} ({build_type} build)...")
-    publish(target, build_type)
+    publish(target, build_type, skip_confirm)
