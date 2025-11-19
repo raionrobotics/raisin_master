@@ -369,6 +369,7 @@ def publish_command(target, build_type, yes):
     \b
     Note: Previously called 'release' command.
     """
+    skip_confirm = False
     if yes:
         click.echo("⚠️  Auto-confirm enabled: All prompts will be accepted.")
         skip_confirm = True
