@@ -20,9 +20,6 @@ visual_studio_path = ""
 developer_env = dict()
 vcpkg_dependencies = set()
 
-# CLI flags
-always_yes = False
-
 
 def init_globals(**kwargs):
     """
@@ -36,10 +33,9 @@ def init_globals(**kwargs):
         ninja_path: Path to ninja (Windows)
         visual_studio_path: Path to Visual Studio (Windows)
         developer_env: Developer environment variables (Windows)
-        always_yes: always yes to all prompts
     """
     global os_type, architecture, os_version, script_directory
-    global ninja_path, visual_studio_path, developer_env, always_yes
+    global ninja_path, visual_studio_path, developer_env
 
     os_type = kwargs.get("os_type", "")
     architecture = kwargs.get("architecture", "")
@@ -48,4 +44,3 @@ def init_globals(**kwargs):
     ninja_path = kwargs.get("ninja_path", "")
     visual_studio_path = kwargs.get("visual_studio_path", "")
     developer_env = kwargs.get("developer_env", {})
-    always_yes = kwargs.get("always_yes", False)
