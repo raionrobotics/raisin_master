@@ -1554,6 +1554,14 @@ def deploy_install_packages():
 
             # Copy contents, merging files from different build_types
             shutil.copytree(source_dir, final_dest_dir, dirs_exist_ok=True)
+            
+            # Make all copied files executable
+            bin_path = os.path.join(final_dest_dir, "bin")
+            if os.path.exists(bin_path):
+                for root, dirs, files in os.walk(bin_path):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        os.chmod(file_path, 0o755)
 
             if (p / "generated").is_dir():
                 shutil.copytree(p / "generated", generated_dest_dir, dirs_exist_ok=True)
