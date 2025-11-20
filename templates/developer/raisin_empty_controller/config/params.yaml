@@ -1,13 +1,6 @@
-joint_p_gain:
-  value: 500.0
-  dtype: double
-
-joint_d_gain:
-  value: 1.0
-  dtype: double
+joint_p_gain: 500.0
+joint_d_gain: 1.0
 
 plugin:
   raisin_example_plugin: # plugin package name
-    rate:
-      value: 1000 # loop frequency
-      dtype: double
+    rate: 1000 # loop frequency
