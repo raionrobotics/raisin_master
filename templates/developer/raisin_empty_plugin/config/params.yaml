@@ -1,3 +1,2 @@
-thread_group:
-  value: plugin
-  dtype: string
+thread_group: plugin
+allow_multiple_instances: false

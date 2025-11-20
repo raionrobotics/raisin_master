@@ -1,12 +1,5 @@
-test_string:
-  value: hello
-  dtype: string
-  options: [hello, goodbye]
-test_double:
-  value: 5.3
-  dtype: double
-  min: 3
-  max: 5
+test_string: hello
+test_double: 5.3
 test_int: 3
 test_bool: true
 test_vec_double: [1,2,3]
