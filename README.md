@@ -164,6 +164,12 @@ python3 raisin.py git pull
 # Pull from specific remote
 python3 raisin.py git pull --remote upstream
 
+# Fetch from a remote for all src repositories (default: origin)
+python3 raisin.py git fetch --remote origin
+
+# Checkout an existing branch across all repositories in src (skips if missing)
+python3 raisin.py git checkout --branch feature-branch
+
 # Setup git remotes
 python3 raisin.py git setup origin:raionrobotics dev:yourusername
 ```

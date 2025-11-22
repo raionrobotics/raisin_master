@@ -250,6 +250,25 @@ def _get_local_changes(cwd):
     return ", ".join(parts)
 
 
+def _find_src_git_repos(base_directory=None):
+    """
+    Locate git repositories directly under the src/ directory.
+    """
+    base_directory = base_directory or os.getcwd()
+    repo_paths = []
+
+    src_path = os.path.join(base_directory, "src")
+    if not os.path.isdir(src_path):
+        return repo_paths
+
+    for dir_name in os.listdir(src_path):
+        repo_path = os.path.join(src_path, dir_name)
+        if os.path.isdir(os.path.join(repo_path, ".git")):
+            repo_paths.append(repo_path)
+
+    return repo_paths
+
+
 def process_repo(repo_path, pull_mode, origin="origin"):
     """
     Processes a single Git repository.
@@ -406,12 +425,7 @@ def manage_git_repos(pull_mode, origin="origin"):
     if os.path.isdir(os.path.join(current_dir, ".git")):
         repo_paths.append(current_dir)
 
-    src_path = os.path.join(current_dir, "src")
-    if os.path.isdir(src_path):
-        for dir_name in os.listdir(src_path):
-            repo_path = os.path.join(src_path, dir_name)
-            if os.path.isdir(os.path.join(repo_path, ".git")):
-                repo_paths.append(repo_path)
+    repo_paths.extend(_find_src_git_repos(current_dir))
 
     if not repo_paths:
         print("No Git repositories found.")
@@ -620,6 +634,8 @@ def git_group():
         raisin git status                    # Show status of all repos
         raisin git pull                      # Pull all repos from origin
         raisin git pull --remote upstream    # Pull from upstream
+        raisin git fetch --remote origin     # Fetch from origin
+        raisin git checkout --branch feature # Checkout/create branch in src repos
         raisin git setup main:user1 dev:user2  # Setup remotes
     """
     pass
@@ -669,3 +685,111 @@ def git_setup_cli(remotes):
     """
     remotes = list(remotes)
     git_setup_remotes_command(remotes)
+
+
+@git_group.command("checkout")
+@click.option(
+    "--branch",
+    "-b",
+    required=True,
+    help="Branch to checkout or create across repositories in src/",
+)
+def git_checkout_cli(branch):
+    """
+    Checkout an existing branch for all repositories under src (skips if missing).
+
+    \b
+    Examples:
+        raisin git checkout --branch feature-123
+        raisin git checkout -b hotfix/login-redirect
+    """
+    git_checkout_command(branch)
+
+
+@git_group.command("fetch")
+@click.option(
+    "--remote",
+    "-r",
+    default="origin",
+    show_default=True,
+    help="Remote to fetch from for repositories in src/",
+)
+def git_fetch_cli(remote):
+    """
+    Fetch updates from a remote for all repositories under src/.
+
+    \b
+    Examples:
+        raisin git fetch --remote origin
+        raisin git fetch -r upstream
+    """
+    git_fetch_command(remote=remote)
+
+
+def git_checkout_command(branch):
+    """
+    Checkout an existing branch across all repositories in src/.
+    """
+    base_directory = g.script_directory or os.getcwd()
+    repo_paths = _find_src_git_repos(base_directory)
+
+    if not repo_paths:
+        print("No Git repositories found in 'src'.")
+        return
+
+    print(f"Checking out existing branch '{branch}' across repositories in 'src'...")
+    for repo_path in repo_paths:
+        repo_name = os.path.basename(repo_path)
+
+        # Check if the branch already exists locally
+        branch_exists = False
+        try:
+            subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            branch_exists = True
+        except subprocess.CalledProcessError:
+            branch_exists = False
+        except FileNotFoundError:
+            print(f"❌ {repo_name}: Git command not found.")
+            continue
+
+        if branch_exists:
+            result = _run_git_command(["git", "checkout", branch], repo_path)
+            default_message = f"Checked out branch '{branch}'."
+        else:
+            print(f"⚠️ {repo_name}: Branch '{branch}' not found locally. Skipping.")
+            continue
+
+        if result is None:
+            print(f"❌ {repo_name}: Checkout failed.")
+        else:
+            message = result.splitlines()[-1] if result else default_message
+            print(f"✅ {repo_name}: {message}")
+
+
+def git_fetch_command(remote="origin"):
+    """
+    Fetch updates from the specified remote for all repositories in src/.
+    """
+    base_directory = g.script_directory or os.getcwd()
+    repo_paths = _find_src_git_repos(base_directory)
+
+    if not repo_paths:
+        print("No Git repositories found in 'src'.")
+        return
+
+    print(f"Fetching from '{remote}' across repositories in 'src'...")
+    for repo_path in repo_paths:
+        repo_name = os.path.basename(repo_path)
+        result = _run_git_command(["git", "fetch", remote], repo_path)
+        if result is None:
+            print(f"❌ {repo_name}: Fetch failed.")
+        else:
+            message = result.splitlines()[-1] if result else "Fetch completed."
+            print(f"✅ {repo_name}: {message}")
