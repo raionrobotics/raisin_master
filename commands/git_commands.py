@@ -254,20 +254,15 @@ def _find_src_git_repos(base_directory=None):
     """
     Locate git repositories directly under the src/ directory.
     """
-    base_directory = base_directory or os.getcwd()
-    repo_paths = []
-
-    src_path = os.path.join(base_directory, "src")
-    if not os.path.isdir(src_path):
-        return repo_paths
-
-    for dir_name in os.listdir(src_path):
-        repo_path = os.path.join(src_path, dir_name)
-        if os.path.isdir(os.path.join(repo_path, ".git")):
-            repo_paths.append(repo_path)
-
-    return repo_paths
-
+    base_dir = Path(base_directory or os.getcwd())
+    src_path = base_dir / "src"
+    if not src_path.is_dir():
+        return []
+    return [
+        str(repo_path)
+        for repo_path in src_path.iterdir()
+        if repo_path.is_dir() and (repo_path / ".git").is_dir()
+    ]
 
 def process_repo(repo_path, pull_mode, origin="origin"):
     """
@@ -635,7 +630,7 @@ def git_group():
         raisin git pull                      # Pull all repos from origin
         raisin git pull --remote upstream    # Pull from upstream
         raisin git fetch --remote origin     # Fetch from origin
-        raisin git checkout --branch feature # Checkout/create branch in src repos
+        raisin git checkout --branch feature # Checkout existing branch in src repos
         raisin git setup main:user1 dev:user2  # Setup remotes
     """
     pass
@@ -696,7 +691,7 @@ def git_setup_cli(remotes):
 )
 def git_checkout_cli(branch):
     """
-    Checkout an existing branch for all repositories under src (skips if missing).
+    Checkout a branch for all repositories under src (creates it if missing).
 
     \b
     Examples:
@@ -722,13 +717,74 @@ def git_fetch_cli(remote):
     Examples:
         raisin git fetch --remote origin
         raisin git fetch -r upstream
+        raisin git delete-branch --branch old-feature
+        raisin git list-branches
+        raisin git push-current --remote origin
     """
     git_fetch_command(remote=remote)
 
 
+@git_group.command("delete-branch")
+@click.option(
+    "--branch",
+    "-b",
+    required=True,
+    help="Branch to delete across repositories in src/",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Force delete unmerged branch (uses 'git branch -D')",
+)
+def git_delete_branch_cli(branch, force):
+    """
+    Delete a local branch across all repositories under src/.
+
+    \b
+    Examples:
+        raisin git delete-branch --branch old-feature
+        raisin git delete-branch -b wip/api -f
+    """
+    git_delete_branch_command(branch=branch, force=force)
+
+
+@git_group.command("list-branches")
+def git_list_branches_cli():
+    """
+    List local branches across all repositories under src/.
+
+    \b
+    Examples:
+        raisin git list-branches
+    """
+    git_list_branches_command()
+
+
+@git_group.command("push-current")
+@click.option(
+    "--remote",
+    "-r",
+    default="origin",
+    show_default=True,
+    help="Remote to push current branch to",
+)
+def git_push_current_cli(remote):
+    """
+    Push the current branch to the same branch name on the specified remote
+    for all repositories under src/.
+
+    \b
+    Examples:
+        raisin git push-current --remote origin
+        raisin git push-current -r upstream
+    """
+    git_push_current_command(remote=remote)
+
+
 def git_checkout_command(branch):
     """
-    Checkout an existing branch across all repositories in src/.
+    Checkout a branch across all repositories in src, creating it locally if needed.
     """
     base_directory = g.script_directory or os.getcwd()
     repo_paths = _find_src_git_repos(base_directory)
@@ -737,40 +793,34 @@ def git_checkout_command(branch):
         print("No Git repositories found in 'src'.")
         return
 
-    print(f"Checking out existing branch '{branch}' across repositories in 'src'...")
+    print(f"Checking out branch '{branch}' across repositories in 'src'...")
     for repo_path in repo_paths:
         repo_name = os.path.basename(repo_path)
 
         # Check if the branch already exists locally
-        branch_exists = False
+        # Check if the branch already exists locally and check it out
         try:
             subprocess.run(
                 ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
                 cwd=repo_path,
                 check=True,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
             )
-            branch_exists = True
+            # Branch exists, so check it out
+            result = _run_git_command(["git", "checkout", branch], repo_path)
+            if result is None:
+                print(f"❌ {repo_name}: Checkout failed.")
+            else:
+                default_message = f"Checked out branch '{branch}'."
+                message = result.splitlines()[-1] if result else default_message
+                print(f"✅ {repo_name}: {message}")
         except subprocess.CalledProcessError:
-            branch_exists = False
+            # This means the branch does not exist
+            print(f"⚠️ {repo_name}: Branch '{branch}' not found locally. Skipping.")
+            continue
         except FileNotFoundError:
             print(f"❌ {repo_name}: Git command not found.")
             continue
-
-        if branch_exists:
-            result = _run_git_command(["git", "checkout", branch], repo_path)
-            default_message = f"Checked out branch '{branch}'."
-        else:
-            print(f"⚠️ {repo_name}: Branch '{branch}' not found locally. Skipping.")
-            continue
-
-        if result is None:
-            print(f"❌ {repo_name}: Checkout failed.")
-        else:
-            message = result.splitlines()[-1] if result else default_message
-            print(f"✅ {repo_name}: {message}")
 
 
 def git_fetch_command(remote="origin"):
@@ -792,4 +842,144 @@ def git_fetch_command(remote="origin"):
             print(f"❌ {repo_name}: Fetch failed.")
         else:
             message = result.splitlines()[-1] if result else "Fetch completed."
+            print(f"✅ {repo_name}: {message}")
+
+
+def git_delete_branch_command(branch, force=False):
+    """
+    Delete a local branch across all repositories in src/.
+
+    Args:
+        branch (str): Branch name to delete.
+        force (bool): Use -D to force delete even if not fully merged.
+    """
+    base_directory = g.script_directory or os.getcwd()
+    repo_paths = _find_src_git_repos(base_directory)
+
+    if not repo_paths:
+        print("No Git repositories found in 'src'.")
+        return
+
+    flag = "-D" if force else "-d"
+    print(
+        f"Deleting branch '{branch}' ({flag}) across repositories in 'src'..."
+    )
+
+    for repo_path in repo_paths:
+        repo_name = os.path.basename(repo_path)
+
+        # Determine current branch to avoid deleting the active one
+        current_branch = _run_git_command(
+            ["git", "symbolic-ref", "--short", "HEAD"], repo_path
+        )
+        if current_branch is None:
+            print(f"❌ {repo_name}: Unable to determine current branch. Skipping.")
+            continue
+        if current_branch == branch:
+            print(f"⚠️ {repo_name}: Branch '{branch}' is currently checked out. Skipping.")
+            continue
+
+        # Check if branch exists locally
+        try:
+            subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            branch_exists = True
+        except subprocess.CalledProcessError:
+            branch_exists = False
+        except FileNotFoundError:
+            print(f"❌ {repo_name}: Git command not found.")
+            continue
+
+        if not branch_exists:
+            print(f"⚠️ {repo_name}: Branch '{branch}' not found locally. Skipping.")
+            continue
+
+        result = _run_git_command(["git", "branch", flag, branch], repo_path)
+        if result is None:
+            print(f"❌ {repo_name}: Failed to delete branch '{branch}'.")
+        else:
+            message = result.splitlines()[-1] if result else f"Deleted '{branch}'."
+            print(f"✅ {repo_name}: {message}")
+
+
+def git_list_branches_command():
+    """
+    List local branches for all repositories in src/.
+    """
+    base_directory = g.script_directory or os.getcwd()
+    repo_paths = _find_src_git_repos(base_directory)
+
+    if not repo_paths:
+        print("No Git repositories found in 'src'.")
+        return
+
+    print("Listing local branches for repositories in 'src'...")
+    for repo_path in repo_paths:
+        repo_name = os.path.basename(repo_path)
+
+        current_branch = _run_git_command(
+            ["git", "symbolic-ref", "--short", "HEAD"], repo_path
+        )
+        result = _run_git_command(
+            ["git", "branch", "--format", "%(refname:short)"], repo_path
+        )
+        if result is None:
+            print(f"❌ {repo_name}: Failed to list branches.")
+            continue
+
+        branches = [b.strip() for b in result.splitlines() if b.strip()]
+        if branches:
+            formatted = []
+            for b in branches:
+                if current_branch and b == current_branch:
+                    formatted.append(click.style(b, fg="green"))
+                else:
+                    formatted.append(b)
+            print(f"✅ {repo_name}: {', '.join(formatted)}")
+        else:
+            print(f"⚠️ {repo_name}: No local branches found.")
+
+
+def git_push_current_command(remote="origin"):
+    """
+    Push the current branch to the same branch name on the specified remote
+    across all repositories in src/.
+    """
+    base_directory = g.script_directory or os.getcwd()
+    repo_paths = _find_src_git_repos(base_directory)
+
+    if not repo_paths:
+        print("No Git repositories found in 'src'.")
+        return
+
+    print(f"Pushing current branches to remote '{remote}' across repositories in 'src'...")
+    for repo_path in repo_paths:
+        repo_name = os.path.basename(repo_path)
+
+        current_branch = _run_git_command(
+            ["git", "symbolic-ref", "--short", "HEAD"], repo_path
+        )
+        if not current_branch:
+            print(f"⚠️ {repo_name}: Detached HEAD or unable to detect current branch. Skipping.")
+            continue
+
+        # Verify remote exists
+        remote_check = _run_git_command(["git", "remote", "get-url", remote], repo_path)
+        if remote_check is None:
+            print(f"⚠️ {repo_name}: Remote '{remote}' not found. Skipping.")
+            continue
+
+        result = _run_git_command(
+            ["git", "push", remote, f"{current_branch}:{current_branch}"], repo_path
+        )
+        if result is None:
+            print(f"❌ {repo_name}: Push failed.")
+        else:
+            message = result.splitlines()[-1] if result else "Push completed."
             print(f"✅ {repo_name}: {message}")
