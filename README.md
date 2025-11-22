@@ -164,6 +164,22 @@ python3 raisin.py git pull
 # Pull from specific remote
 python3 raisin.py git pull --remote upstream
 
+# Fetch from a remote for all src repositories (default: origin)
+python3 raisin.py git fetch --remote origin
+
+# Checkout or create a branch across all repositories in src
+python3 raisin.py git checkout --branch feature-branch
+
+# Delete a local branch across all repositories in src (use -f to force)
+python3 raisin.py git delete-branch --branch old-feature
+python3 raisin.py git delete-branch -b old-feature -f
+
+# List local branches for all repositories in src
+python3 raisin.py git list-branches
+
+# Push the current branch to the same branch name on a remote for all src repositories
+python3 raisin.py git push-current --remote origin
+
 # Setup git remotes
 python3 raisin.py git setup origin:raionrobotics dev:yourusername
 ```
