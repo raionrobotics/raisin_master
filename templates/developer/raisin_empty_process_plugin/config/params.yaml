@@ -1,4 +1,7 @@
 thread_group: plugin
+allow_multiple_instances: false
 is_loadable: true
 is_unloadable: true
 rate: 0
+run_separate_process: true
+publish_rate_hz: 10.0
