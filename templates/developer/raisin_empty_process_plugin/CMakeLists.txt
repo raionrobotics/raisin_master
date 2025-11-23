@@ -31,6 +31,12 @@ install(
 )
 
 add_executable(${PROJECT_NAME}_process src/empty_process.cpp)
+target_include_directories(${PROJECT_NAME}_process
+        PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${RAISIN_MASTER_INCLUDE}> ## headers for the message files
+        $<INSTALL_INTERFACE:include>
+)
 target_link_libraries(${PROJECT_NAME}_process PRIVATE raisin_network)
 install(
         TARGETS ${PROJECT_NAME}_process

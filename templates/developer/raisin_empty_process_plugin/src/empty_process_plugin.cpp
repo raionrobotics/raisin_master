@@ -6,6 +6,7 @@
 // All rights reserved.
 
 #include "raisin_empty_process_plugin/empty_process_plugin.hpp"
+#include "raisin_empty_process_plugin/publisher_node.hpp"
 
 namespace raisin
 {
@@ -16,10 +17,15 @@ namespace plugin
 empty_processPlugin::empty_processPlugin(
   raisim::World & world, raisim::RaisimServer & server,
   raisim::World & worldSim, raisim::RaisimServer & serverSim, GlobalResource & globalResource)
-: Node(globalResource.network), Plugin(world, server, worldSim, serverSim, globalResource),
-  process_("raisin_empty_process_plugin", "raisin_empty_process_plugin_process")
+: Plugin(world, server, worldSim, serverSim, globalResource),
+  Node("raisin_empty_process_plugin", globalResource.paramRoot, globalResource.network)
 {
   pluginType_ = PluginType::CUSTOM;
+
+  if (param_) {
+    runSeparateProcess_ = static_cast<bool>((*param_)("run_separate_process", true));
+    publishRateHz_ = static_cast<double>((*param_)("publish_rate_hz", 10.0));
+  }
 }
 
 empty_processPlugin::~empty_processPlugin()
@@ -29,6 +35,14 @@ empty_processPlugin::~empty_processPlugin()
 
 bool empty_processPlugin::init()
 {
+  if (!runSeparateProcess_) {
+    inlinePublisher_ =
+      std::make_unique<empty_process::PublisherNode>(*this, publishRateHz_);
+  } else {
+    process_ = std::make_unique<Process>(
+      "raisin_empty_process_plugin", "raisin_empty_process_plugin_process");
+  }
+
   return true;
 }
 
@@ -44,7 +58,11 @@ bool empty_processPlugin::reset()
 
 bool empty_processPlugin::shouldTerminate()
 {
-  return !process_.isAlive();
+  if (runSeparateProcess_ && process_) {
+    return !process_->isAlive();
+  }
+
+  return false;
 }
 
 
