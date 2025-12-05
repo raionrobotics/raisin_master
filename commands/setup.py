@@ -1213,6 +1213,181 @@ def _print_ignore_lists(packages_to_ignore, repos_to_ignore):
     )
 
 
+def _discover_pure_cmake_projects(
+    package_name, packages_to_ignore=None, repos_to_ignore=None
+):
+    """
+    Read release.yaml files to find pure CMake projects that should be built up front.
+    """
+    packages_to_ignore = set(packages_to_ignore or [])
+    repo_ignore_set = set(repos_to_ignore or [])
+    src_root = Path(g.script_directory) / "src"
+    if not src_root.is_dir():
+        return []
+
+    if package_name:
+        repo_dirs = [src_root / package_name] if (src_root / package_name).is_dir() else []
+        if not repo_dirs:
+            click.echo(
+                f"⚠️  pure_cmake: package '{package_name}' not found under src/. Skipping pure_cmake scan.",
+                err=True
+            )
+            return []
+    else:
+        repo_dirs = [p for p in src_root.iterdir() if p.is_dir()]
+
+    projects = []
+
+    for repo_dir in repo_dirs:
+        repo_name = repo_dir.name
+        if repo_ignore_set and repo_name in repo_ignore_set:
+            continue
+
+        release_yaml = repo_dir / "release.yaml"
+        if not release_yaml.is_file():
+            continue
+
+        try:
+            with open(release_yaml, "r", encoding="utf-8") as f:
+                release_info = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            print(f"⚠️  Warning: Could not parse {release_yaml}: {e}")
+            continue
+
+        pure_cmake_entries = release_info.get("pure_cmake") or []
+        if not pure_cmake_entries:
+            continue
+        if not isinstance(pure_cmake_entries, list):
+            print(
+                f"⚠️  Warning: 'pure_cmake' in {release_yaml} must be a list. Skipping."
+            )
+            continue
+
+        for project in pure_cmake_entries:
+            if not project or project in packages_to_ignore:
+                continue
+
+            project_dir = repo_dir / project
+            if not project_dir.is_dir():
+                print(
+                    f"⚠️  pure_cmake project '{project}' listed in {release_yaml} not found at {project_dir}"
+                )
+                continue
+
+            projects.append((repo_name, project, project_dir))
+
+    return projects
+
+
+def build_pure_cmake_projects(
+    install_dir, build_type, package_name, packages_to_ignore=None, repos_to_ignore=None
+):
+    """
+    Build pure CMake projects in a temporary directory and install them to install_dir.
+    """
+
+    projects = _discover_pure_cmake_projects(
+        package_name, packages_to_ignore, repos_to_ignore
+    )
+    if not projects:
+        return []
+
+    cmake_build_type = build_type.capitalize() if build_type else "Release"
+    install_prefix = Path(g.script_directory) / install_dir
+    build_root = Path(g.script_directory) / "temp"
+    print(
+        f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}"
+    )
+
+    built = []
+    for repo_name, project_name, source_dir in projects:
+        build_dir = build_root / project_name
+        delete_directory(build_dir)
+        build_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  -> {project_name} (from {repo_name})")
+
+        try:
+            if platform.system().lower() == "windows":
+                cmake_command = [
+                    "cmake",
+                    "-S",
+                    str(source_dir),
+                    "-B",
+                    str(build_dir),
+                    f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
+                    f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}",
+                    f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
+                    "-DBUILD_SHARED_LIBS=ON",
+                ]
+                if g.ninja_path:
+                    cmake_command.extend(["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}"])
+                elif shutil.which("ninja"):
+                    cmake_command.extend(["-G", "Ninja"])
+                subprocess.run(
+                    cmake_command, check=True, text=True, env=g.developer_env
+                )
+                subprocess.run(
+                    [
+                        "cmake",
+                        "--build",
+                        str(build_dir),
+                        "--config",
+                        cmake_build_type,
+                        "--parallel",
+                    ],
+                    check=True,
+                    text=True,
+                    env=g.developer_env,
+                )
+                subprocess.run(
+                    [
+                        "cmake",
+                        "--install",
+                        str(build_dir),
+                        "--config",
+                        cmake_build_type,
+                    ],
+                    check=True,
+                    text=True,
+                    env=g.developer_env,
+                )
+            else:
+                cmake_command = [
+                    "cmake",
+                    "-S",
+                    str(source_dir),
+                    "-B",
+                    str(build_dir),
+                    "-G",
+                    "Ninja",
+                    f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
+                    f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
+                    "-DBUILD_SHARED_LIBS=ON",
+                ]
+                subprocess.run(cmake_command, check=True, text=True)
+                core_count = max(1, (os.cpu_count() or 2) // 2)
+                subprocess.run(
+                    [
+                        "cmake",
+                        "--build",
+                        str(build_dir),
+                        "--target",
+                        "install",
+                        "--",
+                        f"-j{core_count}",
+                    ],
+                    check=True,
+                    text=True,
+                )
+            built.append(project_name)
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(
+                f"❌ Failed to build pure_cmake project '{project_name}' (repo: {repo_name})."
+            ) from e
+
+    return built
+
+
 def find_git_repos(base_dir):
     """
     Recursively search for directories that contain a .git folder.
@@ -1714,7 +1889,7 @@ def guard_require_version_bump_for_src_packages():
 
         # Local version
         try:
-            with open(release_yaml, "r") as f:
+            with open(release_yaml, "r", encoding="utf-8") as f:
                 info = yaml.safe_load(f) or {}
             local_version = "v" + str(info.get("version", "")).strip()
             if not local_version:
@@ -1865,13 +2040,25 @@ def setup(package_name="", build_type="", build_dir=""):
     delete_directory(Path(g.script_directory) / install_dir)
     os.makedirs(Path(g.script_directory) / install_dir, exist_ok=True)
 
-    deploy_install_packages()
-
     if build_dir:
         os.makedirs(build_dir, exist_ok=True)
 
     packages_to_ignore = get_packages_to_ignore()
     repos_to_ignore = get_repos_to_ignore()
+
+    deploy_install_packages()
+
+    pure_cmake_built = build_pure_cmake_projects(
+        install_dir,
+        build_type,
+        package_name,
+        packages_to_ignore,
+        repos_to_ignore,
+    )
+    if pure_cmake_built:
+        packages_to_ignore = list(
+            dict.fromkeys(list(packages_to_ignore) + pure_cmake_built)
+        )
     _print_ignore_lists(packages_to_ignore, repos_to_ignore)
 
     action_files = find_interface_files(
