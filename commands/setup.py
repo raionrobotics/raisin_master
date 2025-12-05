@@ -1228,8 +1228,9 @@ def _discover_pure_cmake_projects(
     if package_name:
         repo_dirs = [src_root / package_name] if (src_root / package_name).is_dir() else []
         if not repo_dirs:
-            print(
-                f"⚠️  pure_cmake: package '{package_name}' not found under src/. Skipping pure_cmake scan."
+            click.echo(
+                f"⚠️  pure_cmake: package '{package_name}' not found under src/. Skipping pure_cmake scan.",
+                err=True
             )
             return []
     else:
@@ -1247,7 +1248,7 @@ def _discover_pure_cmake_projects(
             continue
 
         try:
-            with open(release_yaml, "r") as f:
+            with open(release_yaml, "r", encoding="utf-8") as f:
                 release_info = yaml.safe_load(f) or {}
         except yaml.YAMLError as e:
             print(f"⚠️  Warning: Could not parse {release_yaml}: {e}")
@@ -1888,7 +1889,7 @@ def guard_require_version_bump_for_src_packages():
 
         # Local version
         try:
-            with open(release_yaml, "r") as f:
+            with open(release_yaml, "r", encoding="utf-8") as f:
                 info = yaml.safe_load(f) or {}
             local_version = "v" + str(info.get("version", "")).strip()
             if not local_version:
