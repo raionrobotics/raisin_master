@@ -1293,9 +1293,7 @@ def build_pure_cmake_projects(
         return []
 
     cmake_build_type = build_type.capitalize() if build_type else "Release"
-    build_type_token = (build_type or "release").lower()
-    if build_type_token not in {"debug", "release"}:
-        build_type_token = "release"
+    build_type_token = "debug" if build_type and build_type.lower() == "debug" else "release"
     install_prefix = Path(g.script_directory) / install_dir
     build_root = Path(g.script_directory) / f"cmake-build-{build_type_token}" / "pure_cmake"
     print(
