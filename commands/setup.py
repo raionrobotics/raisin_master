@@ -1283,7 +1283,7 @@ def build_pure_cmake_projects(
     install_dir, build_type, package_name, packages_to_ignore=None, repos_to_ignore=None
 ):
     """
-    Build pure CMake projects in a temporary directory and install them to install_dir.
+    Build pure CMake projects in both debug and release dirs and install them to install_dir.
     """
 
     projects = _discover_pure_cmake_projects(
@@ -1292,103 +1292,104 @@ def build_pure_cmake_projects(
     if not projects:
         return []
 
-    cmake_build_type = build_type.capitalize() if build_type else "Release"
-    build_type_token = (build_type or "release").lower()
-    if build_type_token not in {"debug", "release"}:
-        build_type_token = "release"
     install_prefix = Path(g.script_directory) / install_dir
-    build_root = Path(g.script_directory) / f"cmake-build-{build_type_token}" / "pure_cmake"
     print(
         f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}"
     )
 
-    built = []
-    for repo_name, project_name, source_dir in projects:
-        build_dir = build_root / project_name
-        delete_directory(build_dir)
-        build_dir.mkdir(parents=True, exist_ok=True)
-        print(f"  -> {project_name} (from {repo_name})")
+    built = set()
+    for build_type_token, cmake_build_type in (("debug", "Debug"), ("release", "Release")):
+        build_root = (
+            Path(g.script_directory) / f"cmake-build-{build_type_token}" / "pure_cmake"
+        )
+        for repo_name, project_name, source_dir in projects:
+            build_dir = build_root / project_name
+            delete_directory(build_dir)
+            build_dir.mkdir(parents=True, exist_ok=True)
+            print(f"  -> {project_name} (from {repo_name}) [{cmake_build_type}]")
 
-        try:
-            if platform.system().lower() == "windows":
-                cmake_command = [
-                    "cmake",
-                    "-S",
-                    str(source_dir),
-                    "-B",
-                    str(build_dir),
-                    f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
-                    f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}",
-                    f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
-                    "-DBUILD_SHARED_LIBS=ON",
-                ]
-                if g.ninja_path:
-                    cmake_command.extend(["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}"])
-                elif shutil.which("ninja"):
-                    cmake_command.extend(["-G", "Ninja"])
-                subprocess.run(
-                    cmake_command, check=True, text=True, env=g.developer_env
-                )
-                subprocess.run(
-                    [
+            try:
+                if platform.system().lower() == "windows":
+                    cmake_command = [
                         "cmake",
-                        "--build",
+                        "-S",
+                        str(source_dir),
+                        "-B",
                         str(build_dir),
-                        "--config",
-                        cmake_build_type,
-                        "--parallel",
-                    ],
-                    check=True,
-                    text=True,
-                    env=g.developer_env,
-                )
-                subprocess.run(
-                    [
+                        f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
+                        f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}",
+                        f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
+                        "-DBUILD_SHARED_LIBS=ON",
+                    ]
+                    if g.ninja_path:
+                        cmake_command.extend(
+                            ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}"]
+                        )
+                    elif shutil.which("ninja"):
+                        cmake_command.extend(["-G", "Ninja"])
+                    subprocess.run(
+                        cmake_command, check=True, text=True, env=g.developer_env
+                    )
+                    subprocess.run(
+                        [
+                            "cmake",
+                            "--build",
+                            str(build_dir),
+                            "--config",
+                            cmake_build_type,
+                            "--parallel",
+                        ],
+                        check=True,
+                        text=True,
+                        env=g.developer_env,
+                    )
+                    subprocess.run(
+                        [
+                            "cmake",
+                            "--install",
+                            str(build_dir),
+                            "--config",
+                            cmake_build_type,
+                        ],
+                        check=True,
+                        text=True,
+                        env=g.developer_env,
+                    )
+                else:
+                    cmake_command = [
                         "cmake",
-                        "--install",
+                        "-S",
+                        str(source_dir),
+                        "-B",
                         str(build_dir),
-                        "--config",
-                        cmake_build_type,
-                    ],
-                    check=True,
-                    text=True,
-                    env=g.developer_env,
-                )
-            else:
-                cmake_command = [
-                    "cmake",
-                    "-S",
-                    str(source_dir),
-                    "-B",
-                    str(build_dir),
-                    "-G",
-                    "Ninja",
-                    f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
-                    f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
-                    "-DBUILD_SHARED_LIBS=ON",
-                ]
-                subprocess.run(cmake_command, check=True, text=True)
-                core_count = max(1, (os.cpu_count() or 2) // 2)
-                subprocess.run(
-                    [
-                        "cmake",
-                        "--build",
-                        str(build_dir),
-                        "--target",
-                        "install",
-                        "--",
-                        f"-j{core_count}",
-                    ],
-                    check=True,
-                    text=True,
-                )
-            built.append(project_name)
-        except subprocess.CalledProcessError as e:
-            raise SystemExit(
-                f"❌ Failed to build pure_cmake project '{project_name}' (repo: {repo_name})."
-            ) from e
+                        "-G",
+                        "Ninja",
+                        f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
+                        f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
+                        "-DBUILD_SHARED_LIBS=ON",
+                    ]
+                    subprocess.run(cmake_command, check=True, text=True)
+                    core_count = max(1, (os.cpu_count() or 2) // 2)
+                    subprocess.run(
+                        [
+                            "cmake",
+                            "--build",
+                            str(build_dir),
+                            "--target",
+                            "install",
+                            "--",
+                            f"-j{core_count}",
+                        ],
+                        check=True,
+                        text=True,
+                    )
+                built.add(project_name)
+            except subprocess.CalledProcessError as e:
+                raise SystemExit(
+                    f"❌ Failed to build pure_cmake project '{project_name}' (repo: {repo_name})."
+                ) from e
 
-    return built
+    return list(built)
 
 
 def find_git_repos(base_dir):
