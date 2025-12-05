@@ -245,15 +245,3 @@ echo -e "${GREEN}Setup check complete. Now installing dependencies of each packa
 # cli dependency pip installation
 pip3 install $PIP_FLAGS PyYAML Click requests packaging
 
-# copy configuration_setting file
-if [ -f "configuration_setting_example.yaml" ]; then
-    cp -n configuration_setting_example.yaml configuration_setting.yaml
-fi
-
-# make install/install_dependencies.sh
-python3 ./raisin.py setup
-
-$SUDO bash install/install_dependencies.sh || {
-  echo "Failed to install sub-project dependencies. Please check the output above for errors."
-  exit 1
-}
