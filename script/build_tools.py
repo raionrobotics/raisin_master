@@ -57,10 +57,3 @@ def find_build_tools(arch: str) -> Tuple[str, str, dict]:
     """
     vs_path = find_visual_studio_path()
     developer_env = get_developer_environment(vs_path, arch)
-
-    ninja_path_str = shutil.which("ninja", path=developer_env.get("PATH"))
-    if not ninja_path_str:
-        raise FileNotFoundError("ninja.exe could not be found in the developer environment PATH.")
-
-    # Return the native string paths without conversion
-    return str(vs_path), ninja_path_str, developer_env
