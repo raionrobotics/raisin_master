@@ -8,11 +8,12 @@
 #ifndef RAISIN_WS_SERIALIZATION_BASE_HPP_
 #define RAISIN_WS_SERIALIZATION_BASE_HPP_
 
-#include <vector>
-#include <string>
+#include <array>
 #include <cstring>
-#include <type_traits>
 #include <memory>
+#include <string>
+#include <type_traits>
+#include <vector>
 
 namespace raisin {
 
@@ -20,7 +21,7 @@ namespace raisin {
 /// getBuffer vector methods
 
 template<typename T>
-static inline typename std::enable_if<std::is_trivially_copyable<T>::value, void>::type
+static inline std::enable_if_t<std::is_trivially_copyable_v<T>, void>
 setBuffer(std::vector<unsigned char>& buffer, const T& val) {
   const auto originalSize = buffer.size();
   buffer.resize(buffer.size() + sizeof(T));
@@ -42,10 +43,43 @@ static inline void setBuffer(std::vector<unsigned char>& buffer, const std::wstr
 }
 
 template<typename T>
-static inline  void setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
+static inline std::enable_if_t<
+  std::is_trivially_copyable<T>::value && !std::is_same_v<T, bool>, void>
+setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
+  const uint32_t size = static_cast<uint32_t>(val.size());
+  setBuffer(buffer, size);
+  const auto originalSize = buffer.size();
+  buffer.resize(buffer.size() + size * sizeof(T));
+  if (!val.empty()) {
+    std::memcpy(buffer.data() + originalSize, val.data(), size * sizeof(T));
+  }
+}
+
+template<typename T>
+static inline std::enable_if_t<
+  !std::is_trivially_copyable<T>::value || std::is_same_v<T, bool>, void>
+setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
   setBuffer(buffer, static_cast<uint32_t>(val.size()));
   for (size_t i = 0; i<val.size(); i++) {
     setBuffer(buffer, val[i]);
+  }
+}
+
+template<typename T, size_t N>
+static inline std::enable_if_t<std::is_trivially_copyable_v<T>, void>
+setBuffer(std::vector<unsigned char>& buffer, const std::array<T, N>& val) {
+  const auto originalSize = buffer.size();
+  buffer.resize(buffer.size() + sizeof(T) * N);
+  if (N > 0) {
+    std::memcpy(buffer.data() + originalSize, val.data(), sizeof(T) * N);
+  }
+}
+
+template<typename T, size_t N>
+static inline std::enable_if_t<!std::is_trivially_copyable_v<T>, void>
+setBuffer(std::vector<unsigned char>& buffer, const std::array<T, N>& val) {
+  for (const auto& element : val) {
+    setBuffer(buffer, element);
   }
 }
 
@@ -60,7 +94,7 @@ static inline void setBuffer(std::vector<unsigned char>& buffer, const std::vect
 }
 
 template <typename T, typename... Args>
-static inline typename std::enable_if<(sizeof...(Args) > 0), void>::type
+static inline std::enable_if_t<(sizeof...(Args) > 0), void>
 setBuffer(std::vector<unsigned char>& buffer, const T& val,
           const Args&... rest) {
   setBuffer(buffer, val);      // Process the current argument
@@ -71,7 +105,7 @@ setBuffer(std::vector<unsigned char>& buffer, const T& val,
 /// getBuffer Char methods
 
 template<typename T>
-static typename std::enable_if<std::is_trivially_copyable<T>::value, unsigned char*>::type
+static std::enable_if_t<std::is_trivially_copyable_v<T>, unsigned char*>
     setBuffer(unsigned char* buffer, const T& val) {
   std::memcpy(buffer, &val, sizeof(T));
   return buffer + sizeof(T);
@@ -81,10 +115,8 @@ static unsigned char* setBuffer(unsigned char* buffer,
                              const std::string& val) {
   const uint32_t size = val.size();
   buffer = setBuffer(buffer, size);
-  for (size_t i = 0; i<size; i++) {
-    buffer = setBuffer(buffer, val[i]);
-  }
-  return buffer;
+  std::memcpy(buffer, val.data(), size);
+  return buffer + size;
 }
 
 static unsigned char* setBuffer(unsigned char* buffer,
@@ -96,11 +128,44 @@ static unsigned char* setBuffer(unsigned char* buffer,
 }
 
 template <typename T>
-static unsigned char* setBuffer(unsigned char* buffer,
-                             const std::vector<T>& val) {
+static std::enable_if_t<
+  std::is_trivially_copyable_v<T> && !std::is_same_v<T, bool>, unsigned char*>
+setBuffer(unsigned char* buffer, const std::vector<T>& val) {
+  buffer = setBuffer(buffer, static_cast<uint32_t>(val.size()));
+  const size_t bytes = val.size() * sizeof(T);
+  if (bytes > 0) {
+    std::memcpy(buffer, val.data(), bytes);
+    buffer += bytes;
+  }
+  return buffer;
+}
+
+template <typename T>
+static std::enable_if_t<
+  !std::is_trivially_copyable_v<T> || std::is_same_v<T, bool>, unsigned char*>
+setBuffer(unsigned char* buffer, const std::vector<T>& val) {
   buffer = setBuffer(buffer, static_cast<uint32_t>(val.size()));
   for (size_t i = 0; i < val.size(); i++) {
     buffer = setBuffer(buffer, val[i]);
+  }
+  return buffer;
+}
+
+template <typename T, size_t N>
+static std::enable_if_t<std::is_trivially_copyable_v<T>, unsigned char*>
+setBuffer(unsigned char* buffer, const std::array<T, N>& val) {
+  if (N > 0) {
+    std::memcpy(buffer, val.data(), sizeof(T) * N);
+    buffer += sizeof(T) * N;
+  }
+  return buffer;
+}
+
+template <typename T, size_t N>
+static std::enable_if_t<!std::is_trivially_copyable_v<T>, unsigned char*>
+setBuffer(unsigned char* buffer, const std::array<T, N>& val) {
+  for (const auto& element : val) {
+    buffer = setBuffer(buffer, element);
   }
   return buffer;
 }
@@ -117,7 +182,7 @@ static unsigned char* setBuffer(unsigned char* buffer,
 
 
 template <typename T>
-static inline typename std::enable_if<std::is_trivially_copyable<T>::value,
+static inline typename std::enable_if<std::is_trivially_copyable_v<T>,
                                       const unsigned char*>::type
 getBuffer(const unsigned char* buffer, T& val) {
   std::memcpy(&val, buffer, sizeof(T));
@@ -149,8 +214,17 @@ static inline const unsigned char* getBuffer(const unsigned char* buffer,
   uint32_t size;
   buffer = getBuffer(buffer, size);
   val.resize(size);
-  for (size_t i = 0; i < size; i++) buffer = getBuffer(buffer, val[i]);
-  return buffer;
+  if constexpr (std::is_trivially_copyable_v<T> && !std::is_same_v<T, bool>) {
+    const size_t bytes = static_cast<size_t>(size) * sizeof(T);
+    if (bytes > 0) {
+      std::memcpy(val.data(), buffer, bytes);
+      buffer += bytes;
+    }
+    return buffer;
+  } else {
+    for (size_t i = 0; i < size; i++) buffer = getBuffer(buffer, val[i]);
+    return buffer;
+  }
 }
 
 static inline const unsigned char* getBuffer(const unsigned char* buffer,
@@ -164,6 +238,22 @@ static inline const unsigned char* getBuffer(const unsigned char* buffer,
     val[i] = temp;
   }
   return buffer + size * sizeof(bool);
+}
+
+template <typename T, size_t N>
+static inline const unsigned char* getBuffer(const unsigned char* buffer, std::array<T, N>& val) {
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (N > 0) {
+      std::memcpy(val.data(), buffer, sizeof(T) * N);
+      buffer += sizeof(T) * N;
+    }
+    return buffer;
+  } else {
+    for (auto& element : val) {
+      buffer = getBuffer(buffer, element);
+    }
+    return buffer;
+  }
 }
 
 template<typename T, typename... Args>
