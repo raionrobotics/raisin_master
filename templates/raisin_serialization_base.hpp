@@ -51,7 +51,7 @@ setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
   const auto originalSize = buffer.size();
   buffer.resize(buffer.size() + size * sizeof(T));
   if (!val.empty()) {
-    std::memcpy(buffer.data() + originalSize, val.data(), size * sizeof(T));
+    std::memcpy(buffer.data() + originalSize, val.data(), static_cast<size_t>(size) * sizeof(T));
   }
 }
 
