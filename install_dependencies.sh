@@ -240,6 +240,19 @@ else
 fi
 
 echo "-------------------------------------------------"
+
+echo "=== install vcpkg dependencies ===";
+if [[ "$(uname)" == "Linux" ]]; then
+  $SUDO apt install -y build-essential zip unzip tar curl git
+elif [[ "$(uname)" == "Darwin" ]]; then
+  if command -v brew &> /dev/null; then
+      brew install git curl
+  else
+      echo -e "${RED}❌ Homebrew not found. Please install Homebrew first, then install git and curl manually.${NC}"
+  fi
+fi
+
+
 echo -e "${GREEN}Setup check complete. Now installing dependencies of each packages${NC}"
 
 # cli dependency pip installation
