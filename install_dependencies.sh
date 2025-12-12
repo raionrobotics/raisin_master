@@ -240,8 +240,34 @@ else
 fi
 
 echo "-------------------------------------------------"
+echo "=== Installing dependencies for all packages ==="
+echo "-------------------------------------------------"
+
+SRC_DIRS=("$SCRIPT_DIR/src"/*)
+for dir in "${SRC_DIRS[@]}"; do
+    if [ -f "$SCRIPT_DIR/configuration_setting.yaml" ] && grep -qE "^\s*-\s*$(basename "$dir")\s*$" "$SCRIPT_DIR/configuration_setting.yaml"; then
+        echo -e "${YELLOW}Skipping dependency installation for: $dir as it's listed in configuration_setting.yaml${NC}"
+        continue
+    fi
+    if [ -d "$dir" ]; then
+        INSTALLER="$dir/install_dependencies.sh"
+        if [ -f "$INSTALLER" ]; then
+            echo -e "${YELLOW}Running dependency installer in: $dir${NC}"
+            if [ -x "$INSTALLER" ]; then
+                "$INSTALLER"
+            else
+                $SUDO bash "$INSTALLER"
+            fi
+            echo -e "${GREEN}✅ Completed installer in: $dir${NC}"
+            echo "-------------------------------------------------"
+        else
+            echo -e "${YELLOW}No install_dependencies.sh found in: $dir. Skipping...${NC}"
+        fi
+    fi
+done
+
+
 echo -e "${GREEN}Setup check complete. Now installing dependencies of each packages${NC}"
 
 # cli dependency pip installation
 pip3 install $PIP_FLAGS PyYAML Click requests packaging
-
