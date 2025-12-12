@@ -245,8 +245,8 @@ echo "-------------------------------------------------"
 
 SRC_DIRS=("$SCRIPT_DIR/src"/*)
 for dir in "${SRC_DIRS[@]}"; do
-    if grep -q "$(basename "$dir")" "$SCRIPT_DIR/configuration_setting.yaml"; then
-        echo -e "${YELLOW}Skipping dependency installation for: $dir as it's listed in configuration_settings.yaml${NC}"
+    if [ -f "$SCRIPT_DIR/configuration_setting.yaml" ] && grep -qE "^\s*-\s*$(basename "$dir")\s*$" "$SCRIPT_DIR/configuration_setting.yaml"; then
+        echo -e "${YELLOW}Skipping dependency installation for: $dir as it's listed in configuration_setting.yaml${NC}"
         continue
     fi
     if [ -d "$dir" ]; then
