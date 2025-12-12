@@ -1226,11 +1226,13 @@ def _discover_pure_cmake_projects(
         return []
 
     if package_name:
-        repo_dirs = [src_root / package_name] if (src_root / package_name).is_dir() else []
+        repo_dirs = (
+            [src_root / package_name] if (src_root / package_name).is_dir() else []
+        )
         if not repo_dirs:
             click.echo(
                 f"⚠️  pure_cmake: package '{package_name}' not found under src/. Skipping pure_cmake scan.",
-                err=True
+                err=True,
             )
             return []
     else:
@@ -1293,12 +1295,13 @@ def build_pure_cmake_projects(
         return []
 
     install_prefix = Path(g.script_directory) / install_dir
-    print(
-        f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}"
-    )
+    print(f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}")
 
     built = set()
-    for build_type_token, cmake_build_type in (("debug", "Debug"), ("release", "Release")):
+    for build_type_token, cmake_build_type in (
+        ("debug", "Debug"),
+        ("release", "Release"),
+    ):
         build_root = (
             Path(g.script_directory) / f"cmake-build-{build_type_token}" / "pure_cmake"
         )
@@ -1603,50 +1606,6 @@ def copy_resource(install_dir):
                     shutil.copy2(s, d)
 
 
-def copy_installers(src_dir, install_dir, repos_to_ignore=None) -> int:
-    """
-    Scan <g.script_directory>/src/*/ for install_dependencies.sh files and copy
-    each one to <g.script_directory>/install/<subdir>/install_dependencies.sh.
-
-    Parameters
-    ----------
-    g.script_directory : str | pathlib.Path
-        The root folder that contains both `src/` and `install/`.
-
-    Returns
-    -------
-    int
-        The number of installer scripts successfully copied.
-    """
-    script_dir = Path(g.script_directory).expanduser().resolve()
-    dst_root = script_dir / install_dir
-    src_root = Path(g.script_directory) / src_dir
-    repo_ignore_set = set(repos_to_ignore or [])
-
-    copied = 0
-    if not src_root.is_dir():  # not building from source
-        return
-        # raise FileNotFoundError(f"{src_root} does not exist")
-
-    for child in src_root.iterdir():
-        if not child.is_dir():
-            continue  # skip non-directories
-        if repo_ignore_set:
-            repo_name = get_repo_name_from_path(child)
-            if repo_name and repo_name in repo_ignore_set:
-                continue
-        src_installer = child / "install_dependencies.sh"
-        if not src_installer.is_file():
-            continue  # nothing to copy in this subdir
-
-        dst_subdir = dst_root / "dependencies" / child.name
-        dst_subdir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_installer, dst_subdir / "install_dependencies.sh")
-        copied += 1
-
-    return copied
-
-
 def deploy_install_packages():
     """
     Finds and copies packages that match the current system's OS and g.architecture.
@@ -1733,7 +1692,7 @@ def deploy_install_packages():
 
             # Copy contents, merging files from different build_types
             shutil.copytree(source_dir, final_dest_dir, dirs_exist_ok=True)
-            
+
             # Make all copied files executable
             bin_path = os.path.join(final_dest_dir, "bin")
             if os.path.exists(bin_path):
@@ -2091,8 +2050,6 @@ def setup(package_name="", build_type="", build_dir=""):
 
     # Update the CMakeLists.txt based on the template
     update_cmake_file(project_directories, build_dir)
-
-    copy_installers(src_dir, install_dir, repos_to_ignore)
 
     if package_name == "":  # this means we are not in the release mode
         copy_resource(install_dir)
