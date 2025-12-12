@@ -82,9 +82,15 @@ def _ensure_github_token():
     return tokens
 
 
-def _run_git_command(command, cwd):
+def _run_git_command(command, cwd, timeout=30, silent=False):
     """
     Helper to run a Git command, return its stripped output, and handle errors.
+
+    Args:
+        command: Git command as a list
+        cwd: Working directory for the command
+        timeout: Timeout in seconds (default: 30, use 300 for clone operations)
+        silent: If True, don't print error messages (caller handles them)
 
     Note: Token authentication only works for HTTPS URLs.
     """
@@ -115,24 +121,25 @@ def _run_git_command(command, cwd):
             text=True,
             encoding="utf-8",
             env=env,
-            timeout=30,
+            timeout=timeout,
         )
         return result.stdout.strip()
 
     except subprocess.CalledProcessError as e:
-        # Print the actual error message from Git
-        error_output = e.stderr.strip()
-        print(
-            f"  ! Git command failed in '{os.path.basename(cwd)}'. Error: {error_output}"
-        )
+        if not silent:
+            # Print the actual error message from Git
+            error_output = e.stderr.strip()
+            cwd_name = os.path.basename(cwd) if cwd else "unknown"
+            print(f"  ! Git command failed in '{cwd_name}'. Error: {error_output}")
         return None
     except subprocess.TimeoutExpired:
-        print(
-            f"  ! Git command timed out in '{os.path.basename(cwd)}' after 30 seconds."
-        )
+        if not silent:
+            cwd_name = os.path.basename(cwd) if cwd else "unknown"
+            print(f"  ! Git command timed out in '{cwd_name}' after {timeout} seconds.")
         return None
     except FileNotFoundError:
-        print(f"  ! Git command not found. Is Git installed and in your PATH?")
+        if not silent:
+            print(f"  ! Git command not found. Is Git installed and in your PATH?")
         return None
 
 
@@ -391,6 +398,114 @@ def process_repo(repo_path, pull_mode, origin="origin"):
 # ============================================================================
 
 
+def git_clone_command(repos):
+    """
+    Clone repositories into src/ directory.
+
+    Args:
+        repos (list): List of repository specifications. If empty, clones all from repositories.yaml.
+            Each repo can be:
+            - A name from repositories.yaml (e.g., 'raisin')
+            - A shorthand 'owner/repo' (e.g., 'raionrobotics/raisin')
+            - A full URL (e.g., 'git@github.com:owner/repo.git')
+    """
+    from commands.utils import load_configuration
+
+    script_directory = g.script_directory or os.getcwd()
+    src_directory = Path(script_directory) / "src"
+
+    # Ensure src/ directory exists
+    src_directory.mkdir(parents=True, exist_ok=True)
+
+    # Load repositories from configuration
+    all_repositories, _, _, _, _ = load_configuration()
+
+    # If no repos specified, clone all from repositories.yaml
+    if not repos:
+        if not all_repositories:
+            print("❌ No repositories found in repositories.yaml")
+            return
+        print(f"📦 Cloning all {len(all_repositories)} repositories from repositories.yaml...")
+        repos = list(all_repositories.keys())
+
+    success_count = 0
+    fail_count = 0
+
+    for repo in repos:
+        clone_url = None
+        target_name = None
+
+        # Case 1: Check if it's a name in repositories.yaml
+        if repo in all_repositories:
+            repo_info = all_repositories[repo]
+            release_url = repo_info.get("url", "")
+            # Extract owner from release URL and construct source repo URL (using HTTPS for token auth)
+            # e.g., git@github.com:raionrobotics/raisin_release.git -> https://github.com/raionrobotics/raisin.git
+            match = re.search(r"git@github\.com:([^/]+)/", release_url)
+            if match:
+                owner = match.group(1)
+                clone_url = f"https://github.com/{owner}/{repo}.git"
+            else:
+                # Fallback: assume raionrobotics as default owner
+                clone_url = f"https://github.com/raionrobotics/{repo}.git"
+            target_name = repo
+
+        # Case 2: Check if it's already a full URL (SSH or HTTPS)
+        elif repo.startswith("git@") or repo.startswith("https://") or repo.startswith("http://"):
+            clone_url = repo
+            # Convert SSH URL to HTTPS for token authentication
+            if repo.startswith("git@github.com:"):
+                # git@github.com:owner/repo.git -> https://github.com/owner/repo.git
+                clone_url = repo.replace("git@github.com:", "https://github.com/")
+            # Extract repo name from URL
+            match = re.search(r"[:/]([^/]+)/([^/.]+?)(?:\.git)?$", repo)
+            if match:
+                target_name = match.group(2)
+            else:
+                print(f"❌ {repo}: Could not parse repository name from URL")
+                fail_count += 1
+                continue
+
+        # Case 3: Check if it's a shorthand 'owner/repo'
+        elif "/" in repo:
+            owner, repo_name = repo.split("/", 1)
+            clone_url = f"https://github.com/{owner}/{repo_name}.git"
+            target_name = repo_name
+
+        else:
+            print(f"❌ {repo}: Not found in repositories.yaml and is not a valid URL or shorthand")
+            fail_count += 1
+            continue
+
+        # Check if target directory already exists
+        target_path = src_directory / target_name
+        if target_path.exists():
+            print(f"⚠️  {target_name}: Directory already exists, skipping")
+            continue
+
+        print(f"⬇️  Cloning {target_name} from {clone_url}...")
+
+        # Use _run_git_command with longer timeout for clone operations
+        result = _run_git_command(
+            ["git", "clone", clone_url, str(target_path)],
+            cwd=script_directory,
+            timeout=300,  # 5 minute timeout for large repos
+            silent=False,  # Show git errors for debugging
+        )
+
+        if result is not None:
+            print(f"✅ {target_name}: Cloned successfully")
+            success_count += 1
+        else:
+            fail_count += 1
+
+    # Print summary
+    print(f"\n--- Clone Summary ---")
+    print(f"✅ Success: {success_count}")
+    if fail_count > 0:
+        print(f"❌ Failed: {fail_count}")
+
+
 def git_status_command():
     """
     Shows git status for all repositories in current directory and './src'.
@@ -634,6 +749,32 @@ def git_group():
         raisin git setup main:user1 dev:user2  # Setup remotes
     """
     pass
+
+
+@git_group.command("clone")
+@click.argument("repos", nargs=-1, required=False)
+def git_clone_cli(repos):
+    """
+    Clone repositories into src/ directory.
+
+    \b
+    REPOS can be:
+      - Names from repositories.yaml (e.g., 'raisin')
+      - Shorthand 'owner/repo' (e.g., 'raionrobotics/raisin')
+      - Full URLs (e.g., 'git@github.com:owner/repo.git')
+
+    \b
+    If no arguments given, clones all repositories from repositories.yaml.
+
+    \b
+    Examples:
+        raisin git clone                             # Clone all from repositories.yaml
+        raisin git clone raisin                      # Clone single repo
+        raisin git clone raisin raisin_plugin        # Clone multiple repos
+        raisin git clone raionrobotics/raisin        # Shorthand
+        raisin git clone git@github.com:user/repo.git  # Full URL
+    """
+    git_clone_command(list(repos))
 
 
 @git_group.command("status")
