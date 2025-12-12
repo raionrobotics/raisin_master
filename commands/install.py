@@ -314,7 +314,14 @@ def install_command(targets, build_type):
     show_default=True,
     help="Build type to install",
 )
-def install_cli_command(packages, build_type):
+@click.option(
+    "--all",
+    "-a",
+    "install_all",
+    is_flag=True,
+    help="Install both debug and release builds",
+)
+def install_cli_command(packages, build_type, install_all):
     """
     Download and install packages from GitHub releases.
 
@@ -323,11 +330,19 @@ def install_cli_command(packages, build_type):
         raisin install                               # Install all packages from src/
         raisin install raisin_network                # Install release version
         raisin install raisin_network --type debug   # Install debug version
+        raisin install raisin_network --all          # Install both debug and release
         raisin install pkg1 pkg2 pkg3                # Install multiple packages
     """
     packages = list(packages)
-    if packages:
-        click.echo(f"📥 Installing {len(packages)} package(s) ({build_type})...")
+
+    if install_all:
+        build_types = ["debug", "release"]
     else:
-        click.echo(f"📥 Installing all packages from src/ ({build_type})...")
-    install_command(packages, build_type)
+        build_types = [build_type]
+
+    for bt in build_types:
+        if packages:
+            click.echo(f"📥 Installing {len(packages)} package(s) ({bt})...")
+        else:
+            click.echo(f"📥 Installing all packages from src/ ({bt})...")
+        install_command(packages, bt)
