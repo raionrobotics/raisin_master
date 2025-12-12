@@ -245,6 +245,10 @@ echo "-------------------------------------------------"
 
 SRC_DIRS=("$SCRIPT_DIR/src"/*)
 for dir in "${SRC_DIRS[@]}"; do
+    if grep -q "$(basename "$dir")" "$SCRIPT_DIR/configuration_setting.yaml"; then
+        echo -e "${YELLOW}Skipping dependency installation for: $dir as it's listed in configuration_settings.yaml${NC}"
+        continue
+    fi
     if [ -d "$dir" ]; then
         INSTALLER="$dir/install_dependencies.sh"
         if [ -f "$INSTALLER" ]; then
@@ -252,7 +256,7 @@ for dir in "${SRC_DIRS[@]}"; do
             if [ -x "$INSTALLER" ]; then
                 "$INSTALLER"
             else
-                bash "$INSTALLER"
+                $SUDO bash "$INSTALLER"
             fi
             echo -e "${GREEN}✅ Completed installer in: $dir${NC}"
             echo "-------------------------------------------------"
