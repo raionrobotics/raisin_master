@@ -25,7 +25,7 @@ from commands.setup import (
 )
 
 
-def publish(target, build_type, skip_confirm=False):
+def publish(target, build_type):
     """
     Builds the project, creates a release archive, and uploads it to GitHub,
     prompting for overwrite if the asset already exists.
@@ -345,13 +345,7 @@ def publish(target, build_type, skip_confirm=False):
     show_default=True,
     help="Build type",
 )
-@click.option(
-    "--yes",
-    "-y",
-    is_flag=True,
-    help="Auto-confirm all prompts (e.g., overwriting release assets)",
-)
-def publish_command(target, build_type, yes):
+def publish_command(target, build_type):
     """
     Build, package, and upload a release to GitHub.
 
@@ -359,15 +353,10 @@ def publish_command(target, build_type, yes):
     Examples:
         raisin publish raisin_network                # Publish release build
         raisin publish raisin_network --type debug   # Publish debug build
-        raisin publish my_package -t release --yes   # Auto-confirm overwrites
+        raisin publish my_package -t release
 
     \b
     Note: Previously called 'release' command.
     """
-    # Honor both the command flag and the global `--yes` from the root CLI.
-    skip_confirm = bool(yes or getattr(g, "always_yes", False))
-    if skip_confirm:
-        click.echo("⚠️  Auto-confirm enabled: All prompts will be accepted.")
-
     click.echo(f"📦 Publishing {target} ({build_type} build)...")
-    publish(target, build_type, skip_confirm)
+    publish(target, build_type)
