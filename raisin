@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# RAISIN wrapper script for easier command-line usage.
+# Intended to be symlinked into your PATH as `raisin`.
+
+# Resolve symlinks so this works when `raisin` is symlinked into PATH.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="${DIR}/${SOURCE}"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+if [[ "${1:-}" == "--install" ]]; then
+  target_dir="${HOME}/.local/bin"
+  mkdir -p "$target_dir"
+  ln -sf "${SCRIPT_DIR}/raisin" "${target_dir}/raisin"
+  echo "Installed symlink: ${target_dir}/raisin -> ${SCRIPT_DIR}/raisin"
+  echo "If needed, add to PATH: export PATH=\"${HOME}/.local/bin:\$PATH\""
+  exit 0
+fi
+
+python_bin="${RAISIN_PYTHON:-}"
+if [[ -z "${python_bin}" ]]; then
+  if [[ -x "${SCRIPT_DIR}/.venv/bin/python" ]]; then
+    python_bin="${SCRIPT_DIR}/.venv/bin/python"
+  elif [[ -x "${SCRIPT_DIR}/venv/bin/python" ]]; then
+    python_bin="${SCRIPT_DIR}/venv/bin/python"
+  else
+    python_bin="$(command -v python3 || true)"
+  fi
+fi
+
+if [[ -z "${python_bin}" ]]; then
+  echo "❌ Error: python3 not found. Install Python 3 or set RAISIN_PYTHON." >&2
+  exit 1
+fi
+
+exec "${python_bin}" "${SCRIPT_DIR}/raisin.py" "$@"

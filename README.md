@@ -196,6 +196,17 @@ python3 raisin.py build --help
 python3 raisin.py publish -h
 ```
 
+#### Use `raisin` Command (Optional)
+Use the wrapper script so you can run `raisin ...` instead of `python3 raisin.py ...`:
+```bash
+# One-time install (creates ~/.local/bin/raisin symlink)
+./raisin --install
+
+# Then you can run from anywhere (ensure ~/.local/bin is in PATH)
+raisin --help
+raisin publish <target>
+```
+
 ---
 
 ## 📚 Documentation
