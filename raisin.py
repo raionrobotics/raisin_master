@@ -14,6 +14,7 @@ from commands.publish import publish_command
 from commands.install import install_cli_command
 from commands.index import index_group
 from commands.git_commands import git_group
+from commands.test import test_command
 
 try:
     from packaging.requirements import Requirement
@@ -59,6 +60,7 @@ cli.add_command(publish_command, name="publish")
 cli.add_command(install_cli_command, name="install")
 cli.add_command(index_group, name="index")
 cli.add_command(git_group, name="git")
+cli.add_command(test_command, name="test")
 cli.add_command(help_command, name="help")
 
 
