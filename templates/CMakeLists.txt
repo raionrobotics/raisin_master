@@ -13,6 +13,9 @@ endif()
 
 option(RAISIN_RELEASE_BUILD "Build unit tests for the project" OFF)
 
+@@RAISIN_BUILD_TEST_OVERRIDE@@
+option(RAISIN_BUILD_TEST "Build unit tests for the project" ON)
+
 if(NOT RAISIN_RELEASE_BUILD)
     set(CMAKE_INSTALL_PREFIX "@@SCRIPT_DIR@@/install")
 endif()

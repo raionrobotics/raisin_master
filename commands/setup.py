@@ -34,8 +34,13 @@ from commands.utils import (
 
 
 @click.command()
+@click.option(
+    "--no_test",
+    is_flag=True,
+    help="Disable building unit tests for this setup run",
+)
 @click.argument("targets", nargs=-1)
-def setup_command(targets):
+def setup_command(no_test, targets):
     """
     Generate interface files (.msg, .srv, .action) and configure CMake.
 
@@ -53,7 +58,7 @@ def setup_command(targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup()
+    setup(build_test_enabled=(not no_test))
 
 
 def process_build_targets(targets):
@@ -691,7 +696,7 @@ def topological_sort(graph, keys):
     return keys
 
 
-def update_cmake_file(project_directories, cmake_dir):
+def update_cmake_file(project_directories, cmake_dir, build_test_enabled: bool):
     """
     Generate a new CMakeLists.txt file by adding projects that either match
     the global 'g.build_pattern' (if not empty) or all projects, including their
@@ -763,6 +768,12 @@ def update_cmake_file(project_directories, cmake_dir):
         "@@SUB_PROJECT@@", "\n".join(subdirectory_lines)
     )
     cmake_content = cmake_content.replace("@@SCRIPT_DIR@@", g.script_directory)
+    cmake_content = cmake_content.replace(
+        "@@RAISIN_BUILD_TEST_OVERRIDE@@",
+        ""
+        if build_test_enabled
+        else 'set(RAISIN_BUILD_TEST OFF CACHE BOOL "Build unit tests for the project" FORCE)',
+    )
 
     cmake_file_path = os.path.join(g.script_directory, "CMakeLists.txt")
 
@@ -1985,7 +1996,7 @@ def guard_require_version_bump_for_src_packages():
         sys.exit(1)
 
 
-def setup(package_name="", build_type="", build_dir=""):
+def setup(package_name="", build_type="", build_dir="", build_test_enabled=None):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
     """
@@ -2049,7 +2060,9 @@ def setup(package_name="", build_type="", build_dir=""):
         create_service_file(srv_file, Path(srv_file).parent.parent, install_dir)
 
     # Update the CMakeLists.txt based on the template
-    update_cmake_file(project_directories, build_dir)
+    if build_test_enabled is None:
+        build_test_enabled = True
+    update_cmake_file(project_directories, build_dir, bool(build_test_enabled))
 
     if package_name == "":  # this means we are not in the release mode
         copy_resource(install_dir)
