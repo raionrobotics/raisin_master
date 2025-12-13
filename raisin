@@ -11,14 +11,68 @@ while [[ -h "$SOURCE" ]]; do
   SOURCE="$(readlink "$SOURCE")"
   [[ "$SOURCE" != /* ]] && SOURCE="${DIR}/${SOURCE}"
 done
-SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DEFAULT_SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# Prefer the RAISIN repo that contains the current working directory (useful when
+# multiple copies of this repo exist). We detect a repo root by the presence of
+# `raisin.py` and the `commands/` package.
+SCRIPT_DIR="${DEFAULT_SCRIPT_DIR}"
+search_dir="${PWD}"
+while [[ -n "${search_dir}" && "${search_dir}" != "/" ]]; do
+  if [[ -f "${search_dir}/raisin.py" && -d "${search_dir}/commands" ]]; then
+    SCRIPT_DIR="${search_dir}"
+    break
+  fi
+  search_dir="$(dirname "${search_dir}")"
+done
 
 if [[ "${1:-}" == "--install" ]]; then
   target_dir="${HOME}/.local/bin"
   mkdir -p "$target_dir"
-  ln -sf "${SCRIPT_DIR}/raisin" "${target_dir}/raisin"
-  echo "Installed symlink: ${target_dir}/raisin -> ${SCRIPT_DIR}/raisin"
+  install_path="${target_dir}/raisin"
+  # Install a copy (not a symlink) so it keeps working even if the repo is moved.
+  src_path="${SCRIPT_DIR}/raisin"
+  if [[ ! -f "${src_path}" ]]; then
+    src_path="${DEFAULT_SCRIPT_DIR}/raisin"
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    src_real="$(realpath "${src_path}")"
+    dst_real="$(realpath "${install_path}" 2>/dev/null || true)"
+  else
+    src_real="$(cd -P "$(dirname "${src_path}")" && pwd)/$(basename "${src_path}")"
+    if [[ -e "${install_path}" ]]; then
+      dst_real="$(cd -P "$(dirname "${install_path}")" && pwd)/$(basename "${install_path}")"
+    else
+      dst_real=""
+    fi
+  fi
+
+  if [[ -n "${dst_real}" && "${dst_real}" == "${src_real}" ]]; then
+    chmod +x "${install_path}"
+    echo "Already installed: ${install_path}"
+    echo "If needed, add to PATH: export PATH=\"${HOME}/.local/bin:\$PATH\""
+    exit 0
+  fi
+
+  if ! rm -f "${install_path}"; then
+    echo "❌ Error: cannot overwrite ${install_path}. Check permissions/ownership." >&2
+    exit 1
+  fi
+  if ! cp -f "${src_path}" "${install_path}"; then
+    echo "❌ Error: failed to install wrapper to ${install_path}." >&2
+    exit 1
+  fi
+  chmod +x "${install_path}"
+  echo "Installed: ${install_path}"
   echo "If needed, add to PATH: export PATH=\"${HOME}/.local/bin:\$PATH\""
+  exit 0
+fi
+
+if [[ "${1:-}" == "--where" || "${1:-}" == "--which" ]]; then
+  echo "raisin wrapper: ${DEFAULT_SCRIPT_DIR}/raisin"
+  echo "selected repo:  ${SCRIPT_DIR}"
+  echo "raisin.py:      ${SCRIPT_DIR}/raisin.py"
+  echo "config:         ${SCRIPT_DIR}/configuration_setting.yaml"
   exit 0
 fi
 

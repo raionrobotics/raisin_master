@@ -206,6 +206,7 @@ Use the wrapper script so you can run `raisin ...` instead of `python3 raisin.py
 raisin --help
 raisin publish <target>
 ```
+Note: If you have multiple RAISIN repo clones, `raisin ...` prefers the clone that contains your current working directory (walks up to find `raisin.py`).
 
 ---
 
