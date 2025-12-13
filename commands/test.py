@@ -37,7 +37,7 @@ def _get_build_dir_from_config(build_type: str) -> Path:
         ) from e
 
     try:
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
     except Exception as e:
         raise click.ClickException(f"Failed to read {config_path}: {e}") from e
@@ -78,7 +78,7 @@ def run_unittests(build_type: Optional[str]) -> None:
         )
 
     executables = sorted(
-        [p for p in build_dir.rglob("*") if _is_unittest_executable(p)],
+        [p for p in build_dir.rglob("*_unittest*") if _is_unittest_executable(p)],
         key=lambda p: str(p),
     )
 
