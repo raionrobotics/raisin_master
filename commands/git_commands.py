@@ -458,7 +458,7 @@ def git_clone_command(repos):
                 # git@github.com:owner/repo.git -> https://github.com/owner/repo.git
                 clone_url = repo.replace("git@github.com:", "https://github.com/")
             # Extract repo name from URL
-            match = re.search(r"[:/]([^/]+)/([^/.]+?)(?:\.git)?$", repo)
+            match = re.search(r"[:/]([^/]+)/([^/]+?)(?:\.git)?$", repo)
             if match:
                 target_name = match.group(2)
             else:
