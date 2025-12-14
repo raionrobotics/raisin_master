@@ -37,7 +37,6 @@ _CMAKE_RAISIN_FIND_PACKAGE_RE = re.compile(
     r"(?i)\braisin_find_package\s*\(\s*([A-Za-z0-9_.+-]+)\b"
 )
 _FALLBACK_NAME_RE = re.compile(r"^([A-Za-z0-9_.+-]+)")
-_RELEASE_DEP_INLINE_RE = re.compile(r"^(\s*dependencies:\s*)\[(.*)\]\s*$")
 
 
 def _normalize_dependency_name(spec: str) -> str:
@@ -154,15 +153,18 @@ def _repo_version_from_installed(
     if not repo_dir.is_dir():
         return None
 
-    preferred = (
-        repo_dir
-        / g.os_type
-        / g.os_version
-        / g.architecture
-        / "release"
-        / "release.yaml"
-    )
-    if preferred.is_file():
+    # Prefer platform-matching paths and check both build types deterministically.
+    for build_type in ("release", "debug"):
+        preferred = (
+            repo_dir
+            / g.os_type
+            / g.os_version
+            / g.architecture
+            / build_type
+            / "release.yaml"
+        )
+        if not preferred.is_file():
+            continue
         try:
             details = yaml.safe_load(
                 preferred.read_text(encoding="utf-8", errors="ignore")
@@ -170,9 +172,9 @@ def _repo_version_from_installed(
             if isinstance(details, dict) and details.get("version") is not None:
                 return str(details["version"])
         except Exception:
-            pass
+            continue
 
-    for p in repo_dir.rglob("release.yaml"):
+    for p in sorted(repo_dir.rglob("release.yaml")):
         try:
             details = yaml.safe_load(p.read_text(encoding="utf-8", errors="ignore"))
             if isinstance(details, dict) and details.get("version") is not None:
