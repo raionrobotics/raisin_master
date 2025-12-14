@@ -24,6 +24,14 @@ try:
 except Exception:  # pragma: no cover
     Requirement = None  # type: ignore[assignment]
 
+try:
+    from ruamel.yaml import YAML
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+except Exception:  # pragma: no cover
+    YAML = None  # type: ignore[assignment]
+    CommentedMap = None  # type: ignore[assignment]
+    CommentedSeq = None  # type: ignore[assignment]
+
 
 _CMAKE_RAISIN_FIND_PACKAGE_RE = re.compile(
     r"(?i)\braisin_find_package\s*\(\s*([A-Za-z0-9_.+-]+)\b"
@@ -185,52 +193,58 @@ def _repo_version(
 def _update_release_yaml_dependencies_in_place(
     release_yaml: Path, add_specs: List[str]
 ) -> None:
-    text = release_yaml.read_text(encoding="utf-8", errors="ignore")
-    lines = text.splitlines(keepends=True)
+    if YAML is not None:
+        yaml_rt = YAML()
+        yaml_rt.preserve_quotes = True
+        yaml_rt.indent(mapping=2, sequence=4, offset=2)
 
-    def ensure_trailing_newline(s: str) -> str:
-        return s if s.endswith("\n") else s + "\n"
+        data = yaml_rt.load(release_yaml.read_text(encoding="utf-8", errors="ignore"))
+        if data is None:
+            data = CommentedMap()  # type: ignore[operator]
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid YAML structure in {release_yaml}")
 
-    for i, line in enumerate(lines):
-        m = _RELEASE_DEP_INLINE_RE.match(line.rstrip("\n"))
-        if not m:
-            continue
-        prefix, inside = m.group(1), m.group(2).strip()
-        existing: List[str] = []
-        if inside:
-            existing = [part.strip() for part in inside.split(",") if part.strip()]
-        updated = existing + add_specs
-        lines[i] = ensure_trailing_newline(f"{prefix}[{', '.join(updated)}]")
-        release_yaml.write_text("".join(lines), encoding="utf-8")
+        deps = data.get("dependencies")
+        if deps is None:
+            deps = CommentedSeq()  # type: ignore[operator]
+        elif isinstance(deps, str):
+            deps = CommentedSeq([deps])  # type: ignore[operator]
+        elif not isinstance(deps, list):
+            deps = CommentedSeq()  # type: ignore[operator]
+
+        for spec in add_specs:
+            deps.append(spec)
+        data["dependencies"] = deps
+
+        tmp = release_yaml.with_suffix(release_yaml.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            yaml_rt.dump(data, f)
+        tmp.replace(release_yaml)
         return
 
-    for i, line in enumerate(lines):
-        if re.match(r"^\s*dependencies:\s*$", line):
-            base_indent = re.match(r"^(\s*)", line).group(1)
-            item_indent = base_indent + "  "
-            j = i + 1
-            while j < len(lines):
-                if re.match(rf"^{re.escape(base_indent)}\S", lines[j]):
-                    break
-                j += 1
-            insert = "".join(
-                [ensure_trailing_newline(f"{item_indent}- {s}") for s in add_specs]
-            )
-            lines[j:j] = [insert]
-            release_yaml.write_text("".join(lines), encoding="utf-8")
-            return
+    # Fallback: safe parse + safe dump (does not preserve comments/formatting, but is robust).
+    data = yaml.safe_load(release_yaml.read_text(encoding="utf-8", errors="ignore"))
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid YAML structure in {release_yaml}")
 
-    insert_line = ensure_trailing_newline(f"dependencies: [{', '.join(add_specs)}]")
-    for i, line in enumerate(lines):
-        if re.match(r"^\s*version:\s*", line):
-            lines[i + 1 : i + 1] = [insert_line]
-            release_yaml.write_text("".join(lines), encoding="utf-8")
-            return
+    deps = data.get("dependencies")
+    if deps is None:
+        deps_list: List[str] = []
+    elif isinstance(deps, str):
+        deps_list = [deps]
+    elif isinstance(deps, list):
+        deps_list = list(deps)
+    else:
+        deps_list = []
 
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] = lines[-1] + "\n"
-    lines.append(insert_line)
-    release_yaml.write_text("".join(lines), encoding="utf-8")
+    deps_list.extend(add_specs)
+    data["dependencies"] = deps_list
+
+    tmp = release_yaml.with_suffix(release_yaml.suffix + ".tmp")
+    tmp.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    tmp.replace(release_yaml)
 
 
 def guard_src_repo_release_yaml_dependencies(
@@ -378,14 +392,11 @@ def guard_src_repo_release_yaml_dependencies(
 
     should_fix = False
     if _allow_autofix:
-        try:
-            should_fix = click.confirm(
-                "Auto-add missing repo dependencies to each repo's release.yaml?",
-                default=False,
-                abort=False,
-            )
-        except Exception:
-            should_fix = False
+        should_fix = click.confirm(
+            "Auto-add missing repo dependencies to each repo's release.yaml?",
+            default=False,
+            abort=False,
+        )
 
     if should_fix:
         for repo_name in sorted(errors.keys()):
@@ -423,4 +434,3 @@ def guard_src_repo_release_yaml_dependencies(
 
     print("\nFix: add the missing repos to each repo's `release.yaml:dependencies` list.")
     sys.exit(1)
-
