@@ -277,6 +277,44 @@ def publish(target, build_type):
                         repo_slug,
                     ]
 
+                # Keep release notes in sync with the latest commit hash.
+                # gh 2.4.0 (Ubuntu) doesn't support `gh release edit`, so use the API.
+                gh_get_release_id_cmd = [
+                    "gh",
+                    "api",
+                    f"repos/{repo_slug}/releases/tags/{tag_name}",
+                    "--jq",
+                    ".id",
+                ]
+                release_id = subprocess.run(
+                    gh_get_release_id_cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=auth_env,
+                ).stdout.strip()
+                if not release_id:
+                    print(
+                        f"❌ Error: Could not resolve release id for '{tag_name}' in '{repo_slug}'."
+                    )
+                    return
+                gh_patch_release_cmd = [
+                    "gh",
+                    "api",
+                    "-X",
+                    "PATCH",
+                    f"repos/{repo_slug}/releases/{release_id}",
+                    "-f",
+                    f"body={new_release_notes}",
+                ]
+                subprocess.run(
+                    gh_patch_release_cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=auth_env,
+                )
+
                 subprocess.run(
                     gh_upload_cmd,
                     check=True,
