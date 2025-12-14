@@ -18,6 +18,8 @@ from pathlib import Path
 from collections import defaultdict
 from typing import List, Tuple, Dict, Any, Set, Optional
 
+from commands.repo_dependency_check import guard_src_repo_release_yaml_dependencies
+
 # Import globals, constants, and utilities
 from commands import globals as g
 from commands.constants import Colors, TYPE_MAPPING, STRING_TYPES
@@ -2021,6 +2023,8 @@ def setup(package_name="", build_type="", build_dir="", build_test_enabled=None)
     repos_to_ignore = get_repos_to_ignore()
 
     deploy_install_packages()
+
+    guard_src_repo_release_yaml_dependencies(packages_to_ignore, repos_to_ignore)
 
     pure_cmake_built = build_pure_cmake_projects(
         install_dir,

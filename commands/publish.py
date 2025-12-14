@@ -24,8 +24,7 @@ from commands.setup import (
     guard_require_version_bump_for_src_packages,
 )
 
-
-def publish(target, build_type, skip_confirm=False):
+def publish(target, build_type):
     """
     Builds the project, creates a release archive, and uploads it to GitHub,
     prompting for overwrite if the asset already exists.
@@ -54,6 +53,9 @@ def publish(target, build_type, skip_confirm=False):
     try:
         with open(release_file_path, "r") as file:
             details = yaml.safe_load(file)
+            if not isinstance(details, dict):
+                print(f"❌ Error: Invalid YAML structure in '{release_file_path}'.")
+                sys.exit(1)
             (
                 repositories,
                 secrets_config,
@@ -61,9 +63,19 @@ def publish(target, build_type, skip_confirm=False):
                 _,
                 _,
             ) = load_configuration()
+            if user_type != "devel":
+                print(
+                    "ℹ️  Note: This publish flow creates prerelease GitHub releases; non-'devel' users may not install prereleases."
+                )
 
             print(f"\n--- Setting up build for '{target}' ---")
-            build_dir = Path(g.script_directory) / "release" / "build" / target
+            build_dir = (
+                Path(g.script_directory)
+                / "release"
+                / "build"
+                / target
+                / build_type.lower()
+            )
             setup(
                 package_name=target, build_type=build_type, build_dir=str(build_dir)
             )  # Assuming setup is defined
@@ -233,48 +245,20 @@ def publish(target, build_type, skip_confirm=False):
                     print(f"❌ Error checking release status: {e.stderr}")
                     return
 
-            # 2. Decide whether to create, upload, or prompt for overwrite
-            if not release_exists:
-                print(f"✅ Release '{tag_name}' does not exist. Creating a new one...")
-                gh_create_cmd = [
-                    "gh",
-                    "release",
-                    "create",
-                    tag_name,
-                    archive_file_str,
-                    "--repo",
-                    repo_slug,
-                    "--title",
-                    f"{tag_name}",
-                    "--notes",
-                    new_release_notes,
-                    "--prerelease",
-                ]
-                subprocess.run(
-                    gh_create_cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=auth_env,
-                )
-                print(
-                    f"✅ Successfully created new release and uploaded '{archive_filename}'."
-                )
-            elif asset_exists:
-                should_overwrite = skip_confirm or release_is_prerelease
-                if release_is_prerelease and not skip_confirm:
+            # Existing tag behavior:
+            # - If the existing release is a prerelease: overwrite/re-upload the asset.
+            # - If the existing release is NOT a prerelease: terminate.
+            if release_exists:
+                if not release_is_prerelease:
                     print(
-                        "ℹ️ Release is marked as prerelease; overwriting existing asset without confirmation."
+                        f"🚫 Release '{tag_name}' already exists in '{repo_slug}' and is not a prerelease. Aborting publish for version '{version}'."
                     )
+                    return
 
-                if not should_overwrite:
-                    prompt = input(
-                        f"⚠️ Asset '{archive_filename}' already exists. Overwrite? (y/n): "
-                    ).lower()
-                    should_overwrite = prompt in ["y", "yes"]
-
-                if should_overwrite:
-                    print(f"🚀 Overwriting asset...")
+                if asset_exists:
+                    print(
+                        f"🚀 Prerelease '{tag_name}' already exists; overwriting asset '{archive_filename}'..."
+                    )
                     gh_upload_cmd = [
                         "gh",
                         "release",
@@ -285,28 +269,58 @@ def publish(target, build_type, skip_confirm=False):
                         repo_slug,
                         "--clobber",
                     ]
-                    subprocess.run(
-                        gh_upload_cmd,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        env=auth_env,
-                    )
-
-                    print(f"✅ Successfully overwrote asset in release '{tag_name}'.")
                 else:
-                    print(f"🚫 Upload for '{archive_filename}' cancelled by user.")
-            else:  # Release exists, but asset does not
-                print(f"🚀 Uploading new asset to existing release '{tag_name}'...")
-                gh_upload_cmd = [
+                    print(
+                        f"🚀 Prerelease '{tag_name}' already exists; uploading new asset '{archive_filename}'..."
+                    )
+                    gh_upload_cmd = [
+                        "gh",
+                        "release",
+                        "upload",
+                        tag_name,
+                        archive_file_str,
+                        "--repo",
+                        repo_slug,
+                    ]
+
+                # Keep release notes in sync with the latest commit hash.
+                # gh 2.4.0 (Ubuntu) doesn't support `gh release edit`, so use the API.
+                gh_get_release_id_cmd = [
                     "gh",
-                    "release",
-                    "upload",
-                    tag_name,
-                    archive_file_str,
-                    "--repo",
-                    repo_slug,
+                    "api",
+                    f"repos/{repo_slug}/releases/tags/{tag_name}",
+                    "--jq",
+                    ".id",
                 ]
+                release_id = subprocess.run(
+                    gh_get_release_id_cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=auth_env,
+                ).stdout.strip()
+                if not release_id:
+                    print(
+                        f"❌ Error: Could not resolve release id for '{tag_name}' in '{repo_slug}'."
+                    )
+                    return
+                gh_patch_release_cmd = [
+                    "gh",
+                    "api",
+                    "-X",
+                    "PATCH",
+                    f"repos/{repo_slug}/releases/{release_id}",
+                    "-f",
+                    f"body={new_release_notes}",
+                ]
+                subprocess.run(
+                    gh_patch_release_cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=auth_env,
+                )
+
                 subprocess.run(
                     gh_upload_cmd,
                     check=True,
@@ -314,8 +328,35 @@ def publish(target, build_type, skip_confirm=False):
                     text=True,
                     env=auth_env,
                 )
+                print(f"✅ Successfully uploaded asset to prerelease '{tag_name}'.")
+                return
 
-                print(f"✅ Successfully uploaded asset to release '{tag_name}'.")
+            # Create a new prerelease and upload the asset.
+            print(f"✅ Release '{tag_name}' does not exist. Creating a new one...")
+            gh_create_cmd = [
+                "gh",
+                "release",
+                "create",
+                tag_name,
+                archive_file_str,
+                "--repo",
+                repo_slug,
+                "--title",
+                f"{tag_name}",
+                "--notes",
+                new_release_notes,
+                "--prerelease",
+            ]
+            subprocess.run(
+                gh_create_cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=auth_env,
+            )
+            print(
+                f"✅ Successfully created new prerelease and uploaded '{archive_filename}'."
+            )
 
     # Keep your existing exception handling
     except FileNotFoundError as e:
@@ -345,34 +386,30 @@ def publish(target, build_type, skip_confirm=False):
     "--type",
     "-t",
     "build_type",
-    type=click.Choice(["debug", "release"], case_sensitive=False),
-    default="release",
+    type=click.Choice(["debug", "release", "both"], case_sensitive=False),
+    default="both",
     show_default=True,
     help="Build type",
 )
-@click.option(
-    "--yes",
-    "-y",
-    is_flag=True,
-    help="Auto-confirm all prompts (e.g., overwriting release assets)",
-)
-def publish_command(target, build_type, yes):
+def publish_command(target, build_type):
     """
     Build, package, and upload a release to GitHub.
 
     \b
     Examples:
-        raisin publish raisin_network                # Publish release build
-        raisin publish raisin_network --type debug   # Publish debug build
-        raisin publish my_package -t release --yes   # Auto-confirm overwrites
+        raisin publish raisin_network                # Publish both release+debug builds
+        raisin publish raisin_network --type release # Publish only release build
+        raisin publish raisin_network --type debug   # Publish only debug build
+        raisin publish my_package -t release
 
     \b
     Note: Previously called 'release' command.
     """
-    skip_confirm = False
-    if yes:
-        click.echo("⚠️  Auto-confirm enabled: All prompts will be accepted.")
-        skip_confirm = True
-
-    click.echo(f"📦 Publishing {target} ({build_type} build)...")
-    publish(target, build_type, skip_confirm)
+    build_types = (
+        ["release", "debug"]
+        if build_type.lower() == "both"
+        else [build_type.lower()]
+    )
+    click.echo(f"📦 Publishing {target} ({', '.join(build_types)} builds)...")
+    for bt in build_types:
+        publish(target, bt)

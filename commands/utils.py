@@ -203,7 +203,7 @@ def get_os_info() -> Tuple[str, str, str, str, str, dict]:
         Tuple[str, str, str, str, str, dict]: OS information tuple
     """
     # Import here to avoid circular dependency
-    from script.build_tools import find_build_tools
+    from commands.build_tools import find_build_tools
 
     system = platform.system()
     arch = _normalize_arch(platform.machine())

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# RAISIN wrapper script for easier command-line usage.
+# Intended to be symlinked into your PATH as `raisin`.
+
+# Resolve symlinks so this works when `raisin` is symlinked into PATH.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="${DIR}/${SOURCE}"
+done
+DEFAULT_SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# Prefer the RAISIN repo that contains the current working directory (useful when
+# multiple copies of this repo exist). We detect a repo root by the presence of
+# `raisin.py` and the `commands/` package.
+SCRIPT_DIR="${DEFAULT_SCRIPT_DIR}"
+search_dir="${PWD}"
+while [[ -n "${search_dir}" && "${search_dir}" != "/" ]]; do
+  if [[ -f "${search_dir}/raisin.py" && -d "${search_dir}/commands" ]]; then
+    SCRIPT_DIR="${search_dir}"
+    break
+  fi
+  search_dir="$(dirname "${search_dir}")"
+done
+
+if [[ "${1:-}" == "--install" ]]; then
+  raisin_realpath() {
+    local target="$1"
+    local dir link
+
+    if command -v realpath >/dev/null 2>&1; then
+      realpath "$target"
+      return
+    fi
+
+    # Make absolute first.
+    if [[ "$target" != /* ]]; then
+      target="$(pwd)/${target}"
+    fi
+
+    # Canonicalize directory components (resolves symlinks in the path prefix).
+    dir="$(cd -P "$(dirname "$target")" && pwd)"
+    target="${dir}/$(basename "$target")"
+
+    # Resolve symlinks on the leaf, similar to how SOURCE is resolved above.
+    while [[ -h "$target" ]]; do
+      dir="$(cd -P "$(dirname "$target")" && pwd)"
+      link="$(readlink "$target")"
+      [[ "$link" != /* ]] && link="${dir}/${link}"
+      dir="$(cd -P "$(dirname "$link")" && pwd)"
+      target="${dir}/$(basename "$link")"
+    done
+
+    printf '%s\n' "$target"
+  }
+
+  raisin_files_identical() {
+    local a="$1"
+    local b="$2"
+
+    command -v cmp >/dev/null 2>&1 && cmp -s "$a" "$b" && return 0
+    command -v diff >/dev/null 2>&1 && diff -q "$a" "$b" >/dev/null 2>&1 && return 0
+    if command -v sha256sum >/dev/null 2>&1; then
+      [[ "$(sha256sum "$a" | awk '{print $1}')" == "$(sha256sum "$b" | awk '{print $1}')" ]] && return 0
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+      [[ "$(shasum -a 256 "$a" | awk '{print $1}')" == "$(shasum -a 256 "$b" | awk '{print $1}')" ]] && return 0
+    fi
+    return 1
+  }
+
+  target_dir="${HOME}/.local/bin"
+  mkdir -p "$target_dir"
+  install_path="${target_dir}/raisin"
+  # Install a copy (not a symlink) so it keeps working even if the repo is moved.
+  src_path="${SCRIPT_DIR}/raisin"
+  if [[ ! -f "${src_path}" ]]; then
+    src_path="${DEFAULT_SCRIPT_DIR}/raisin"
+  fi
+
+  src_real="$(raisin_realpath "${src_path}")"
+  if [[ -e "${install_path}" ]]; then
+    dst_real="$(raisin_realpath "${install_path}")"
+  else
+    dst_real=""
+  fi
+
+  if [[ -e "${install_path}" ]] && (
+    [[ -n "${dst_real}" && "${dst_real}" == "${src_real}" ]] || raisin_files_identical "${src_path}" "${install_path}"
+  ); then
+    chmod +x "${install_path}"
+    echo "Already installed: ${install_path}"
+    echo "If needed, add to PATH: export PATH=\"${HOME}/.local/bin:\$PATH\""
+    exit 0
+  fi
+
+  if ! rm -f "${install_path}"; then
+    echo "❌ Error: cannot overwrite ${install_path}. Check permissions/ownership." >&2
+    exit 1
+  fi
+  if ! cp -f "${src_path}" "${install_path}"; then
+    echo "❌ Error: failed to install wrapper to ${install_path}." >&2
+    exit 1
+  fi
+  chmod +x "${install_path}"
+  echo "Installed: ${install_path}"
+  echo "If needed, add to PATH: export PATH=\"${HOME}/.local/bin:\$PATH\""
+  exit 0
+fi
+
+if [[ "${1:-}" == "--where" || "${1:-}" == "--which" ]]; then
+  echo "raisin wrapper: ${DEFAULT_SCRIPT_DIR}/raisin"
+  echo "selected repo:  ${SCRIPT_DIR}"
+  echo "raisin.py:      ${SCRIPT_DIR}/raisin.py"
+  echo "config:         ${SCRIPT_DIR}/configuration_setting.yaml"
+  exit 0
+fi
+
+python_bin="${RAISIN_PYTHON:-}"
+if [[ -z "${python_bin}" ]]; then
+  if [[ -x "${SCRIPT_DIR}/.venv/bin/python" ]]; then
+    python_bin="${SCRIPT_DIR}/.venv/bin/python"
+  elif [[ -x "${SCRIPT_DIR}/venv/bin/python" ]]; then
+    python_bin="${SCRIPT_DIR}/venv/bin/python"
+  else
+    python_bin="$(command -v python3 || true)"
+  fi
+fi
+
+if [[ -z "${python_bin}" ]]; then
+  echo "❌ Error: python3 not found. Install Python 3 or set RAISIN_PYTHON." >&2
+  exit 1
+fi
+
+exec "${python_bin}" "${SCRIPT_DIR}/raisin.py" "$@"
