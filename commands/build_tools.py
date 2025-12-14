@@ -1,3 +1,5 @@
+"""Windows build tool discovery helpers (Visual Studio, Ninja)."""
+
 import os
 import subprocess
 import shutil

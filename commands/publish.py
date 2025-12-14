@@ -69,7 +69,13 @@ def publish(target, build_type):
                 )
 
             print(f"\n--- Setting up build for '{target}' ---")
-            build_dir = Path(g.script_directory) / "release" / "build" / target
+            build_dir = (
+                Path(g.script_directory)
+                / "release"
+                / "build"
+                / target
+                / build_type.lower()
+            )
             setup(
                 package_name=target, build_type=build_type, build_dir=str(build_dir)
             )  # Assuming setup is defined
@@ -380,8 +386,8 @@ def publish(target, build_type):
     "--type",
     "-t",
     "build_type",
-    type=click.Choice(["debug", "release"], case_sensitive=False),
-    default="release",
+    type=click.Choice(["debug", "release", "both"], case_sensitive=False),
+    default="both",
     show_default=True,
     help="Build type",
 )
@@ -391,12 +397,19 @@ def publish_command(target, build_type):
 
     \b
     Examples:
-        raisin publish raisin_network                # Publish release build
-        raisin publish raisin_network --type debug   # Publish debug build
+        raisin publish raisin_network                # Publish both release+debug builds
+        raisin publish raisin_network --type release # Publish only release build
+        raisin publish raisin_network --type debug   # Publish only debug build
         raisin publish my_package -t release
 
     \b
     Note: Previously called 'release' command.
     """
-    click.echo(f"📦 Publishing {target} ({build_type} build)...")
-    publish(target, build_type)
+    build_types = (
+        ["release", "debug"]
+        if build_type.lower() == "both"
+        else [build_type.lower()]
+    )
+    click.echo(f"📦 Publishing {target} ({', '.join(build_types)} builds)...")
+    for bt in build_types:
+        publish(target, bt)
