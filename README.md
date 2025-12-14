@@ -199,7 +199,7 @@ python3 raisin.py publish -h
 #### Use `raisin` Command (Optional)
 Use the wrapper script so you can run `raisin ...` instead of `python3 raisin.py ...`:
 ```bash
-# One-time install (creates ~/.local/bin/raisin symlink)
+# One-time install (creates a copy at ~/.local/bin/raisin)
 ./raisin --install
 
 # Then you can run from anywhere (ensure ~/.local/bin is in PATH)

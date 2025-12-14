@@ -24,7 +24,6 @@ from commands.setup import (
     guard_require_version_bump_for_src_packages,
 )
 
-
 def publish(target, build_type):
     """
     Builds the project, creates a release archive, and uploads it to GitHub,
@@ -54,6 +53,9 @@ def publish(target, build_type):
     try:
         with open(release_file_path, "r") as file:
             details = yaml.safe_load(file)
+            if not isinstance(details, dict):
+                print(f"❌ Error: Invalid YAML structure in '{release_file_path}'.")
+                sys.exit(1)
             (
                 repositories,
                 secrets_config,
