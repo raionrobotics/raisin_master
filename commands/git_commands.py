@@ -271,6 +271,7 @@ def _find_src_git_repos(base_directory=None):
         if repo_path.is_dir() and (repo_path / ".git").is_dir()
     ]
 
+
 def process_repo(repo_path, pull_mode, origin="origin"):
     """
     Processes a single Git repository.
@@ -418,14 +419,17 @@ def git_clone_command(repos):
     src_directory.mkdir(parents=True, exist_ok=True)
 
     # Load repositories from configuration
-    all_repositories, _, _, _, _ = load_configuration()
+    all_repositories, tokens, _, _, _ = load_configuration()
+    token_available = bool(tokens)
 
     # If no repos specified, clone all from repositories.yaml
     if not repos:
         if not all_repositories:
             print("❌ No repositories found in repositories.yaml")
             return
-        print(f"📦 Cloning all {len(all_repositories)} repositories from repositories.yaml...")
+        print(
+            f"📦 Cloning all {len(all_repositories)} repositories from repositories.yaml..."
+        )
         repos = list(all_repositories.keys())
 
     success_count = 0
@@ -441,20 +445,26 @@ def git_clone_command(repos):
             release_url = repo_info.get("url", "")
             # Extract owner from release URL and construct source repo URL (using HTTPS for token auth)
             # e.g., git@github.com:raionrobotics/raisin_release.git -> https://github.com/raionrobotics/raisin.git
-            match = re.search(r"git@github\.com:([^/]+)/", release_url)
+            match = re.search(r"github\.com[:/]([^/]+)/", release_url)
             if match:
                 owner = match.group(1)
+                # Prefer HTTPS + token when available for GitHub
                 clone_url = f"https://github.com/{owner}/{repo}.git"
             else:
-                # Fallback: assume raionrobotics as default owner
-                clone_url = f"https://github.com/raionrobotics/{repo}.git"
+                print(f"❌ {repo} : Could not parse owner from URL '{release_url}'")
+                fail_count += 1
+                continue
             target_name = repo
 
         # Case 2: Check if it's already a full URL (SSH or HTTPS)
-        elif repo.startswith("git@") or repo.startswith("https://") or repo.startswith("http://"):
+        elif (
+            repo.startswith("git@")
+            or repo.startswith("https://")
+            or repo.startswith("http://")
+        ):
             clone_url = repo
-            # Convert SSH URL to HTTPS for token authentication
-            if repo.startswith("git@github.com:"):
+            # Convert SSH URL to HTTPS for token authentication if we have a token
+            if token_available and repo.startswith("git@github.com:"):
                 # git@github.com:owner/repo.git -> https://github.com/owner/repo.git
                 clone_url = repo.replace("git@github.com:", "https://github.com/")
             # Extract repo name from URL
@@ -468,16 +478,18 @@ def git_clone_command(repos):
 
         # Case 3: Check if it's a shorthand 'owner/repo'
         elif "/" in repo:
-            if repo.count('/') != 1:
+            if repo.count("/") != 1:
                 print(f"❌ {repo}: Invalid shorthand format. Expected 'owner/repo'.")
                 fail_count += 1
                 continue
-            owner, repo_name = repo.split('/')
+            owner, repo_name = repo.split("/")
             clone_url = f"https://github.com/{owner}/{repo_name}.git"
             target_name = repo_name
 
         else:
-            print(f"❌ {repo}: Not found in repositories.yaml and is not a valid URL or shorthand")
+            print(
+                f"❌ {repo}: Not found in repositories.yaml and is not a valid URL or shorthand"
+            )
             fail_count += 1
             continue
 
@@ -1006,9 +1018,7 @@ def git_delete_branch_command(branch, force=False):
         return
 
     flag = "-D" if force else "-d"
-    print(
-        f"Deleting branch '{branch}' ({flag}) across repositories in 'src'..."
-    )
+    print(f"Deleting branch '{branch}' ({flag}) across repositories in 'src'...")
 
     for repo_path in repo_paths:
         repo_name = os.path.basename(repo_path)
@@ -1021,7 +1031,9 @@ def git_delete_branch_command(branch, force=False):
             print(f"❌ {repo_name}: Unable to determine current branch. Skipping.")
             continue
         if current_branch == branch:
-            print(f"⚠️ {repo_name}: Branch '{branch}' is currently checked out. Skipping.")
+            print(
+                f"⚠️ {repo_name}: Branch '{branch}' is currently checked out. Skipping."
+            )
             continue
 
         # Check if branch exists locally
@@ -1103,7 +1115,9 @@ def git_push_current_command(remote="origin"):
         print("No Git repositories found in 'src'.")
         return
 
-    print(f"Pushing current branches to remote '{remote}' across repositories in 'src'...")
+    print(
+        f"Pushing current branches to remote '{remote}' across repositories in 'src'..."
+    )
     for repo_path in repo_paths:
         repo_name = os.path.basename(repo_path)
 
@@ -1111,7 +1125,9 @@ def git_push_current_command(remote="origin"):
             ["git", "symbolic-ref", "--short", "HEAD"], repo_path
         )
         if not current_branch:
-            print(f"⚠️ {repo_name}: Detached HEAD or unable to detect current branch. Skipping.")
+            print(
+                f"⚠️ {repo_name}: Detached HEAD or unable to detect current branch. Skipping."
+            )
             continue
 
         # Verify remote exists
