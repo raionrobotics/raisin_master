@@ -493,11 +493,7 @@ def _resolve_repo_spec(repo_spec, all_repositories, token_available):
         return None, None
 
     # Case 2: Full URL (SSH or HTTPS)
-    if (
-        repo_spec.startswith("git@")
-        or repo_spec.startswith("https://")
-        or repo_spec.startswith("http://")
-    ):
+    if repo_spec.startswith(("git@", "https://", "http://")):
         clone_url = repo_spec
         # Convert SSH URL to HTTPS for token authentication if we have a token (GitHub only)
         if token_available and repo_spec.startswith("git@github.com:"):
