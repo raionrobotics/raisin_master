@@ -468,7 +468,11 @@ def git_clone_command(repos):
 
         # Case 3: Check if it's a shorthand 'owner/repo'
         elif "/" in repo:
-            owner, repo_name = repo.split("/", 1)
+            if repo.count('/') != 1:
+                print(f"❌ {repo}: Invalid shorthand format. Expected 'owner/repo'.")
+                fail_count += 1
+                continue
+            owner, repo_name = repo.split('/')
             clone_url = f"https://github.com/{owner}/{repo_name}.git"
             target_name = repo_name
 
