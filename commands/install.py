@@ -198,7 +198,7 @@ def install_command(targets, build_type):
 
             for release in releases_list:
                 tag = release.get("tag_name")
-                if not tag or (release.get("prerelease") and user_type != "devel"):
+                if not tag:
                     continue
                 try:
                     current_version = parse_version(tag)
