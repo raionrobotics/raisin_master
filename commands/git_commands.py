@@ -436,60 +436,10 @@ def git_clone_command(repos):
     fail_count = 0
 
     for repo in repos:
-        clone_url = None
-        target_name = None
-
-        # Case 1: Check if it's a name in repositories.yaml
-        if repo in all_repositories:
-            repo_info = all_repositories[repo]
-            release_url = repo_info.get("url", "")
-            # Extract owner from release URL and construct source repo URL (using HTTPS for token auth)
-            # e.g., git@github.com:raionrobotics/raisin_release.git -> https://github.com/raionrobotics/raisin.git
-            match = re.search(r"github\.com[:/]([^/]+)/", release_url)
-            if match:
-                owner = match.group(1)
-                # Prefer HTTPS + token when available for GitHub
-                clone_url = f"https://github.com/{owner}/{repo}.git"
-            else:
-                print(f"❌ {repo} : Could not parse owner from URL '{release_url}'")
-                fail_count += 1
-                continue
-            target_name = repo
-
-        # Case 2: Check if it's already a full URL (SSH or HTTPS)
-        elif (
-            repo.startswith("git@")
-            or repo.startswith("https://")
-            or repo.startswith("http://")
-        ):
-            clone_url = repo
-            # Convert SSH URL to HTTPS for token authentication if we have a token
-            if token_available and repo.startswith("git@github.com:"):
-                # git@github.com:owner/repo.git -> https://github.com/owner/repo.git
-                clone_url = repo.replace("git@github.com:", "https://github.com/")
-            # Extract repo name from URL
-            match = re.search(r"[:/]([^/]+)/([^/]+?)(?:\.git)?$", repo)
-            if match:
-                target_name = match.group(2)
-            else:
-                print(f"❌ {repo}: Could not parse repository name from URL")
-                fail_count += 1
-                continue
-
-        # Case 3: Check if it's a shorthand 'owner/repo'
-        elif "/" in repo:
-            if repo.count("/") != 1:
-                print(f"❌ {repo}: Invalid shorthand format. Expected 'owner/repo'.")
-                fail_count += 1
-                continue
-            owner, repo_name = repo.split("/")
-            clone_url = f"https://github.com/{owner}/{repo_name}.git"
-            target_name = repo_name
-
-        else:
-            print(
-                f"❌ {repo}: Not found in repositories.yaml and is not a valid URL or shorthand"
-            )
+        clone_url, target_name = _resolve_repo_spec(
+            repo, all_repositories, token_available
+        )
+        if not clone_url:
             fail_count += 1
             continue
 
@@ -520,6 +470,58 @@ def git_clone_command(repos):
     print(f"✅ Success: {success_count}")
     if fail_count > 0:
         print(f"❌ Failed: {fail_count}")
+
+
+def _resolve_repo_spec(repo_spec, all_repositories, token_available):
+    """
+    Resolves a repository specifier to a clone URL and target directory name.
+
+    Returns:
+        tuple(str|None, str|None): (clone_url, target_name) or (None, None) on error.
+    """
+    # Case 1: Name in repositories.yaml
+    if repo_spec in all_repositories:
+        repo_info = all_repositories[repo_spec]
+        release_url = repo_info.get("url", "")
+        match = re.search(r"github\.com[:/]([^/]+)/", release_url)
+        if match:
+            owner = match.group(1)
+            # Prefer HTTPS + token when available for GitHub
+            clone_url = f"https://github.com/{owner}/{repo_spec}.git"
+            return clone_url, repo_spec
+        print(f"❌ {repo_spec} : Could not parse owner from URL '{release_url}'")
+        return None, None
+
+    # Case 2: Full URL (SSH or HTTPS)
+    if (
+        repo_spec.startswith("git@")
+        or repo_spec.startswith("https://")
+        or repo_spec.startswith("http://")
+    ):
+        clone_url = repo_spec
+        # Convert SSH URL to HTTPS for token authentication if we have a token (GitHub only)
+        if token_available and repo_spec.startswith("git@github.com:"):
+            clone_url = repo_spec.replace("git@github.com:", "https://github.com/")
+        match = re.search(r"[:/]([^/]+)/([^/]+?)(?:\.git)?$", repo_spec)
+        if match:
+            target_name = match.group(2)
+            return clone_url, target_name
+        print(f"❌ {repo_spec}: Could not parse repository name from URL")
+        return None, None
+
+    # Case 3: Shorthand 'owner/repo'
+    if "/" in repo_spec:
+        if repo_spec.count("/") != 1:
+            print(f"❌ {repo_spec}: Invalid shorthand format. Expected 'owner/repo'.")
+            return None, None
+        owner, repo_name = repo_spec.split("/")
+        clone_url = f"https://github.com/{owner}/{repo_name}.git"
+        return clone_url, repo_name
+
+    print(
+        f"❌ {repo_spec}: Not found in repositories.yaml and is not a valid URL or shorthand"
+    )
+    return None, None
 
 
 def git_status_command():
