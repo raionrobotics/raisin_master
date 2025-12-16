@@ -22,7 +22,8 @@ endif()
 
 include(@@SCRIPT_DIR@@/cmake/raisin_helper.cmake)
 
-set(CMAKE_PREFIX_PATH "@@SCRIPT_DIR@@/install;${CMAKE_PREFIX_PATH}" CACHE PATH "Search paths for CMake packages")
+# Search for packages in install dir and the current build's install prefix
+set(CMAKE_PREFIX_PATH "@@SCRIPT_DIR@@/install;${CMAKE_INSTALL_PREFIX};${CMAKE_PREFIX_PATH}" CACHE PATH "Search paths for CMake packages")
 set(RAISIN_MASTER_INCLUDE @@SCRIPT_DIR@@/generated/include CACHE STRING "include path")
 set(CMAKE_DEBUG_POSTFIX "_debug_build" CACHE STRING "Debug Postfix for lib, samples and tools")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

@@ -10,6 +10,7 @@ import sys
 import glob
 import yaml
 import shutil
+import fnmatch
 import platform
 import subprocess
 import requests
@@ -772,9 +773,11 @@ def update_cmake_file(project_directories, cmake_dir, build_test_enabled: bool):
     cmake_content = cmake_content.replace("@@SCRIPT_DIR@@", g.script_directory)
     cmake_content = cmake_content.replace(
         "@@RAISIN_BUILD_TEST_OVERRIDE@@",
-        ""
-        if build_test_enabled
-        else 'set(RAISIN_BUILD_TEST OFF CACHE BOOL "Build unit tests for the project" FORCE)',
+        (
+            ""
+            if build_test_enabled
+            else 'set(RAISIN_BUILD_TEST OFF CACHE BOOL "Build unit tests for the project" FORCE)'
+        ),
     )
 
     cmake_file_path = os.path.join(g.script_directory, "CMakeLists.txt")
@@ -1231,6 +1234,7 @@ def _discover_pure_cmake_projects(
 ):
     """
     Read release.yaml files to find pure CMake projects that should be built up front.
+    Always scan all src/ directories to find third-party dependencies like raisim.
     """
     packages_to_ignore = set(packages_to_ignore or [])
     repo_ignore_set = set(repos_to_ignore or [])
@@ -1238,18 +1242,8 @@ def _discover_pure_cmake_projects(
     if not src_root.is_dir():
         return []
 
-    if package_name:
-        repo_dirs = (
-            [src_root / package_name] if (src_root / package_name).is_dir() else []
-        )
-        if not repo_dirs:
-            click.echo(
-                f"⚠️  pure_cmake: package '{package_name}' not found under src/. Skipping pure_cmake scan.",
-                err=True,
-            )
-            return []
-    else:
-        repo_dirs = [p for p in src_root.iterdir() if p.is_dir()]
+    # Always scan all src/ directories to find pure_cmake projects (third-party deps)
+    repo_dirs = [p for p in src_root.iterdir() if p.is_dir()]
 
     projects = []
 
@@ -2004,11 +1998,11 @@ def setup(package_name="", build_type="", build_dir="", build_test_enabled=None)
     """
 
     if package_name == "":
-        src_dir = "src"
         install_dir = "install"
     else:
-        src_dir = "src/" + package_name
         install_dir = f"release/install/{package_name}/{g.os_type}/{g.os_version}/{g.architecture}/{build_type}"
+        # Set build_pattern to target the specific package and its dependencies
+        g.build_pattern = [package_name]
 
     delete_directory(
         os.path.join(g.script_directory, "generated")
@@ -2043,8 +2037,9 @@ def setup(package_name="", build_type="", build_dir="", build_test_enabled=None)
         ["src"], ["action"], packages_to_ignore, repos_to_ignore
     )[0]
 
+    # Always scan the entire src/ directory to find all projects and their dependencies
     project_directories = find_project_directories(
-        [src_dir], install_dir, packages_to_ignore, repos_to_ignore
+        ["src"], install_dir, packages_to_ignore, repos_to_ignore
     )
 
     # Handle .action files
