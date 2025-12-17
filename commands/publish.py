@@ -167,14 +167,14 @@ def publish(target, build_type, dry_run=False):
             )
             print(f"✅ Successfully created archive: {archive_file}.zip")
 
-            repositories, secrets, _, _, _ = load_configuration()
-
             if dry_run:
                 print("\n--- [DRY-RUN] Skipping GitHub Release ---")
                 print(f"[DRY-RUN] Would upload '{archive_file}.zip' to GitHub")
                 print(f"[DRY-RUN] Tag: v{version}")
                 print("[DRY-RUN] Build and archive completed successfully.")
                 return
+
+            repositories, secrets, _, _, _ = load_configuration()
 
             if not secrets:
                 print(
