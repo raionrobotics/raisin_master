@@ -24,7 +24,8 @@ from commands.setup import (
     guard_require_version_bump_for_src_packages,
 )
 
-def publish(target, build_type):
+
+def publish(target, build_type, dry_run=False):
     """
     Builds the project, creates a release archive, and uploads it to GitHub,
     prompting for overwrite if the asset already exists.
@@ -167,6 +168,14 @@ def publish(target, build_type):
             print(f"✅ Successfully created archive: {archive_file}.zip")
 
             repositories, secrets, _, _, _ = load_configuration()
+
+            if dry_run:
+                print("\n--- [DRY-RUN] Skipping GitHub Release ---")
+                print(f"[DRY-RUN] Would upload '{archive_file}.zip' to GitHub")
+                print(f"[DRY-RUN] Tag: v{version}")
+                print("[DRY-RUN] Build and archive completed successfully.")
+                return
+
             if not secrets:
                 print(
                     "❌ Error: GitHub tokens not found in configuration. Cannot upload to GitHub."
@@ -391,7 +400,12 @@ def publish(target, build_type):
     show_default=True,
     help="Build type",
 )
-def publish_command(target, build_type):
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Perform a dry run without actual publishing",
+)
+def publish_command(target, build_type, dry_run):
     """
     Build, package, and upload a release to GitHub.
 
@@ -401,15 +415,14 @@ def publish_command(target, build_type):
         raisin publish raisin_network --type release # Publish only release build
         raisin publish raisin_network --type debug   # Publish only debug build
         raisin publish my_package -t release
+        raisin publish my_package -t both --dry-run  # Dry run without uploading
 
     \b
     Note: Previously called 'release' command.
     """
     build_types = (
-        ["release", "debug"]
-        if build_type.lower() == "both"
-        else [build_type.lower()]
+        ["release", "debug"] if build_type.lower() == "both" else [build_type.lower()]
     )
     click.echo(f"📦 Publishing {target} ({', '.join(build_types)} builds)...")
     for bt in build_types:
-        publish(target, bt)
+        publish(target, bt, dry_run)
