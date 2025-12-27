@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 project("raisin_master" VERSION 0.0.0)
-set(CMAKE_CXX_STANDARD 17)       # Use C++17
+set(CMAKE_CXX_STANDARD 20)       # Use C++20
 set(CMAKE_CXX_STANDARD_REQUIRED ON) # Ensure the standard is required
 set(CMAKE_CXX_EXTENSIONS OFF)       # Disable compiler-specific extensions (e.g., GNU extensions)
 
