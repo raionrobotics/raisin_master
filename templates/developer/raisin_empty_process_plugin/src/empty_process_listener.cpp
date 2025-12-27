@@ -6,7 +6,6 @@
 // All rights reserved.
 //
 
-#include "raisin_network/shared_memory.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "raisin_network/raisin.hpp"
 #include <iostream>
