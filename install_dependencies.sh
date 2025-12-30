@@ -277,10 +277,10 @@ for dir in "${SRC_DIRS[@]}"; do
         continue
     fi
     if [ -d "$dir" ]; then
-        FOUND_INSTALLERS=$(find "$dir" -type f -name "install_dependencies.sh")
+        mapfile -t FOUND_INSTALLERS < <(find "$dir" -type f -name "install_dependencies.sh")
 
-        if [ -n "$FOUND_INSTALLERS" ]; then
-            echo "$FOUND_INSTALLERS" | while read -r INSTALLER; do
+        if [ "${#FOUND_INSTALLERS[@]}" -gt 0 ]; then
+            for INSTALLER in "${FOUND_INSTALLERS[@]}"; do
                 echo -e "${YELLOW}Found installer at: $INSTALLER${NC}"
                 echo -e "${YELLOW}Running dependency installer...${NC}"
 
