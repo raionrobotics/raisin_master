@@ -239,6 +239,9 @@ else
     fi
 fi
 
+# cli dependency pip installation
+pip3 install $PIP_FLAGS PyYAML Click requests packaging
+
 echo "-------------------------------------------------"
 echo "=== Installing dependencies for all packages ==="
 echo "-------------------------------------------------"
@@ -299,6 +302,3 @@ for dir in "${SRC_DIRS[@]}"; do
 done
 
 echo -e "${GREEN}Setup check complete. Now installing dependencies of each packages${NC}"
-
-# cli dependency pip installation
-pip3 install $PIP_FLAGS PyYAML Click requests packaging
