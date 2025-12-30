@@ -275,7 +275,7 @@ echo "-------------------------------------------------"
 
 SRC_DIRS=("$SCRIPT_DIR/release/install"/*)
 for dir in "${SRC_DIRS[@]}"; do
-    if [ -f "$SCRIPT_DIR/configuration_setting.yaml" ] && grep -qE "^\s*-\s*$(basename "$dir")\s*$" "$SCRIPT_DIR/configuration_setting.yaml"; then
+    if [ -f "$SCRIPT_DIR/configuration_setting.yaml" ] && awk -v name="$(basename "$dir")" '$1=="-" && $2==name && NF==2 {exit 0} END{exit 1}' "$SCRIPT_DIR/configuration_setting.yaml"; then
         echo -e "${YELLOW}Skipping dependency installation for: $dir as it's listed in configuration_setting.yaml${NC}"
         continue
     fi
