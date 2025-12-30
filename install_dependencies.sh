@@ -266,6 +266,37 @@ for dir in "${SRC_DIRS[@]}"; do
     fi
 done
 
+echo "-------------------------------------------------"
+echo "=== Installing dependencies for released packages ==="
+echo "-------------------------------------------------"
+
+SRC_DIRS=("$SCRIPT_DIR/release/install"/*)
+for dir in "${SRC_DIRS[@]}"; do
+    if [ -f "$SCRIPT_DIR/configuration_setting.yaml" ] && grep -qE "^\s*-\s*$(basename "$dir")\s*$" "$SCRIPT_DIR/configuration_setting.yaml"; then
+        echo -e "${YELLOW}Skipping dependency installation for: $dir as it's listed in configuration_setting.yaml${NC}"
+        continue
+    fi
+    if [ -d "$dir" ]; then
+        FOUND_INSTALLERS=$(find "$dir" -type f -name "install_dependencies.sh")
+
+        if [ -n "$FOUND_INSTALLERS" ]; then
+            echo "$FOUND_INSTALLERS" | while read -r INSTALLER; do
+                echo -e "${YELLOW}Found installer at: $INSTALLER${NC}"
+                echo -e "${YELLOW}Running dependency installer...${NC}"
+
+                if [ -x "$INSTALLER" ]; then
+                    "$INSTALLER"
+                else
+                    $SUDO bash "$INSTALLER"
+                fi
+                echo -e "${GREEN}✅ Completed installer for: $(basename "$dir")${NC}"
+                echo "-------------------------------------------------"
+            done
+        else
+            echo -e "${YELLOW}No install_dependencies.sh found in: $dir (searched recursively). Skipping...${NC}"
+        fi
+    fi
+done
 
 echo -e "${GREEN}Setup check complete. Now installing dependencies of each packages${NC}"
 
