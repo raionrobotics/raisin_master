@@ -709,7 +709,13 @@ def git_checkout_cli(branch):
     show_default=True,
     help="Remote to fetch from for repositories in src/",
 )
-def git_fetch_cli(remote):
+@click.option(
+    "--prune",
+    "-p",
+    is_flag=True,
+    help="Prune remote-tracking branches no longer on remote",
+)
+def git_fetch_cli(remote, prune):
     """
     Fetch updates from a remote for all repositories under src/.
 
@@ -717,11 +723,13 @@ def git_fetch_cli(remote):
     Examples:
         raisin git fetch --remote origin
         raisin git fetch -r upstream
+        raisin git fetch --prune
+        raisin git fetch -r origin --prune
         raisin git delete-branch --branch old-feature
         raisin git list-branches
         raisin git push-current --remote origin
     """
-    git_fetch_command(remote=remote)
+    git_fetch_command(remote=remote, prune=prune)
 
 
 @git_group.command("delete-branch")
@@ -823,7 +831,7 @@ def git_checkout_command(branch):
             continue
 
 
-def git_fetch_command(remote="origin"):
+def git_fetch_command(remote="origin", prune=False):
     """
     Fetch updates from the specified remote for all repositories in src/.
     """
@@ -834,10 +842,14 @@ def git_fetch_command(remote="origin"):
         print("No Git repositories found in 'src'.")
         return
 
-    print(f"Fetching from '{remote}' across repositories in 'src'...")
+    prune_str = " --prune" if prune else ""
+    print(f"Fetching from '{remote}'{prune_str} across repositories in 'src'...")
     for repo_path in repo_paths:
         repo_name = os.path.basename(repo_path)
-        result = _run_git_command(["git", "fetch", remote], repo_path)
+        cmd = ["git", "fetch", remote]
+        if prune:
+            cmd.append("--prune")
+        result = _run_git_command(cmd, repo_path)
         if result is None:
             print(f"❌ {repo_name}: Fetch failed.")
         else:
