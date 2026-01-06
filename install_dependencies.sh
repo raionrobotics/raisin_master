@@ -42,15 +42,15 @@ if ! command -v python3 &> /dev/null || ! python3 -m pip --version &> /dev/null;
     if command -v apt-get &> /dev/null; then
         echo "Attempting to install with apt..."
         $SUDO apt-get update > /dev/null
-        $SUDO apt-get install -y python3 python3-pip lsb-release python3-venv
+        $SUDO apt-get install -y python3 python3-pip lsb-release
         echo -e "${GREEN}✅ Python 3 and pip installed via apt.${NC}"
     elif command -v dnf &> /dev/null; then
         echo "Attempting to install with dnf..."
-        $SUDO dnf install -y python3 python3-pip redhat-lsb-core python3-venv
+        $SUDO dnf install -y python3 python3-pip redhat-lsb-core
         echo -e "${GREEN}✅ Python 3 and pip installed via dnf.${NC}"
     elif command -v pacman &> /dev/null; then
         echo "Attempting to install with pacman..."
-        $SUDO pacman -S --noconfirm python python-pip lsb-release python-venv
+        $SUDO pacman -S --noconfirm python python-pip lsb-release
         echo -e "${GREEN}✅ Python 3 and pip installed via pacman.${NC}"
     else
         echo -e "${RED}❌ Could not find a supported package manager (apt, dnf, pacman). Please install Python 3 and pip manually.${NC}"
@@ -58,6 +58,30 @@ if ! command -v python3 &> /dev/null || ! python3 -m pip --version &> /dev/null;
     fi
 else
     echo -e "${GREEN}✅ Python 3 and pip are already installed.${NC}"
+fi
+
+# Install python venv separately with fallback handling
+echo "Checking for Python venv..."
+if python3 -m venv --help &> /dev/null 2>&1; then
+    echo -e "${GREEN}✅ Python venv is already available.${NC}"
+else
+    echo "Python venv not found. Attempting installation..."
+    PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    if command -v apt-get &> /dev/null; then
+        if $SUDO apt-get install -y python3-venv 2>/dev/null; then
+            echo -e "${GREEN}✅ Python venv installed via apt.${NC}"
+        elif $SUDO apt-get install -y "python${PY_VERSION}-venv" 2>/dev/null; then
+            echo -e "${GREEN}✅ Python venv (python${PY_VERSION}-venv) installed via apt.${NC}"
+        else
+            echo -e "${YELLOW}⚠️ Could not install python3-venv. Some features may not work.${NC}"
+        fi
+    elif command -v dnf &> /dev/null; then
+        $SUDO dnf install -y python3-venv 2>/dev/null || \
+            echo -e "${YELLOW}⚠️ Could not install python3-venv. Some features may not work.${NC}"
+    elif command -v pacman &> /dev/null; then
+        $SUDO pacman -S --noconfirm python-venv 2>/dev/null || \
+            echo -e "${YELLOW}⚠️ Could not install python-venv. Some features may not work.${NC}"
+    fi
 fi
 
 echo -e "${YELLOW}Checking and installing development tools...${NC}"
