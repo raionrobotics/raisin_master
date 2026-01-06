@@ -35,7 +35,7 @@ if [[ "${1:-}" == "--install" ]]; then
       return 1
     fi
 
-    name="$(awk -F= '/^DEFAULT_ENV_NAME=/{gsub(/^[^"]*"/, "", $0); gsub(/"$/, "", $0); print; exit}' "${target}")"
+    name="$(awk -F'"' '/^DEFAULT_ENV_NAME=/{print $2; exit}' "${target}")"
     if [[ -n "${name}" ]]; then
       printf '%s\n' "${name}"
       return 0
@@ -165,15 +165,6 @@ raisin_resolve_python() {
 
   if [[ -x "${target}" ]]; then
     printf '%s\n' "${target}"
-    return 0
-  fi
-
-  if [[ -x "${target}/bin/python" ]]; then
-    printf '%s\n' "${target}/bin/python"
-    return 0
-  fi
-  if [[ -x "${target}/bin/python3" ]]; then
-    printf '%s\n' "${target}/bin/python3"
     return 0
   fi
 
