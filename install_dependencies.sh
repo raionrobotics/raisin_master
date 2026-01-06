@@ -42,15 +42,15 @@ if ! command -v python3 &> /dev/null || ! python3 -m pip --version &> /dev/null;
     if command -v apt-get &> /dev/null; then
         echo "Attempting to install with apt..."
         $SUDO apt-get update > /dev/null
-        $SUDO apt-get install -y python3 python3-pip lsb-release
+        $SUDO apt-get install -y python3 python3-pip lsb-release python3-venv
         echo -e "${GREEN}✅ Python 3 and pip installed via apt.${NC}"
     elif command -v dnf &> /dev/null; then
         echo "Attempting to install with dnf..."
-        $SUDO dnf install -y python3 python3-pip redhat-lsb-core
+        $SUDO dnf install -y python3 python3-pip redhat-lsb-core python3-venv
         echo -e "${GREEN}✅ Python 3 and pip installed via dnf.${NC}"
     elif command -v pacman &> /dev/null; then
         echo "Attempting to install with pacman..."
-        $SUDO pacman -S --noconfirm python python-pip lsb-release
+        $SUDO pacman -S --noconfirm python python-pip lsb-release python-venv
         echo -e "${GREEN}✅ Python 3 and pip installed via pacman.${NC}"
     else
         echo -e "${RED}❌ Could not find a supported package manager (apt, dnf, pacman). Please install Python 3 and pip manually.${NC}"
@@ -268,6 +268,3 @@ done
 
 
 echo -e "${GREEN}Setup check complete. Now installing dependencies of each packages${NC}"
-
-# cli dependency pip installation
-pip3 install $PIP_FLAGS PyYAML Click requests packaging
