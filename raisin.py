@@ -5,6 +5,7 @@ RAISIN Build & Management Tool
 Main entry point that registers all commands from the commands package.
 """
 
+import sys
 import click
 from commands.utils import init_environment
 from commands.help import print_help, help_command
@@ -45,6 +46,7 @@ def cli(ctx, yes):
     A researcher-friendly tool for building, managing, and distributing robotics software packages.
     """
     ctx.ensure_object(dict)
+    print(f"🐍 Python: {sys.executable}")
     init_environment(__file__, yes_flag=yes)
 
     # If no command provided, show help
