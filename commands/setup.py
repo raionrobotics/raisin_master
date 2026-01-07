@@ -371,21 +371,36 @@ def process_service_content(content, project_name):
 
             buffer_members.append(f"{data_name}")
 
-            if transformed_type.startswith(
-                "std::vector"
-            ) or transformed_type.startswith("std::array"):
+            is_vector = transformed_type.startswith("std::vector")
+            is_array = transformed_type.startswith("std::array")
+            if is_vector or is_array:
                 if base_type in STRING_TYPES:
-                    buffer_size.append(
-                        f"temp += sizeof(uint32_t); \n for (const auto& v : {data_name}) temp += sizeof(uint32_t) + v.size();\n"
-                    )
+                    if is_vector:
+                        buffer_size.append(
+                            f"temp += sizeof(uint32_t); \n for (const auto& v : {data_name}) temp += sizeof(uint32_t) + v.size();\n"
+                        )
+                    else:
+                        buffer_size.append(
+                            f"for (const auto& v : {data_name}) temp += sizeof(uint32_t) + v.size();\n"
+                        )
                 elif base_type in TYPE_MAPPING.values():
-                    buffer_size.append(
-                        f"temp += {data_name}.size() * sizeof({data_name});\n"
-                    )
+                    if is_vector:
+                        buffer_size.append(
+                            f"temp += sizeof(uint32_t) + {data_name}.size() * sizeof({base_type});\n"
+                        )
+                    else:
+                        buffer_size.append(
+                            f"temp += {data_name}.size() * sizeof({base_type});\n"
+                        )
                 else:
-                    buffer_size.append(
-                        f"for (const auto& v : {data_name}) temp += v.getSize();\n"
-                    )
+                    if is_vector:
+                        buffer_size.append(
+                            f"temp += sizeof(uint32_t); \n for (const auto& v : {data_name}) temp += v.getSize();\n"
+                        )
+                    else:
+                        buffer_size.append(
+                            f"for (const auto& v : {data_name}) temp += v.getSize();\n"
+                        )
             else:
                 if transformed_type in STRING_TYPES:
                     buffer_size.append(
@@ -1068,21 +1083,36 @@ def create_message_file(msg_file, project_directory, install_dir):
                 members.append(f"{transformed_type} {data_name};")
             buffer_members.append(data_name)
 
-            if transformed_type.startswith(
-                "std::vector"
-            ) or transformed_type.startswith("std::array"):
+            is_vector = transformed_type.startswith("std::vector")
+            is_array = transformed_type.startswith("std::array")
+            if is_vector or is_array:
                 if base_type in STRING_TYPES:
-                    buffer_size.append(
-                        f"temp += sizeof(uint32_t); \n for (const auto& v : {data_name}) temp += sizeof(uint32_t) + v.size();"
-                    )
+                    if is_vector:
+                        buffer_size.append(
+                            f"temp += sizeof(uint32_t); \n for (const auto& v : {data_name}) temp += sizeof(uint32_t) + v.size();"
+                        )
+                    else:
+                        buffer_size.append(
+                            f"for (const auto& v : {data_name}) temp += sizeof(uint32_t) + v.size();"
+                        )
                 elif base_type in TYPE_MAPPING.values():
-                    buffer_size.append(
-                        f"temp += {data_name}.size() * sizeof({data_name});"
-                    )
+                    if is_vector:
+                        buffer_size.append(
+                            f"temp += sizeof(uint32_t) + {data_name}.size() * sizeof({base_type});"
+                        )
+                    else:
+                        buffer_size.append(
+                            f"temp += {data_name}.size() * sizeof({base_type});"
+                        )
                 else:
-                    buffer_size.append(
-                        f"for (const auto& v : {data_name}) temp += v.getSize();"
-                    )
+                    if is_vector:
+                        buffer_size.append(
+                            f"temp += sizeof(uint32_t); \n for (const auto& v : {data_name}) temp += v.getSize();"
+                        )
+                    else:
+                        buffer_size.append(
+                            f"for (const auto& v : {data_name}) temp += v.getSize();"
+                        )
             else:
                 if transformed_type in STRING_TYPES:
                     buffer_size.append(
