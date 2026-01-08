@@ -331,4 +331,21 @@ if [[ -z "${python_bin}" ]]; then
   exit 1
 fi
 
+# Enable vcpkg binary caching by default to speed builds; users can override via env.
+if [[ -z "${VCPKG_BINARY_SOURCES:-}" ]]; then
+  vcpkg_cache_root="${SCRIPT_DIR}/.cache/vcpkg-binary"
+  mkdir -p "${vcpkg_cache_root}"
+  VCPKG_BINARY_SOURCES="files,${vcpkg_cache_root},readwrite"
+  export VCPKG_BINARY_SOURCES
+fi
+if [[ -z "${VCPKG_FEATURE_FLAGS:-}" ]]; then
+  VCPKG_FEATURE_FLAGS="manifests,binarycaching"
+  export VCPKG_FEATURE_FLAGS
+fi
+
+if [[ -z "${RAISIN_VCPKG_PARENT_DIR:-}" ]]; then
+  RAISIN_VCPKG_PARENT_DIR="${SCRIPT_DIR}/.cache/vcpkg"
+  export RAISIN_VCPKG_PARENT_DIR
+fi
+
 exec "${python_bin}" "${SCRIPT_DIR}/raisin.py" "$@"
