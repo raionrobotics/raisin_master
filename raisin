@@ -348,4 +348,14 @@ if [[ -z "${RAISIN_VCPKG_PARENT_DIR:-}" ]]; then
   export RAISIN_VCPKG_PARENT_DIR
 fi
 
+if [[ -z "${RAISIN_VCPKG_INSTALLED_DIR:-}" ]]; then
+  RAISIN_VCPKG_INSTALLED_DIR="${SCRIPT_DIR}/.cache/vcpkg_installed"
+  export RAISIN_VCPKG_INSTALLED_DIR
+fi
+mkdir -p "${RAISIN_VCPKG_INSTALLED_DIR}"
+if [[ -z "${VCPKG_INSTALLED_DIR:-}" ]]; then
+  VCPKG_INSTALLED_DIR="${RAISIN_VCPKG_INSTALLED_DIR}"
+  export VCPKG_INSTALLED_DIR
+fi
+
 exec "${python_bin}" "${SCRIPT_DIR}/raisin.py" "$@"

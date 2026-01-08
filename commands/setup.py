@@ -1332,6 +1332,15 @@ def build_pure_cmake_projects(
         else Path(g.script_directory) / ".cache" / "vcpkg"
     )
     vcpkg_parent_dir.mkdir(parents=True, exist_ok=True)
+    vcpkg_installed_env = os.environ.get(
+        "RAISIN_VCPKG_INSTALLED_DIR"
+    ) or os.environ.get("VCPKG_INSTALLED_DIR")
+    vcpkg_installed_dir = (
+        Path(vcpkg_installed_env)
+        if vcpkg_installed_env
+        else Path(g.script_directory) / ".cache" / "vcpkg_installed"
+    )
+    vcpkg_installed_dir.mkdir(parents=True, exist_ok=True)
     print(f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}")
 
     built = set()
@@ -1360,6 +1369,7 @@ def build_pure_cmake_projects(
                         f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}",
                         f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
                         f"-DVCPKG_PARENT_DIR={vcpkg_parent_dir}",
+                        f"-DVCPKG_INSTALLED_DIR={vcpkg_installed_dir}",
                         "-DBUILD_SHARED_LIBS=ON",
                     ]
                     if g.ninja_path:
@@ -1408,6 +1418,7 @@ def build_pure_cmake_projects(
                         f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
                         f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
                         f"-DVCPKG_PARENT_DIR={vcpkg_parent_dir}",
+                        f"-DVCPKG_INSTALLED_DIR={vcpkg_installed_dir}",
                         "-DBUILD_SHARED_LIBS=ON",
                     ]
                     subprocess.run(cmake_command, check=True, text=True)
