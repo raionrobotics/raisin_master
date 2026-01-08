@@ -154,12 +154,19 @@ raisin_resolve_python() {
   fi
 
   if [[ -d "${target}" ]]; then
-    if [[ -x "${target}/bin/python" ]]; then
-      printf '%s\n' "${target}/bin/python"
-      return 0
-    elif [[ -x "${target}/bin/python3" ]]; then
-      printf '%s\n' "${target}/bin/python3"
-      return 0
+    if [[ "$(uname -s)" == "CYGWIN"* || "$(uname -s)" == "MINGW"* || "$(uname -s)" == "MSYS"* ]]; then
+      if [[ -x "${target}/Scripts/python.exe" ]]; then
+        printf '%s\n' "${target}/Scripts/python.exe"
+        return 0
+      fi
+    else
+      if [[ -x "${target}/bin/python" ]]; then
+        printf '%s\n' "${target}/bin/python"
+        return 0
+      elif [[ -x "${target}/bin/python3" ]]; then
+        printf '%s\n' "${target}/bin/python3"
+        return 0
+      fi
     fi
   fi
 
