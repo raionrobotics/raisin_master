@@ -220,7 +220,10 @@ static inline const unsigned char* getBuffer(const unsigned char* buffer,
   buffer = getBuffer(buffer, sizeInBytes);
   std::size_t count = sizeInBytes / sizeof(char16_t);
   val.resize(count);
-  std::memcpy(val.data(), buffer, sizeInBytes);
+  const std::size_t bytesToCopy = count * sizeof(char16_t);
+  if (bytesToCopy > 0) {
+    std::memcpy(val.data(), buffer, bytesToCopy);
+  }
   return buffer + sizeInBytes;
 }
 
@@ -230,7 +233,10 @@ static inline const unsigned char* getBuffer(const unsigned char* buffer,
   buffer = getBuffer(buffer, sizeInBytes);
   std::size_t count = sizeInBytes / sizeof(wchar_t);
   val.resize(count);
-  std::memcpy(val.data(), buffer, sizeInBytes);
+  const std::size_t bytesToCopy = count * sizeof(wchar_t);
+  if (bytesToCopy > 0) {
+    std::memcpy(val.data(), buffer, bytesToCopy);
+  }
   return buffer + sizeInBytes;
 }
 
