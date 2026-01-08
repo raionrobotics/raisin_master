@@ -315,6 +315,35 @@ def create_service_file(srv_file, project_directory, install_dir):
         output_file.write(service_content)
 
 
+def build_string_size_expr(string_type, value_expr):
+    if string_type == "std::u16string":
+        return f"{value_expr}.size() * sizeof(char16_t)"
+    return f"{value_expr}.size()"
+
+
+def build_sequence_size_entry(is_vector, base_type, data_name, line_suffix):
+    if base_type in STRING_TYPES:
+        string_size_expr = build_string_size_expr(base_type, "v")
+        loop = (
+            f"for (const auto& v : {data_name}) temp += sizeof(uint32_t) + {string_size_expr};"
+        )
+        if is_vector:
+            return f"temp += sizeof(uint32_t); \n {loop}{line_suffix}"
+        return f"{loop}{line_suffix}"
+
+    if base_type in TYPE_MAPPING.values():
+        size_expr = f"{data_name}.size() * sizeof({base_type})"
+        if is_vector:
+            return f"temp += sizeof(uint32_t) + {size_expr};{line_suffix}"
+        return f"temp += {size_expr};{line_suffix}"
+
+    loop = f"for (const auto& v : {data_name}) temp += v.getSize();"
+    if is_vector:
+        return f"temp += sizeof(uint32_t); \n {loop}{line_suffix}"
+
+    return f"{loop}{line_suffix}"
+
+
 def process_service_content(content, project_name):
     """
     Process the service content (either request or response part).
@@ -371,25 +400,18 @@ def process_service_content(content, project_name):
 
             buffer_members.append(f"{data_name}")
 
-            if transformed_type.startswith(
-                "std::vector"
-            ) or transformed_type.startswith("std::array"):
-                if base_type in STRING_TYPES:
-                    buffer_size.append(
-                        f"temp += sizeof(uint32_t); \n for (const auto& v : {data_name}) temp += sizeof(uint32_t) + v.size();\n"
-                    )
-                elif base_type in TYPE_MAPPING.values():
-                    buffer_size.append(
-                        f"temp += {data_name}.size() * sizeof({data_name});\n"
-                    )
-                else:
-                    buffer_size.append(
-                        f"for (const auto& v : {data_name}) temp += v.getSize();\n"
-                    )
+            is_vector = transformed_type.startswith("std::vector")
+            if is_vector or transformed_type.startswith("std::array"):
+                buffer_size.append(
+                    build_sequence_size_entry(is_vector, base_type, data_name, "\n")
+                )
             else:
                 if transformed_type in STRING_TYPES:
+                    string_size_expr = build_string_size_expr(
+                        transformed_type, data_name
+                    )
                     buffer_size.append(
-                        f"temp += sizeof(uint32_t) + {data_name}.size();\n"
+                        f"temp += sizeof(uint32_t) + {string_size_expr};\n"
                     )
                 elif (
                     transformed_type in TYPE_MAPPING.values()
@@ -1068,25 +1090,18 @@ def create_message_file(msg_file, project_directory, install_dir):
                 members.append(f"{transformed_type} {data_name};")
             buffer_members.append(data_name)
 
-            if transformed_type.startswith(
-                "std::vector"
-            ) or transformed_type.startswith("std::array"):
-                if base_type in STRING_TYPES:
-                    buffer_size.append(
-                        f"temp += sizeof(uint32_t); \n for (const auto& v : {data_name}) temp += sizeof(uint32_t) + v.size();"
-                    )
-                elif base_type in TYPE_MAPPING.values():
-                    buffer_size.append(
-                        f"temp += {data_name}.size() * sizeof({data_name});"
-                    )
-                else:
-                    buffer_size.append(
-                        f"for (const auto& v : {data_name}) temp += v.getSize();"
-                    )
+            is_vector = transformed_type.startswith("std::vector")
+            if is_vector or transformed_type.startswith("std::array"):
+                buffer_size.append(
+                    build_sequence_size_entry(is_vector, base_type, data_name, "")
+                )
             else:
                 if transformed_type in STRING_TYPES:
+                    string_size_expr = build_string_size_expr(
+                        transformed_type, data_name
+                    )
                     buffer_size.append(
-                        f"temp += sizeof(uint32_t) + {data_name}.size();"
+                        f"temp += sizeof(uint32_t) + {string_size_expr};"
                     )
                 elif (
                     transformed_type in TYPE_MAPPING.values()

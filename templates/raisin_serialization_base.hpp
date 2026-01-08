@@ -34,6 +34,14 @@ static inline void setBuffer(std::vector<unsigned char>& buffer, const std::stri
   buffer.insert(buffer.end(), val.begin(), val.end());
 }
 
+static inline void setBuffer(std::vector<unsigned char>& buffer, const std::u16string& val) {
+  uint32_t size = val.size() * sizeof(char16_t);
+  setBuffer(buffer, size);
+  auto originalSize = buffer.size();
+  buffer.resize(buffer.size() + size);
+  std::memcpy(buffer.data() + originalSize, val.data(), size);
+}
+
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::wstring& val) {
   uint32_t size = val.size() * sizeof(wchar_t);
   setBuffer(buffer, size);
@@ -120,6 +128,14 @@ static unsigned char* setBuffer(unsigned char* buffer,
 }
 
 static unsigned char* setBuffer(unsigned char* buffer,
+                             const std::u16string& val) {
+  const uint32_t size = val.size() * sizeof(char16_t);
+  buffer = setBuffer(buffer, size);
+  std::memcpy(buffer, val.data(), size);
+  return buffer + size;
+}
+
+static unsigned char* setBuffer(unsigned char* buffer,
                              const std::wstring& val) {
   const uint32_t size = val.size() * sizeof(wchar_t);
   buffer = setBuffer(buffer, size);
@@ -199,12 +215,28 @@ static inline const unsigned char* getBuffer(const unsigned char* buffer,
 }
 
 static inline const unsigned char* getBuffer(const unsigned char* buffer,
+                                             std::u16string& val) {
+  uint32_t sizeInBytes;
+  buffer = getBuffer(buffer, sizeInBytes);
+  std::size_t count = sizeInBytes / sizeof(char16_t);
+  val.resize(count);
+  const std::size_t bytesToCopy = count * sizeof(char16_t);
+  if (bytesToCopy > 0) {
+    std::memcpy(val.data(), buffer, bytesToCopy);
+  }
+  return buffer + sizeInBytes;
+}
+
+static inline const unsigned char* getBuffer(const unsigned char* buffer,
                                              std::wstring& val) {
   uint32_t sizeInBytes;
   buffer = getBuffer(buffer, sizeInBytes);
   std::size_t count = sizeInBytes / sizeof(wchar_t);
   val.resize(count);
-  std::memcpy(val.data(), buffer, sizeInBytes);
+  const std::size_t bytesToCopy = count * sizeof(wchar_t);
+  if (bytesToCopy > 0) {
+    std::memcpy(val.data(), buffer, bytesToCopy);
+  }
   return buffer + sizeInBytes;
 }
 
