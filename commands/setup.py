@@ -30,6 +30,18 @@ from commands.utils import (
 )
 
 
+def _resolve_vcpkg_cache_dir(env_var_names, default_path):
+    for var_name in env_var_names:
+        env_value = os.environ.get(var_name)
+        if env_value:
+            path = Path(env_value)
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+    default_path = Path(default_path)
+    default_path.mkdir(parents=True, exist_ok=True)
+    return default_path
+
+
 # ============================================================================
 # Click CLI Command
 # ============================================================================
@@ -1323,24 +1335,14 @@ def build_pure_cmake_projects(
         return []
 
     install_prefix = Path(g.script_directory) / install_dir
-    vcpkg_parent_env = os.environ.get("RAISIN_VCPKG_PARENT_DIR") or os.environ.get(
-        "VCPKG_PARENT_DIR"
+    vcpkg_parent_dir = _resolve_vcpkg_cache_dir(
+        ("RAISIN_VCPKG_PARENT_DIR", "VCPKG_PARENT_DIR"),
+        Path(g.script_directory) / ".cache" / "vcpkg",
     )
-    vcpkg_parent_dir = (
-        Path(vcpkg_parent_env)
-        if vcpkg_parent_env
-        else Path(g.script_directory) / ".cache" / "vcpkg"
+    vcpkg_installed_dir = _resolve_vcpkg_cache_dir(
+        ("RAISIN_VCPKG_INSTALLED_DIR", "VCPKG_INSTALLED_DIR"),
+        Path(g.script_directory) / ".cache" / "vcpkg_installed",
     )
-    vcpkg_parent_dir.mkdir(parents=True, exist_ok=True)
-    vcpkg_installed_env = os.environ.get(
-        "RAISIN_VCPKG_INSTALLED_DIR"
-    ) or os.environ.get("VCPKG_INSTALLED_DIR")
-    vcpkg_installed_dir = (
-        Path(vcpkg_installed_env)
-        if vcpkg_installed_env
-        else Path(g.script_directory) / ".cache" / "vcpkg_installed"
-    )
-    vcpkg_installed_dir.mkdir(parents=True, exist_ok=True)
     print(f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}")
 
     built = set()
