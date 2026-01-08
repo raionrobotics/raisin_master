@@ -154,12 +154,25 @@ raisin_resolve_python() {
   fi
 
   if [[ -d "${target}" ]]; then
-    if [[ -x "${target}/bin/python" ]]; then
-      printf '%s\n' "${target}/bin/python"
-      return 0
-    elif [[ -x "${target}/bin/python3" ]]; then
-      printf '%s\n' "${target}/bin/python3"
-      return 0
+    if [[ "$(uname -s)" == "CYGWIN"* || "$(uname -s)" == "MINGW"* || "$(uname -s)" == "MSYS"* ]]; then
+      if [[ -x "${target}/bin/python" ]]; then
+        printf '%s\n' "${target}/bin/python"
+        return 0
+      elif [[ -x "${target}/bin/python3" ]]; then
+        printf '%s\n' "${target}/bin/python3"
+        return 0
+      elif [[ -x "${target}/Scripts/python.exe" ]]; then
+        printf '%s\n' "${target}/Scripts/python.exe"
+        return 0
+      fi
+    else
+      if [[ -x "${target}/bin/python" ]]; then
+        printf '%s\n' "${target}/bin/python"
+        return 0
+      elif [[ -x "${target}/bin/python3" ]]; then
+        printf '%s\n' "${target}/bin/python3"
+        return 0
+      fi
     fi
   fi
 
@@ -330,5 +343,29 @@ if [[ -z "${python_bin}" ]]; then
   echo "❌ Error: python3 not found. Install Python 3 or set RAISIN_PYTHON." >&2
   exit 1
 fi
+
+# Enable vcpkg binary caching by default to speed builds; users can override via env.
+if [[ -z "${VCPKG_BINARY_SOURCES:-}" ]]; then
+  vcpkg_cache_root="${SCRIPT_DIR}/.cache/vcpkg-binary"
+  mkdir -p "${vcpkg_cache_root}"
+  VCPKG_BINARY_SOURCES="files,${vcpkg_cache_root},readwrite"
+  export VCPKG_BINARY_SOURCES
+fi
+if [[ -z "${VCPKG_FEATURE_FLAGS:-}" ]]; then
+  VCPKG_FEATURE_FLAGS="manifests,binarycaching"
+  export VCPKG_FEATURE_FLAGS
+fi
+
+if [[ -z "${RAISIN_VCPKG_PARENT_DIR:-}" ]]; then
+  RAISIN_VCPKG_PARENT_DIR="${VCPKG_PARENT_DIR:-${SCRIPT_DIR}/.cache/vcpkg}"
+  export RAISIN_VCPKG_PARENT_DIR
+fi
+mkdir -p "${RAISIN_VCPKG_PARENT_DIR}"
+
+if [[ -z "${RAISIN_VCPKG_INSTALLED_DIR:-}" ]]; then
+  RAISIN_VCPKG_INSTALLED_DIR="${VCPKG_INSTALLED_DIR:-${SCRIPT_DIR}/.cache/vcpkg_installed}"
+  export RAISIN_VCPKG_INSTALLED_DIR
+fi
+mkdir -p "${RAISIN_VCPKG_INSTALLED_DIR}"
 
 exec "${python_bin}" "${SCRIPT_DIR}/raisin.py" "$@"
