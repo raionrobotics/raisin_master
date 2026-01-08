@@ -337,11 +337,11 @@ def build_sequence_size_entry(is_vector, base_type, data_name, line_suffix):
             return f"temp += sizeof(uint32_t) + {size_expr};{line_suffix}"
         return f"temp += {size_expr};{line_suffix}"
 
+    loop = f"for (const auto& v : {data_name}) temp += v.getSize();"
     if is_vector:
-        loop = f"for (const auto& v : {data_name}) temp += v.getSize();"
         return f"temp += sizeof(uint32_t); \n {loop}{line_suffix}"
 
-    return f"for (const auto& v : {data_name}) temp += v.getSize();{line_suffix}"
+    return f"{loop}{line_suffix}"
 
 
 def process_service_content(content, project_name):
