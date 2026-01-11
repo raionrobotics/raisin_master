@@ -1709,11 +1709,10 @@ def deploy_install_packages():
             p = Path(source_dir)
             target_name = p.parents[3].name
             local_src_dir = Path(g.script_directory) / "src" / target_name
-            repo_is_ignored = target_name in repos_to_ignore
             if local_src_dir.is_dir():
                 repo_name = get_repo_name_from_path(local_src_dir) or target_name
-                repo_is_ignored = repo_is_ignored or (repo_name in repos_to_ignore)
-                if not repo_is_ignored:
+                is_ignored = target_name in repos_to_ignore or repo_name in repos_to_ignore
+                if not is_ignored:
                     continue
 
             final_dest_dir = os.path.join(g.script_directory, "install")
