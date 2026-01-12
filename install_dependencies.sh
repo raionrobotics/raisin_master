@@ -60,6 +60,30 @@ else
     echo -e "${GREEN}✅ Python 3 and pip are already installed.${NC}"
 fi
 
+# Install python venv separately with fallback handling
+echo "Checking for Python venv..."
+if python3 -m venv --help &> /dev/null 2>&1; then
+    echo -e "${GREEN}✅ Python venv is already available.${NC}"
+else
+    echo "Python venv not found. Attempting installation..."
+    PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    if command -v apt-get &> /dev/null; then
+        if $SUDO apt-get install -y python3-venv 2>/dev/null; then
+            echo -e "${GREEN}✅ Python venv installed via apt.${NC}"
+        elif $SUDO apt-get install -y "python${PY_VERSION}-venv" 2>/dev/null; then
+            echo -e "${GREEN}✅ Python venv (python${PY_VERSION}-venv) installed via apt.${NC}"
+        else
+            echo -e "${YELLOW}⚠️ Could not install python3-venv. Some features may not work.${NC}"
+        fi
+    elif command -v dnf &> /dev/null; then
+        $SUDO dnf install -y python3-venv 2>/dev/null || \
+            echo -e "${YELLOW}⚠️ Could not install python3-venv. Some features may not work.${NC}"
+    elif command -v pacman &> /dev/null; then
+        $SUDO pacman -S --noconfirm python-venv 2>/dev/null || \
+            echo -e "${YELLOW}⚠️ Could not install python-venv. Some features may not work.${NC}"
+    fi
+fi
+
 echo -e "${YELLOW}Checking and installing development tools...${NC}"
 echo "-------------------------------------------------"
 
@@ -268,6 +292,3 @@ done
 
 
 echo -e "${GREEN}Setup check complete. Now installing dependencies of each packages${NC}"
-
-# cli dependency pip installation
-pip3 install $PIP_FLAGS PyYAML Click requests packaging

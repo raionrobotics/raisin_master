@@ -30,6 +30,15 @@ from commands.utils import (
 )
 
 
+def _resolve_vcpkg_cache_dir(env_var_name, default_path):
+    env_value = os.environ.get(env_var_name)
+    if not env_value and env_var_name.startswith("RAISIN_"):
+        env_value = os.environ.get(env_var_name.replace("RAISIN_", "VCPKG_"))
+    path = Path(env_value) if env_value else Path(default_path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 # ============================================================================
 # Click CLI Command
 # ============================================================================
@@ -324,9 +333,7 @@ def build_string_size_expr(string_type, value_expr):
 def build_sequence_size_entry(is_vector, base_type, data_name, line_suffix):
     if base_type in STRING_TYPES:
         string_size_expr = build_string_size_expr(base_type, "v")
-        loop = (
-            f"for (const auto& v : {data_name}) temp += sizeof(uint32_t) + {string_size_expr};"
-        )
+        loop = f"for (const auto& v : {data_name}) temp += sizeof(uint32_t) + {string_size_expr};"
         if is_vector:
             return f"temp += sizeof(uint32_t); \n {loop}{line_suffix}"
         return f"{loop}{line_suffix}"
@@ -794,9 +801,11 @@ def update_cmake_file(project_directories, cmake_dir, build_test_enabled: bool):
     cmake_content = cmake_content.replace("@@SCRIPT_DIR@@", g.script_directory)
     cmake_content = cmake_content.replace(
         "@@RAISIN_BUILD_TEST_OVERRIDE@@",
-        ""
-        if build_test_enabled
-        else 'set(RAISIN_BUILD_TEST OFF CACHE BOOL "Build unit tests for the project" FORCE)',
+        (
+            ""
+            if build_test_enabled
+            else 'set(RAISIN_BUILD_TEST OFF CACHE BOOL "Build unit tests for the project" FORCE)'
+        ),
     )
 
     cmake_file_path = os.path.join(g.script_directory, "CMakeLists.txt")
@@ -1323,6 +1332,14 @@ def build_pure_cmake_projects(
         return []
 
     install_prefix = Path(g.script_directory) / install_dir
+    vcpkg_parent_dir = _resolve_vcpkg_cache_dir(
+        "RAISIN_VCPKG_PARENT_DIR",
+        Path(g.script_directory) / ".cache" / "vcpkg",
+    )
+    vcpkg_installed_dir = _resolve_vcpkg_cache_dir(
+        "RAISIN_VCPKG_INSTALLED_DIR",
+        Path(g.script_directory) / ".cache" / "vcpkg_installed",
+    )
     print(f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}")
 
     built = set()
@@ -1350,6 +1367,8 @@ def build_pure_cmake_projects(
                         f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
                         f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}",
                         f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
+                        f"-DVCPKG_PARENT_DIR={vcpkg_parent_dir}",
+                        f"-DVCPKG_INSTALLED_DIR={vcpkg_installed_dir}",
                         "-DBUILD_SHARED_LIBS=ON",
                     ]
                     if g.ninja_path:
@@ -1397,6 +1416,8 @@ def build_pure_cmake_projects(
                         "Ninja",
                         f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
                         f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
+                        f"-DVCPKG_PARENT_DIR={vcpkg_parent_dir}",
+                        f"-DVCPKG_INSTALLED_DIR={vcpkg_installed_dir}",
                         "-DBUILD_SHARED_LIBS=ON",
                     ]
                     subprocess.run(cmake_command, check=True, text=True)
