@@ -26,6 +26,135 @@ while [[ -n "${search_dir}" && "${search_dir}" != "/" ]]; do
   search_dir="$(dirname "${search_dir}")"
 done
 
+# ============================================================================
+# Helper functions (defined early so --install can reuse them)
+# ============================================================================
+
+raisin_find_bootstrap_python() {
+  local py_bin=""
+
+  py_bin="$(command -v python3 || true)"
+  if [[ -n "${py_bin}" ]]; then
+    printf '%s\n' "${py_bin}"
+    return 0
+  fi
+
+  py_bin="$(command -v python || true)"
+  if [[ -n "${py_bin}" ]]; then
+    printf '%s\n' "${py_bin}"
+    return 0
+  fi
+
+  return 1
+}
+
+raisin_ensure_virtualenv() {
+  local bootstrap_python="$1"
+
+  if "${bootstrap_python}" -m virtualenv --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! "${bootstrap_python}" -m pip --version >/dev/null 2>&1; then
+    echo "❌ Error: pip is not available for ${bootstrap_python}." >&2
+    echo "Install pip to create the RAISIN environment." >&2
+    return 1
+  fi
+
+  echo "Installing virtualenv with ${bootstrap_python}..."
+  if "${bootstrap_python}" -m pip install virtualenv; then
+    return 0
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    if "${bootstrap_python}" -m pip install --user virtualenv; then
+      return 0
+    fi
+  else
+    if "${bootstrap_python}" -m pip install --break-system-packages virtualenv; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+raisin_create_env() {
+  local env_dir="$1"
+  local bootstrap_python=""
+  local env_python=""
+
+  bootstrap_python="$(raisin_find_bootstrap_python || true)"
+  if [[ -z "${bootstrap_python}" ]]; then
+    echo "❌ Error: python3 not found. Install Python 3 or set RAISIN_PYTHON." >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "${env_dir}")"
+
+  if [[ ! -x "${env_dir}/bin/python" && ! -x "${env_dir}/bin/python3" ]]; then
+    if ! raisin_ensure_virtualenv "${bootstrap_python}"; then
+      echo "❌ Error: failed to install virtualenv." >&2
+      return 1
+    fi
+    echo "Creating RAISIN environment at ${env_dir}..."
+    "${bootstrap_python}" -m virtualenv "${env_dir}"
+  fi
+
+  if ! env_python="$(raisin_resolve_python "${env_dir}")"; then
+    echo "❌ Error: failed to find python in ${env_dir}." >&2
+    return 1
+  fi
+
+  if [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
+    echo "Installing RAISIN requirements..."
+    "${env_python}" -m pip install --upgrade pip
+    "${env_python}" -m pip install -r "${SCRIPT_DIR}/requirements.txt"
+  fi
+}
+
+raisin_resolve_python() {
+  local target="${1:-}"
+
+  if [[ -z "${target}" ]]; then
+    return 1
+  fi
+
+  if [[ -d "${target}" ]]; then
+    if [[ "$(uname -s)" == "CYGWIN"* || "$(uname -s)" == "MINGW"* || "$(uname -s)" == "MSYS"* ]]; then
+      if [[ -x "${target}/bin/python" ]]; then
+        printf '%s\n' "${target}/bin/python"
+        return 0
+      elif [[ -x "${target}/bin/python3" ]]; then
+        printf '%s\n' "${target}/bin/python3"
+        return 0
+      elif [[ -x "${target}/Scripts/python.exe" ]]; then
+        printf '%s\n' "${target}/Scripts/python.exe"
+        return 0
+      fi
+    else
+      if [[ -x "${target}/bin/python" ]]; then
+        printf '%s\n' "${target}/bin/python"
+        return 0
+      elif [[ -x "${target}/bin/python3" ]]; then
+        printf '%s\n' "${target}/bin/python3"
+        return 0
+      fi
+    fi
+  fi
+
+  if [[ -x "${target}" ]]; then
+    printf '%s\n' "${target}"
+    return 0
+  fi
+
+  return 1
+}
+
+# ============================================================================
+# --install handler
+# ============================================================================
+
 if [[ "${1:-}" == "--install" ]]; then
   raisin_extract_env_name() {
     local target="$1"
@@ -130,7 +259,58 @@ if [[ "${1:-}" == "--install" ]]; then
   chmod +x "${install_path}"
   echo "Installed: ${install_path}"
   echo "Environment name: ${install_env_name}"
-  echo "If needed, add to PATH: export PATH=\"${HOME}/.local/bin:\$PATH\""
+
+  # Create the virtual environment immediately
+  echo ""
+  echo "🐍 Creating Python virtual environment..."
+  if ! raisin_create_env "${install_env_path}"; then
+    echo "❌ Error: failed to create virtual environment at ${install_env_path}." >&2
+    exit 1
+  fi
+  echo ""
+  echo "✅ Virtual environment created: ${install_env_path}"
+
+  # Add shell function for auto-activation
+  echo ""
+  echo "🔧 Configuring shell for venv auto-activation..."
+
+  # Detect shell config file
+  shell_config=""
+  if [[ -n "${ZSH_VERSION:-}" ]] || [[ "${SHELL}" == *"zsh"* ]]; then
+    shell_config="${HOME}/.zshrc"
+  else
+    shell_config="${HOME}/.bashrc"
+  fi
+
+  # The shell function to add
+  shell_function="
+# RAISIN: Auto-activate venv when running raisin commands
+raisin() {
+    source \"${install_env_path}/bin/activate\"
+    \"${install_path}\" \"\$@\"
+}"
+
+  # Check if function already exists
+  if [[ -f "${shell_config}" ]] && grep -q "^raisin()" "${shell_config}"; then
+    echo "  Shell function already exists in ${shell_config}"
+  else
+    # Backup and append
+    cp "${shell_config}" "${shell_config}.bak" 2>/dev/null || true
+    echo "${shell_function}" >> "${shell_config}"
+    echo "  ✅ Added raisin() function to ${shell_config}"
+  fi
+
+  echo ""
+  echo "┌──────────────────────────────────────────────────────────┐"
+  echo "│  Installation complete!                                  │"
+  echo "├──────────────────────────────────────────────────────────┤"
+  echo "│  To activate changes, run:                               │"
+  echo "│    source ${shell_config}"
+  echo "│                                                          │"
+  echo "│  Or restart your terminal.                               │"
+  echo "│                                                          │"
+  echo "│  Then 'raisin' commands will auto-activate the venv.     │"
+  echo "└──────────────────────────────────────────────────────────┘"
   exit 0
 fi
 
@@ -145,127 +325,6 @@ fi
 DEFAULT_ENV_NAME="raisin_master"
 DEFAULT_ENV_HOME="${HOME}/.venvs"
 DEFAULT_ENV_DIR="${DEFAULT_ENV_HOME}/${DEFAULT_ENV_NAME}"
-
-raisin_resolve_python() {
-  local target="${1:-}"
-
-  if [[ -z "${target}" ]]; then
-    return 1
-  fi
-
-  if [[ -d "${target}" ]]; then
-    if [[ "$(uname -s)" == "CYGWIN"* || "$(uname -s)" == "MINGW"* || "$(uname -s)" == "MSYS"* ]]; then
-      if [[ -x "${target}/bin/python" ]]; then
-        printf '%s\n' "${target}/bin/python"
-        return 0
-      elif [[ -x "${target}/bin/python3" ]]; then
-        printf '%s\n' "${target}/bin/python3"
-        return 0
-      elif [[ -x "${target}/Scripts/python.exe" ]]; then
-        printf '%s\n' "${target}/Scripts/python.exe"
-        return 0
-      fi
-    else
-      if [[ -x "${target}/bin/python" ]]; then
-        printf '%s\n' "${target}/bin/python"
-        return 0
-      elif [[ -x "${target}/bin/python3" ]]; then
-        printf '%s\n' "${target}/bin/python3"
-        return 0
-      fi
-    fi
-  fi
-
-  if [[ -x "${target}" ]]; then
-    printf '%s\n' "${target}"
-    return 0
-  fi
-
-  return 1
-}
-
-raisin_find_bootstrap_python() {
-  local py_bin=""
-
-  py_bin="$(command -v python3 || true)"
-  if [[ -n "${py_bin}" ]]; then
-    printf '%s\n' "${py_bin}"
-    return 0
-  fi
-
-  py_bin="$(command -v python || true)"
-  if [[ -n "${py_bin}" ]]; then
-    printf '%s\n' "${py_bin}"
-    return 0
-  fi
-
-  return 1
-}
-
-raisin_ensure_virtualenv() {
-  local bootstrap_python="$1"
-
-  if "${bootstrap_python}" -m virtualenv --version >/dev/null 2>&1; then
-    return 0
-  fi
-
-  if ! "${bootstrap_python}" -m pip --version >/dev/null 2>&1; then
-    echo "❌ Error: pip is not available for ${bootstrap_python}." >&2
-    echo "Install pip to create the RAISIN environment." >&2
-    return 1
-  fi
-
-  echo "Installing virtualenv with ${bootstrap_python}..."
-  if "${bootstrap_python}" -m pip install virtualenv; then
-    return 0
-  fi
-
-  if [[ "$(id -u)" -ne 0 ]]; then
-    if "${bootstrap_python}" -m pip install --user virtualenv; then
-      return 0
-    fi
-  else
-    if "${bootstrap_python}" -m pip install --break-system-packages virtualenv; then
-      return 0
-    fi
-  fi
-
-  return 1
-}
-
-raisin_create_env() {
-  local env_dir="$1"
-  local bootstrap_python=""
-  local env_python=""
-
-  bootstrap_python="$(raisin_find_bootstrap_python || true)"
-  if [[ -z "${bootstrap_python}" ]]; then
-    echo "❌ Error: python3 not found. Install Python 3 or set RAISIN_PYTHON." >&2
-    exit 1
-  fi
-
-  mkdir -p "$(dirname "${env_dir}")"
-
-  if [[ ! -x "${env_dir}/bin/python" && ! -x "${env_dir}/bin/python3" ]]; then
-    if ! raisin_ensure_virtualenv "${bootstrap_python}"; then
-      echo "❌ Error: failed to install virtualenv." >&2
-      exit 1
-    fi
-    echo "Creating RAISIN environment at ${env_dir}..."
-    "${bootstrap_python}" -m virtualenv "${env_dir}"
-  fi
-
-  if ! env_python="$(raisin_resolve_python "${env_dir}")"; then
-    echo "❌ Error: failed to find python in ${env_dir}." >&2
-    exit 1
-  fi
-
-  if [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
-    echo "Installing RAISIN requirements..."
-    "${env_python}" -m pip install --upgrade pip
-    "${env_python}" -m pip install -r "${SCRIPT_DIR}/requirements.txt"
-  fi
-}
 
 raisin_prompt_for_python() {
   local choice=""
