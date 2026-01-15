@@ -39,6 +39,15 @@ _CMAKE_RAISIN_FIND_PACKAGE_RE = re.compile(
 _FALLBACK_NAME_RE = re.compile(r"^([A-Za-z0-9_.+-]+)")
 
 
+def _is_relative_to(path: Path, other: Path) -> bool:
+    """Compatibility wrapper for Path.is_relative_to (Python 3.9+)."""
+    try:
+        path.relative_to(other)
+        return True
+    except ValueError:
+        return False
+
+
 def _normalize_dependency_name(spec: str) -> str:
     spec = str(spec).strip()
     if not spec:
@@ -81,7 +90,7 @@ def _find_package_dirs(repo_dir: Path, packages_to_ignore: Set[str]) -> List[Pat
     candidates.sort(key=lambda p: len(p.parts))
     package_dirs: List[Path] = []
     for candidate in candidates:
-        if any(candidate == pkg or candidate.is_relative_to(pkg) for pkg in package_dirs):
+        if any(candidate == pkg or _is_relative_to(candidate, pkg) for pkg in package_dirs):
             continue
         package_dirs.append(candidate)
     return package_dirs
