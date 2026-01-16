@@ -106,6 +106,17 @@ else
         else
              echo -e "${RED}❌ Neither apt nor snap found. Please install clang-format manually.${NC}"
         fi
+    elif [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &> /dev/null; then
+            echo "Attempting to install with Homebrew..."
+            if brew install clang-format; then
+                echo -e "${GREEN}✅ clang-format installed via Homebrew.${NC}"
+            else
+                echo -e "${RED}❌ Failed to install clang-format with Homebrew.${NC}"
+            fi
+        else
+            echo -e "${RED}❌ Homebrew not found. Please install Homebrew first, then install clang-format manually ('brew install clang-format').${NC}"
+        fi
     else
         echo -e "${RED}❌ Automatic clang-format installation is not supported on this OS. Please install manually.${NC}"
     fi
@@ -159,24 +170,34 @@ if command -v pre-commit &> /dev/null || /usr/bin/python3 -m pre_commit --versio
     echo -e "${GREEN}✅ pre-commit is already installed.${NC}"
 else
     echo "pre-commit not found. Attempting installation..."
-    # Attempt 0: Try Linux installation
-    # Linux Installation Logic
-    if [[ "$(uname)" == "Linux" ]] && $SUDO apt install pre-commit; then
-        echo -e "${GREEN}✅ pre-commit installed to system via apt.${NC}"
-    # Attempt 1: System-wide install (most reliable for git hooks)
-    elif $SUDO /usr/bin/python3 -m pip install $PIP_FLAGS pre-commit; then
-        echo -e "${GREEN}✅ pre-commit installed to system Python via pip.${NC}"
-    # Attempt 2: Current user install via `python3 -m pip` (safer fallback)
-    elif python3 -m pip install --user pre-commit; then
-        echo -e "${GREEN}✅ pre-commit installed for the current user via pip.${NC}"
-        echo -e "${YELLOW}NOTE: Make sure '~/.local/bin' is in your shell's PATH.${NC}"
-    # Attempt 3: Fallback to just `pip3`
-    elif pip3 install --user pre-commit; then
-        echo -e "${GREEN}✅ pre-commit installed for the current user via pip3.${NC}"
-        echo -e "${YELLOW}NOTE: Make sure '~/.local/bin' is in your shell's PATH.${NC}"
+    if [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &> /dev/null; then
+            echo "Attempting to install with Homebrew..."
+            if brew install pre-commit; then
+                echo -e "${GREEN}✅ pre-commit installed via Homebrew.${NC}"
+            else
+                echo -e "${RED}❌ Failed to install pre-commit with Homebrew.${NC}"
+            fi
+        else
+            echo -e "${RED}❌ Homebrew not found. Please install pre-commit manually ('brew install pre-commit').${NC}"
+        fi
+    elif [[ "$(uname)" == "Linux" ]]; then
+        if command -v apt-get &> /dev/null && $SUDO apt-get install -y pre-commit; then
+            echo -e "${GREEN}✅ pre-commit installed to system via apt.${NC}"
+        elif $SUDO /usr/bin/python3 -m pip install $PIP_FLAGS pre-commit; then
+            echo -e "${GREEN}✅ pre-commit installed to system Python via pip.${NC}"
+        elif python3 -m pip install --user pre-commit; then
+            echo -e "${GREEN}✅ pre-commit installed for the current user via pip.${NC}"
+            echo -e "${YELLOW}NOTE: Make sure '~/.local/bin' is in your shell's PATH.${NC}"
+        elif pip3 install --user pre-commit; then
+            echo -e "${GREEN}✅ pre-commit installed for the current user via pip3.${NC}"
+            echo -e "${YELLOW}NOTE: Make sure '~/.local/bin' is in your shell's PATH.${NC}"
+        else
+            echo -e "${RED}❌ All automatic installation attempts for pre-commit failed.${NC}"
+            echo -e "${RED}Please install it manually, for example:${NC} sudo /usr/bin/python3 -m pip install pre-commit"
+        fi
     else
-        echo -e "${RED}❌ All automatic installation attempts for pre-commit failed.${NC}"
-        echo -e "${RED}Please install it manually, for example:${NC} sudo /usr/bin/python3 -m pip install pre-commit"
+        echo -e "${RED}❌ Automatic pre-commit installation is not supported on this OS. Please install manually.${NC}"
     fi
 fi
 
