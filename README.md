@@ -16,7 +16,7 @@ Before you begin, ensure your system meets the following requirements.
 
 ### Supported Operating Systems
 * **Windows**: 10 / 11
-* **Linux**: Ubuntu 22.04 / 24.04
+* **Linux**: Ubuntu 22.04 / 24.04 (x86_64, ARM64)
 
 ### Dependencies
 
@@ -37,18 +37,11 @@ You will need to manually install the following software. Please ensure that the
 * [Ninja](https://github.com/ninja-build/ninja/releases)
 * [Visual Studio 2022](https://visualstudio.microsoft.com/vs/) (with the "Desktop development with C++" workload)
 
-### Project Initialization
-
 Once the above dependencies are installed, complete the following steps in your terminal:
 
-1.  **Initialize Git Submodules:** (Only for Windows) This project uses `vcpkg` as a git submodule for C++ package management in Windows.
+**Initialize Git Submodules:** This project uses `vcpkg` as a git submodule for C++ package management.
     ```bash
     git submodule update --init
-    ```
-
-2.  **Install Required Python Packages:**
-    ```bash
-    pip3 install PyYAML packaging requests click
     ```
 
 ---
@@ -57,23 +50,16 @@ Once the above dependencies are installed, complete the following steps in your 
 
 Follow these steps to configure and build your project.
 
-### 1. Add Source Packages
+### 1. Install System Dependencies
 
-Create a directory named `src` in the root of the repository. Clone any source code packages you are developing or contributing to inside this `src` directory.
-```bash
-mkdir src
-cd src
-git clone <your-package-repository>
-```
-
-### 2. Install System Dependencies
-
-Run the dependency installation script. If you've added new source packages, run this again to ensure all system dependencies are installed.
+Run the dependency installation script to install all required system packages.
 ```bash
 sudo bash install_dependencies.sh
 ```
 
-### 3. Install RAISIN CLI
+> **Note:** If you add new source packages later, run this script again to ensure all system dependencies are installed.
+
+### 2. Install RAISIN CLI
 
 Run the install command to set up the RAISIN command-line tool. This creates a Python virtual environment and installs a shell function that automatically activates it.
 ```bash
@@ -82,16 +68,26 @@ Run the install command to set up the RAISIN command-line tool. This creates a P
 
 After installation, **restart your terminal** (or run `source ~/.bashrc`) to enable the `raisin` command.
 
-### 4. Project Configuration
+### 3. Project Configuration
 
 Create your local configuration file by copying the provided example.
 ```bash
 cp configuration_setting_example.yaml configuration_setting.yaml
 ```
 Next, open **`configuration_setting.yaml`** and edit the following fields:
-* **`gh_token`**: Set this to the GitHub Personal Access Token provided to you by Raion Robotics.
-* **`target_type`**: Set to `devel` for development builds.
-* **`raisin_ignore`**: (Optional) Add the names of any packages you wish to exclude from the dependency resolution process.
+* **`gh_tokens`**: Set your GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`).
+* **`user_type`**: Set to `"user"` for stable releases or `"devel"` for development builds.
+* **`packages_to_ignore`**: (Optional) List of packages to exclude from the build process.
+* **`repos_to_ignore`**: (Optional) List of repositories to exclude (uses prebuilt binaries instead).
+
+### 4. Add Source Packages
+
+Create a directory named `src` in the root of the repository. Clone any source code packages you are developing or contributing to inside this `src` directory.
+```bash
+mkdir src
+cd src
+git clone <your-package-repository>
+```
 
 ### 5. Install Package Dependencies
 
@@ -150,14 +146,16 @@ Alternatively, advanced users can use standard CMake commands in the `cmake-buil
 #### Publish a Release
 Build, package, and upload a release to GitHub:
 ```bash
-# Publish release build
+# Publish both release and debug builds (default)
 raisin publish raisin_network
 
-# Publish debug build
-raisin publish raisin_network --type debug
-raisin publish raisin_network -t release
+# Publish only release build
+raisin publish raisin_network --type release
 
-# Publish with dry-run (no upload)
+# Publish only debug build
+raisin publish raisin_network --type debug
+
+# Dry run without uploading
 raisin publish raisin_network --dry-run
 ```
 
