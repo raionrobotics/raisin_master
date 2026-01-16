@@ -25,7 +25,7 @@ from commands.setup import (
 )
 
 
-def publish(target, build_type, dry_run=False, install_deps=False):
+def publish(target, build_type, dry_run=False):
     """
     Builds the project, creates a release archive, and uploads it to GitHub,
     prompting for overwrite if the asset already exists.
@@ -34,7 +34,6 @@ def publish(target, build_type, dry_run=False, install_deps=False):
         target: Target package name
         build_type: Build type (debug/release)
         dry_run: If True, skip actual publishing
-        install_deps: If True, install package dependencies (requires sudo)
     """
 
     guard_require_version_bump_for_src_packages()
@@ -87,7 +86,6 @@ def publish(target, build_type, dry_run=False, install_deps=False):
                 package_name=target,
                 build_type=build_type,
                 build_dir=str(build_dir),
-                install_deps=install_deps,
             )
             os.makedirs(build_dir, exist_ok=True)
 
@@ -414,13 +412,7 @@ def publish(target, build_type, dry_run=False, install_deps=False):
     is_flag=True,
     help="Perform a dry run without actual publishing",
 )
-@click.option(
-    "--install-deps",
-    "install_deps",
-    is_flag=True,
-    help="Install package dependencies (requires sudo). Skipped by default.",
-)
-def publish_command(target, build_type, dry_run, install_deps):
+def publish_command(target, build_type, dry_run):
     """
     Build, package, and upload a release to GitHub.
 
@@ -431,15 +423,14 @@ def publish_command(target, build_type, dry_run, install_deps):
         raisin publish raisin_network --type debug   # Publish only debug build
         raisin publish my_package -t release
         raisin publish my_package -t both --dry-run  # Dry run without uploading
-        raisin publish my_package --install-deps     # Also install package dependencies
 
     \b
     Note: Previously called 'release' command.
-    Package dependencies are skipped by default; run 'raisin setup' first to install them.
+    Run 'sudo bash install_dependencies.sh' to install package dependencies.
     """
     build_types = (
         ["release", "debug"] if build_type.lower() == "both" else [build_type.lower()]
     )
     click.echo(f"📦 Publishing {target} ({', '.join(build_types)} builds)...")
     for bt in build_types:
-        publish(target, bt, dry_run, install_deps=install_deps)
+        publish(target, bt, dry_run)

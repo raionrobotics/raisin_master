@@ -4,13 +4,13 @@ RAISIN is a Python-based build-system wrapper designed to simplify dependency ma
 
 ---
 
-## 📜 License and Disclaimer
+## License and Disclaimer
 
 This software is proprietary and is licensed under the terms detailed in the `LICENSE` file. **Its use is exclusively permitted for products and projects developed by or for Raion Robotics Inc.**
 
 ---
 
-## ✅ Prerequisites
+## Prerequisites
 
 Before you begin, ensure your system meets the following requirements.
 
@@ -19,14 +19,6 @@ Before you begin, ensure your system meets the following requirements.
 * **Linux**: Ubuntu 22.04 / 24.04 (x86_64, ARM64)
 
 ### Dependencies
-
-#### For Linux
-The provided shell script automates the entire dependency installation process. Simply run:
-```bash
-sudo bash install_dependencies.sh
-```
-
-> **Note:** Package-specific dependencies are automatically installed when you run `raisin setup`, so you only need to run this script once.
 
 #### For Windows
 You will need to manually install the following software. Please ensure that the executables for **Git**, **Git CLI**, and **Ninja** are available in your system's `Path` environment variable.
@@ -46,29 +38,26 @@ Once the above dependencies are installed, complete the following steps in your 
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 Follow these steps to configure and build your project.
 
-### 1. Install System Dependencies
+### 1. Install RAISIN CLI and System Dependencies
 
-Run the dependency installation script to install core system tools (Python, CMake, Ninja, etc.).
-```bash
-sudo bash install_dependencies.sh
-```
+Run the install command to set up the RAISIN command-line tool. This:
+- Creates a Python virtual environment
+- Installs system dependencies (Python, CMake, Ninja, clang-format, pre-commit, gh)
+- Adds a shell function for auto-activation
 
-> **Note:** This script only installs system-wide development tools. Package-specific dependencies (e.g., ROS packages, custom libraries) are automatically installed by `raisin setup`.
-
-### 2. Install RAISIN CLI
-
-Run the install command to set up the RAISIN command-line tool. This creates a Python virtual environment and installs a shell function that automatically activates it.
 ```bash
 ./raisin --install
 ```
 
 After installation, **restart your terminal** (or run `source ~/.bashrc`) to enable the `raisin` command.
 
-### 3. Project Configuration
+> **Note:** The installer will prompt for sudo to install system dependencies. If you prefer to install them separately, you can run `sudo bash install_system_deps.sh` manually.
+
+### 2. Project Configuration
 
 Create your local configuration file by copying the provided example.
 ```bash
@@ -80,7 +69,7 @@ Next, open **`configuration_setting.yaml`** and edit the following fields:
 * **`packages_to_ignore`**: (Optional) List of packages to exclude from the build process.
 * **`repos_to_ignore`**: (Optional) List of repositories to exclude (uses prebuilt binaries instead).
 
-### 4. Add Source Packages
+### 3. Add Source Packages
 
 Create a directory named `src` in the root of the repository. Clone any source code packages you are developing or contributing to inside this `src` directory.
 ```bash
@@ -89,9 +78,9 @@ cd src
 git clone <your-package-repository>
 ```
 
-### 5. Install Package Dependencies
+### 4. Install Release Packages
 
-Run the `install` command to let RAISIN resolve and install all necessary dependencies for the packages located in the `src` directory.
+Run the `install` command to let RAISIN resolve and download release packages for dependencies.
 ```bash
 raisin install <package_name>
 ```
@@ -107,21 +96,25 @@ raisin install raisin_network --type debug
 raisin install package1 package2 package3
 ```
 
-### 6. Setup and Generate Build Files
+### 5. Setup and Generate Build Files
 
-Run the `setup` command to configure the CMake environment and generate interface files. This command also installs package-specific dependencies (requires sudo).
+Run the `setup` command to configure the CMake environment and generate interface files. This also copies package-specific dependency installers to `install/dependencies/`.
 ```bash
-# Setup all packages (installs package dependencies)
+# Setup all packages
 raisin setup
 
 # Setup specific packages
 raisin setup raisin_network
-
-# Skip dependency installation (if already installed)
-raisin setup --no-install
 ```
 
-> **Note:** Package dependencies are installed automatically on first run and cached. Subsequent runs will skip installation unless package files change.
+### 6. Install Package Dependencies
+
+After setup, run the package dependency installer to install package-specific dependencies (e.g., ROS packages, custom libraries).
+```bash
+sudo bash install_dependencies.sh
+```
+
+> **Note:** This script runs all `install_dependencies.sh` files from your source packages (`src/`) and release packages (`install/dependencies/`).
 
 ### 7. Build the Project
 
@@ -142,12 +135,7 @@ raisin build -t release -i
 
 # Build specific target
 raisin build -t release raisin_network
-
-# Also install package dependencies (if not done via setup)
-raisin build -t release --install-deps
 ```
-
-> **Note:** The build command skips package dependency installation by default. Run `raisin setup` first, or use `--install-deps` if needed.
 
 Alternatively, advanced users can use standard CMake commands in the `cmake-build-debug/` or `cmake-build-release/` directories.
 
@@ -167,12 +155,7 @@ raisin publish raisin_network --type debug
 
 # Dry run without uploading
 raisin publish raisin_network --dry-run
-
-# Also install package dependencies
-raisin publish raisin_network --install-deps
 ```
-
-> **Note:** Like `build`, the publish command skips package dependency installation by default.
 
 #### List Packages
 View available packages:
@@ -235,7 +218,37 @@ raisin publish -h
 
 ---
 
-## 📚 Documentation
+## Quick Reference: Workflow Summary
+
+```bash
+# 1. Install RAISIN CLI and system tools
+./raisin --install
+
+# 2. Configure your settings
+cp configuration_setting_example.yaml configuration_setting.yaml
+# Edit configuration_setting.yaml with your GitHub tokens
+
+# 3. Clone source packages
+mkdir -p src && cd src
+git clone <your-package-repository>
+cd ..
+
+# 4. Download release packages
+raisin install <package_name>
+
+# 5. Generate build files (copies install scripts)
+raisin setup
+
+# 6. Install package-specific dependencies
+sudo bash install_dependencies.sh
+
+# 7. Build
+raisin build -t release
+```
+
+---
+
+## Documentation
 
 For more detailed information and API references, please visit our official documentation:
 
