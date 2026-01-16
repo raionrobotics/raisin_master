@@ -2221,11 +2221,6 @@ def setup(
         dirs_exist_ok=True,
     )
 
-    shutil.copy2(
-        Path(g.script_directory) / "templates/install_dependencies.sh",
-        Path(g.script_directory) / "install/install_dependencies.sh",
-    )
-
     collect_src_vcpkg_dependencies(repos_to_ignore)
     generate_vcpkg_json()
     click.secho("✅ Setup finished successfully.", fg="green")
