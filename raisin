@@ -260,6 +260,19 @@ if [[ "${1:-}" == "--install" ]]; then
   echo ""
   echo "✅ Virtual environment created: ${install_env_path}"
 
+  # Install system dependencies (cmake, ninja, etc.)
+  echo ""
+  echo "📦 Installing system dependencies..."
+  sys_deps_script="${SCRIPT_DIR}/install_system_deps.sh"
+  if [[ -f "${sys_deps_script}" ]]; then
+    if ! sudo bash "${sys_deps_script}"; then
+      echo "⚠️  Some system dependencies may not have installed correctly."
+      echo "   You can re-run: sudo bash ${sys_deps_script}"
+    fi
+  else
+    echo "⚠️  System dependencies script not found: ${sys_deps_script}"
+  fi
+
   # Add shell function for auto-activation
   echo ""
   echo "🔧 Configuring shell for venv auto-activation..."
