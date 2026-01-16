@@ -1846,7 +1846,8 @@ def install_package_dependencies(repos_to_ignore: list) -> None:
                     f"📦 Package dependencies already installed (hash: {current_hash}). Skipping."
                 )
                 return
-        except Exception:
+        except (IOError, yaml.YAMLError) as e:
+            print(f"Warning: Could not read or parse dependency marker file. Re-installing dependencies. Error: {e}")
             pass  # If marker file is invalid, proceed with installation
 
     # 5. Run installers
