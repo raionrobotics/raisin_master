@@ -260,6 +260,19 @@ if [[ "${1:-}" == "--install" ]]; then
   echo ""
   echo "✅ Virtual environment created: ${install_env_path}"
 
+  # Install system dependencies (cmake, ninja, etc.)
+  echo ""
+  echo "📦 Installing system dependencies..."
+  sys_deps_script="${SCRIPT_DIR}/install_system_deps.sh"
+  if [[ -f "${sys_deps_script}" ]]; then
+    if ! sudo bash "${sys_deps_script}"; then
+      echo "⚠️  Some system dependencies may not have installed correctly."
+      echo "   You can re-run: sudo bash ${sys_deps_script}"
+    fi
+  else
+    echo "⚠️  System dependencies script not found: ${sys_deps_script}"
+  fi
+
   # Add shell function for auto-activation
   echo ""
   echo "🔧 Configuring shell for venv auto-activation..."
@@ -276,12 +289,14 @@ if [[ "${1:-}" == "--install" ]]; then
   shell_function="
 # RAISIN: Auto-activate venv when running raisin commands
 raisin() {
-    if [[ -f \"${install_env_path}/bin/activate\" ]]; then
-        source \"${install_env_path}/bin/activate\"
-    elif [[ -f \"${install_env_path}/Scripts/activate\" ]]; then
-        source \"${install_env_path}/Scripts/activate\"
+    if [[ "\${VIRTUAL_ENV}" != "${install_env_path}" ]]; then
+        if [[ -f "${install_env_path}/bin/activate" ]]; then
+            source "${install_env_path}/bin/activate"
+        elif [[ -f "${install_env_path}/Scripts/activate" ]]; then
+            source "${install_env_path}/Scripts/activate"
+        fi
     fi
-    \"${install_path}\" \"\$@\"
+    "${install_path}" "\$@"
 }"
 
   # Check if function already exists

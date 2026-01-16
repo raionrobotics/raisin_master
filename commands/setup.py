@@ -60,6 +60,9 @@ def setup_command(no_test, targets):
         raisin setup                        # Build all packages
         raisin setup raisin_network         # Build specific package
         raisin setup raibo_controller gui   # Build multiple packages
+
+    Note: Package dependency installers are copied to install/dependencies/.
+    Run 'sudo bash install_dependencies.sh' afterwards to install them.
     """
     targets = list(targets)
     process_build_targets(targets)
@@ -1711,7 +1714,9 @@ def deploy_install_packages():
             local_src_dir = Path(g.script_directory) / "src" / target_name
             if local_src_dir.is_dir():
                 repo_name = get_repo_name_from_path(local_src_dir) or target_name
-                is_ignored = target_name in repos_to_ignore or repo_name in repos_to_ignore
+                is_ignored = (
+                    target_name in repos_to_ignore or repo_name in repos_to_ignore
+                )
                 if not is_ignored:
                     continue
 
@@ -1772,6 +1777,45 @@ def deploy_install_packages():
 
     except Exception as e:
         print(f"❌ An error occurred during deployment: {e}")
+
+
+def copy_installers(repos_to_ignore: list) -> None:
+    """
+    Copy install_dependencies.sh from src packages to install/dependencies/.
+
+    This makes package-specific dependency installers available for the user
+    to run manually with: sudo bash install_dependencies.sh
+
+    Args:
+        repos_to_ignore: List of repository names to skip
+    """
+    repos_to_ignore_set = set(repos_to_ignore or [])
+    src_path = Path(g.script_directory) / "src"
+    deps_dest = Path(g.script_directory) / "install" / "dependencies"
+
+    if not src_path.is_dir():
+        return
+
+    copied_count = 0
+    for pkg_dir in src_path.iterdir():
+        if not pkg_dir.is_dir():
+            continue
+        if pkg_dir.name in repos_to_ignore_set:
+            continue
+
+        installer = pkg_dir / "install_dependencies.sh"
+        if installer.is_file():
+            dest_dir = deps_dest / pkg_dir.name
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(installer, dest_dir / "install_dependencies.sh")
+            copied_count += 1
+            print(f"  -> Copied installer from: {pkg_dir.name}")
+
+    if copied_count > 0:
+        print(f"📦 Copied {copied_count} package installer(s) to install/dependencies/")
+        print(
+            "   Run 'sudo bash install_dependencies.sh' to install package dependencies."
+        )
 
 
 def collect_src_vcpkg_dependencies(repos_to_ignore=None):
@@ -2035,9 +2079,20 @@ def guard_require_version_bump_for_src_packages():
         sys.exit(1)
 
 
-def setup(package_name="", build_type="", build_dir="", build_test_enabled=None):
+def setup(
+    package_name="",
+    build_type="",
+    build_dir="",
+    build_test_enabled=None,
+):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
+
+    Args:
+        package_name: Name of specific package to setup (empty for all)
+        build_type: Build type (Debug/Release)
+        build_dir: Build directory path
+        build_test_enabled: Whether to build tests
     """
 
     if package_name == "":
@@ -2060,6 +2115,9 @@ def setup(package_name="", build_type="", build_dir="", build_test_enabled=None)
     repos_to_ignore = get_repos_to_ignore()
 
     deploy_install_packages()
+
+    # Copy package-specific dependency installers to install/dependencies/
+    copy_installers(repos_to_ignore)
 
     guard_src_repo_release_yaml_dependencies(packages_to_ignore, repos_to_ignore)
 
@@ -2161,11 +2219,6 @@ def setup(package_name="", build_type="", build_dir="", build_test_enabled=None)
         Path(g.script_directory) / "generated",
         Path(g.script_directory) / install_dir / "generated",
         dirs_exist_ok=True,
-    )
-
-    shutil.copy2(
-        Path(g.script_directory) / "templates/install_dependencies.sh",
-        Path(g.script_directory) / "install/install_dependencies.sh",
     )
 
     collect_src_vcpkg_dependencies(repos_to_ignore)

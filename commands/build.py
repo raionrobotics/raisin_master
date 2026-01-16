@@ -165,13 +165,13 @@ def build_cli_command(build_types, install, targets):
 
     \b
     Note: This command first runs setup, then compiles.
+    Run 'sudo bash install_dependencies.sh' to install package dependencies.
     """
     # Import here to avoid circular dependency
     from commands.setup import setup, process_build_targets
 
     targets = list(targets)
 
-    # Run setup first
     process_build_targets(targets)
 
     if not g.build_pattern:

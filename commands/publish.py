@@ -29,6 +29,11 @@ def publish(target, build_type, dry_run=False):
     """
     Builds the project, creates a release archive, and uploads it to GitHub,
     prompting for overwrite if the asset already exists.
+
+    Args:
+        target: Target package name
+        build_type: Build type (debug/release)
+        dry_run: If True, skip actual publishing
     """
 
     guard_require_version_bump_for_src_packages()
@@ -78,8 +83,10 @@ def publish(target, build_type, dry_run=False):
                 / build_type.lower()
             )
             setup(
-                package_name=target, build_type=build_type, build_dir=str(build_dir)
-            )  # Assuming setup is defined
+                package_name=target,
+                build_type=build_type,
+                build_dir=str(build_dir),
+            )
             os.makedirs(build_dir, exist_ok=True)
 
             print("⚙️  Running CMake...")
@@ -419,6 +426,7 @@ def publish_command(target, build_type, dry_run):
 
     \b
     Note: Previously called 'release' command.
+    Run 'sudo bash install_dependencies.sh' to install package dependencies.
     """
     build_types = (
         ["release", "debug"] if build_type.lower() == "both" else [build_type.lower()]
