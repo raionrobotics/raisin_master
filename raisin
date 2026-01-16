@@ -289,12 +289,14 @@ if [[ "${1:-}" == "--install" ]]; then
   shell_function="
 # RAISIN: Auto-activate venv when running raisin commands
 raisin() {
-    if [[ -f \"${install_env_path}/bin/activate\" ]]; then
-        source \"${install_env_path}/bin/activate\"
-    elif [[ -f \"${install_env_path}/Scripts/activate\" ]]; then
-        source \"${install_env_path}/Scripts/activate\"
+    if [[ "\${VIRTUAL_ENV}" != "${install_env_path}" ]]; then
+        if [[ -f "${install_env_path}/bin/activate" ]]; then
+            source "${install_env_path}/bin/activate"
+        elif [[ -f "${install_env_path}/Scripts/activate" ]]; then
+            source "${install_env_path}/Scripts/activate"
+        fi
     fi
-    \"${install_path}\" \"\$@\"
+    "${install_path}" "\$@"
 }"
 
   # Check if function already exists
