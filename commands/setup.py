@@ -12,6 +12,8 @@ import yaml
 import shutil
 import platform
 import subprocess
+import hashlib
+from datetime import datetime
 import requests
 import click
 from pathlib import Path
@@ -50,8 +52,14 @@ def _resolve_vcpkg_cache_dir(env_var_name, default_path):
     is_flag=True,
     help="Disable building unit tests for this setup run",
 )
+@click.option(
+    "--no-install",
+    "no_install",
+    is_flag=True,
+    help="Skip package dependency installation (requires sudo)",
+)
 @click.argument("targets", nargs=-1)
-def setup_command(no_test, targets):
+def setup_command(no_test, no_install, targets):
     """
     Generate interface files (.msg, .srv, .action) and configure CMake.
 
@@ -60,6 +68,7 @@ def setup_command(no_test, targets):
         raisin setup                        # Build all packages
         raisin setup raisin_network         # Build specific package
         raisin setup raibo_controller gui   # Build multiple packages
+        raisin setup --no-install           # Skip dependency installation
     """
     targets = list(targets)
     process_build_targets(targets)
@@ -69,7 +78,7 @@ def setup_command(no_test, targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup(build_test_enabled=(not no_test))
+    setup(build_test_enabled=(not no_test), install_deps=(not no_install))
 
 
 def process_build_targets(targets):
@@ -1711,7 +1720,9 @@ def deploy_install_packages():
             local_src_dir = Path(g.script_directory) / "src" / target_name
             if local_src_dir.is_dir():
                 repo_name = get_repo_name_from_path(local_src_dir) or target_name
-                is_ignored = target_name in repos_to_ignore or repo_name in repos_to_ignore
+                is_ignored = (
+                    target_name in repos_to_ignore or repo_name in repos_to_ignore
+                )
                 if not is_ignored:
                     continue
 
@@ -1772,6 +1783,122 @@ def deploy_install_packages():
 
     except Exception as e:
         print(f"❌ An error occurred during deployment: {e}")
+
+
+def install_package_dependencies(repos_to_ignore: list) -> None:
+    """
+    Run install_dependencies.sh for all packages (src + release).
+
+    Uses a marker file with hash to skip if already installed.
+    Collects installers from two sources:
+    1. Source packages: src/<pkg>/install_dependencies.sh
+    2. Release packages: install/dependencies/<pkg>/install_dependencies.sh
+
+    Args:
+        repos_to_ignore: List of repository names to skip
+    """
+    installers: List[Path] = []
+    repos_to_ignore_set = set(repos_to_ignore or [])
+
+    # 1. Collect from src/<pkg>/install_dependencies.sh
+    src_path = Path(g.script_directory) / "src"
+    if src_path.is_dir():
+        for pkg_dir in src_path.iterdir():
+            if pkg_dir.is_dir() and pkg_dir.name not in repos_to_ignore_set:
+                installer = pkg_dir / "install_dependencies.sh"
+                if installer.is_file():
+                    installers.append(installer)
+
+    # 2. Collect from install/dependencies/<pkg>/install_dependencies.sh
+    deps_path = Path(g.script_directory) / "install" / "dependencies"
+    if deps_path.is_dir():
+        for pkg_dir in deps_path.iterdir():
+            if pkg_dir.is_dir():
+                installer = pkg_dir / "install_dependencies.sh"
+                if installer.is_file():
+                    installers.append(installer)
+
+    if not installers:
+        print("📦 No package dependency installers found.")
+        return
+
+    # 3. Compute hash from paths + mtimes
+    hash_data = ""
+    installer_info = []
+    for installer in sorted(installers):
+        mtime = int(installer.stat().st_mtime)
+        hash_data += f"{installer}:{mtime}\n"
+        installer_info.append(
+            {"name": installer.parent.name, "mtime": mtime, "path": str(installer)}
+        )
+
+    current_hash = hashlib.sha256(hash_data.encode()).hexdigest()[:16]
+
+    # 4. Check marker file, skip if hash matches
+    # Note: Marker is in root directory because install/ is deleted during setup
+    marker_file = Path(g.script_directory) / ".deps_installed"
+    if marker_file.is_file():
+        try:
+            with open(marker_file, "r") as f:
+                marker_data = yaml.safe_load(f)
+            if marker_data and marker_data.get("hash") == current_hash:
+                print(
+                    f"📦 Package dependencies already installed (hash: {current_hash}). Skipping."
+                )
+                return
+        except Exception:
+            pass  # If marker file is invalid, proceed with installation
+
+    # 5. Run installers
+    print(f"\n{'='*60}")
+    print("📦 Installing package dependencies...")
+    print(f"{'='*60}")
+    print(f"Found {len(installers)} installer(s) to run.\n")
+
+    failed_installers = []
+    for installer in installers:
+        pkg_name = installer.parent.name
+        print(f"🔧 Running dependency installer for: {pkg_name}")
+        try:
+            # Check if running as root
+            if os.geteuid() == 0:
+                # Already root, run directly
+                result = subprocess.run(
+                    ["bash", str(installer)],
+                    check=True,
+                    capture_output=False,
+                )
+            else:
+                # Need sudo
+                result = subprocess.run(
+                    ["sudo", "bash", str(installer)],
+                    check=True,
+                    capture_output=False,
+                )
+            print(f"   ✅ Completed: {pkg_name}")
+        except subprocess.CalledProcessError as e:
+            print(f"   ❌ Failed: {pkg_name} (exit code: {e.returncode})")
+            failed_installers.append(pkg_name)
+        except Exception as e:
+            print(f"   ❌ Error running installer for {pkg_name}: {e}")
+            failed_installers.append(pkg_name)
+
+    # 6. Create marker file (even if some failed, record what was attempted)
+    marker_data = {
+        "hash": current_hash,
+        "packages": installer_info,
+        "installed_at": datetime.now().isoformat(),
+        "failed": failed_installers if failed_installers else None,
+    }
+    with open(marker_file, "w") as f:
+        yaml.dump(marker_data, f, default_flow_style=False)
+
+    if failed_installers:
+        print(f"\n⚠️  Some installers failed: {', '.join(failed_installers)}")
+        print("   You may need to run them manually or check their output.")
+    else:
+        print(f"\n✅ All package dependencies installed successfully.")
+    print(f"{'='*60}\n")
 
 
 def collect_src_vcpkg_dependencies(repos_to_ignore=None):
@@ -2035,9 +2162,22 @@ def guard_require_version_bump_for_src_packages():
         sys.exit(1)
 
 
-def setup(package_name="", build_type="", build_dir="", build_test_enabled=None):
+def setup(
+    package_name="",
+    build_type="",
+    build_dir="",
+    build_test_enabled=None,
+    install_deps=True,
+):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
+
+    Args:
+        package_name: Name of specific package to setup (empty for all)
+        build_type: Build type (Debug/Release)
+        build_dir: Build directory path
+        build_test_enabled: Whether to build tests
+        install_deps: Whether to install package dependencies (requires sudo)
     """
 
     if package_name == "":
@@ -2060,6 +2200,10 @@ def setup(package_name="", build_type="", build_dir="", build_test_enabled=None)
     repos_to_ignore = get_repos_to_ignore()
 
     deploy_install_packages()
+
+    # Install package-specific dependencies (idempotent via marker file)
+    if install_deps:
+        install_package_dependencies(repos_to_ignore)
 
     guard_src_repo_release_yaml_dependencies(packages_to_ignore, repos_to_ignore)
 

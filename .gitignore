@@ -52,6 +52,7 @@ install/*
 src/*
 log/*
 git_pull.sh
+.deps_installed
 
 dependency_graph.png
 dependency_graph.png.png

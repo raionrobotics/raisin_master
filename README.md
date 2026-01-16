@@ -26,7 +26,7 @@ The provided shell script automates the entire dependency installation process. 
 sudo bash install_dependencies.sh
 ```
 
-> **Note:** If you plan to add source packages later, you may need to run this script again after cloning new repositories that have additional system dependencies.
+> **Note:** Package-specific dependencies are automatically installed when you run `raisin setup`, so you only need to run this script once.
 
 #### For Windows
 You will need to manually install the following software. Please ensure that the executables for **Git**, **Git CLI**, and **Ninja** are available in your system's `Path` environment variable.
@@ -52,12 +52,12 @@ Follow these steps to configure and build your project.
 
 ### 1. Install System Dependencies
 
-Run the dependency installation script to install all required system packages.
+Run the dependency installation script to install core system tools (Python, CMake, Ninja, etc.).
 ```bash
 sudo bash install_dependencies.sh
 ```
 
-> **Note:** If you add new source packages later, run this script again to ensure all system dependencies are installed.
+> **Note:** This script only installs system-wide development tools. Package-specific dependencies (e.g., ROS packages, custom libraries) are automatically installed by `raisin setup`.
 
 ### 2. Install RAISIN CLI
 
@@ -107,16 +107,21 @@ raisin install raisin_network --type debug
 raisin install package1 package2 package3
 ```
 
-### 6. Generate Build Files
+### 6. Setup and Generate Build Files
 
-Run the `setup` command to configure the CMake environment and generate interface files.
+Run the `setup` command to configure the CMake environment and generate interface files. This command also installs package-specific dependencies (requires sudo).
 ```bash
-# Setup all packages
+# Setup all packages (installs package dependencies)
 raisin setup
 
 # Setup specific packages
 raisin setup raisin_network
+
+# Skip dependency installation (if already installed)
+raisin setup --no-install
 ```
+
+> **Note:** Package dependencies are installed automatically on first run and cached. Subsequent runs will skip installation unless package files change.
 
 ### 7. Build the Project
 
@@ -129,7 +134,7 @@ raisin build --type release
 # Build debug version
 raisin build --type debug
 
-# Build and install
+# Build and install artifacts
 raisin build --type release --install
 
 # Short form
@@ -137,7 +142,12 @@ raisin build -t release -i
 
 # Build specific target
 raisin build -t release raisin_network
+
+# Also install package dependencies (if not done via setup)
+raisin build -t release --install-deps
 ```
+
+> **Note:** The build command skips package dependency installation by default. Run `raisin setup` first, or use `--install-deps` if needed.
 
 Alternatively, advanced users can use standard CMake commands in the `cmake-build-debug/` or `cmake-build-release/` directories.
 
@@ -157,7 +167,12 @@ raisin publish raisin_network --type debug
 
 # Dry run without uploading
 raisin publish raisin_network --dry-run
+
+# Also install package dependencies
+raisin publish raisin_network --install-deps
 ```
+
+> **Note:** Like `build`, the publish command skips package dependency installation by default.
 
 #### List Packages
 View available packages:

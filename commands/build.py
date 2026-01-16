@@ -151,8 +151,14 @@ def build_command(build_types, to_install=False):
     is_flag=True,
     help="Install artifacts to install/ directory after building",
 )
+@click.option(
+    "--install-deps",
+    "install_deps",
+    is_flag=True,
+    help="Install package dependencies (requires sudo). Skipped by default.",
+)
 @click.argument("targets", nargs=-1)
-def build_cli_command(build_types, install, targets):
+def build_cli_command(build_types, install, install_deps, targets):
     """
     Compile the project using CMake and Ninja.
 
@@ -162,16 +168,17 @@ def build_cli_command(build_types, install, targets):
         raisin build --type debug --install          # Build debug and install
         raisin build -t release -t debug -i          # Build both types and install
         raisin build -t release raisin_network       # Build specific target
+        raisin build -t release --install-deps       # Also install package dependencies
 
     \b
     Note: This command first runs setup, then compiles.
+    Package dependencies are skipped by default; run 'raisin setup' first to install them.
     """
     # Import here to avoid circular dependency
     from commands.setup import setup, process_build_targets
 
     targets = list(targets)
 
-    # Run setup first
     process_build_targets(targets)
 
     if not g.build_pattern:
@@ -179,7 +186,7 @@ def build_cli_command(build_types, install, targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup()
+    setup(install_deps=install_deps)
 
     # Then build
     build_types = list(build_types) if build_types else []
