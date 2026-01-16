@@ -16,7 +16,7 @@ Before you begin, ensure your system meets the following requirements.
 
 ### Supported Operating Systems
 * **Windows**: 10 / 11
-* **Linux**: Ubuntu 22.04 / 24.04
+* **Linux**: Ubuntu 22.04 / 24.04 (x86_64, ARM64)
 
 ### Dependencies
 
@@ -25,6 +25,8 @@ The provided shell script automates the entire dependency installation process. 
 ```bash
 sudo bash install_dependencies.sh
 ```
+
+> **Note:** If you plan to add source packages later, you may need to run this script again after cloning new repositories that have additional system dependencies.
 
 #### For Windows
 You will need to manually install the following software. Please ensure that the executables for **Git**, **Git CLI**, and **Ninja** are available in your system's `Path` environment variable.
@@ -35,18 +37,11 @@ You will need to manually install the following software. Please ensure that the
 * [Ninja](https://github.com/ninja-build/ninja/releases)
 * [Visual Studio 2022](https://visualstudio.microsoft.com/vs/) (with the "Desktop development with C++" workload)
 
-### Project Initialization
-
 Once the above dependencies are installed, complete the following steps in your terminal:
 
-1.  **Initialize Git Submodules:** (Only for Windows) This project uses `vcpkg` as a git submodule for C++ package management in Windows.
+**Initialize Git Submodules:** This project uses `vcpkg` as a git submodule for C++ package management.
     ```bash
     git submodule update --init
-    ```
-
-2.  **Install Required Python Packages:**
-    ```bash
-    pip3 install PyYAML packaging requests click
     ```
 
 ---
@@ -55,18 +50,37 @@ Once the above dependencies are installed, complete the following steps in your 
 
 Follow these steps to configure and build your project.
 
-### 1. Project Configuration
+### 1. Install System Dependencies
+
+Run the dependency installation script to install all required system packages.
+```bash
+sudo bash install_dependencies.sh
+```
+
+> **Note:** If you add new source packages later, run this script again to ensure all system dependencies are installed.
+
+### 2. Install RAISIN CLI
+
+Run the install command to set up the RAISIN command-line tool. This creates a Python virtual environment and installs a shell function that automatically activates it.
+```bash
+./raisin --install
+```
+
+After installation, **restart your terminal** (or run `source ~/.bashrc`) to enable the `raisin` command.
+
+### 3. Project Configuration
 
 Create your local configuration file by copying the provided example.
 ```bash
 cp configuration_setting_example.yaml configuration_setting.yaml
 ```
 Next, open **`configuration_setting.yaml`** and edit the following fields:
-* **`gh_token`**: Set this to the GitHub Personal Access Token provided to you by Raion Robotics.
-* **`target_type`**: Set to `devel` for development builds.
-* **`raisin_ignore`**: (Optional) Add the names of any packages you wish to exclude from the dependency resolution process.
+* **`gh_tokens`**: Set your GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`).
+* **`user_type`**: Set to `"user"` for stable releases or `"devel"` for development builds.
+* **`packages_to_ignore`**: (Optional) List of packages to exclude from the build process.
+* **`repos_to_ignore`**: (Optional) List of repositories to exclude (uses prebuilt binaries instead).
 
-### 2. Add Source Packages
+### 4. Add Source Packages
 
 Create a directory named `src` in the root of the repository. Clone any source code packages you are developing or contributing to inside this `src` directory.
 ```bash
@@ -75,138 +89,134 @@ cd src
 git clone <your-package-repository>
 ```
 
-### 3. Install Dependencies
+### 5. Install Package Dependencies
 
 Run the `install` command to let RAISIN resolve and install all necessary dependencies for the packages located in the `src` directory.
 ```bash
-python3 raisin.py install <package_name>
+raisin install <package_name>
 ```
 For example:
 ```bash
 # Install a specific package (release version by default)
-python3 raisin.py install raisin_network
+raisin install raisin_network
 
 # Install debug version
-python3 raisin.py install raisin_network --type debug
+raisin install raisin_network --type debug
 
 # Install multiple packages
-python3 raisin.py install package1 package2 package3
+raisin install package1 package2 package3
 ```
 
-### 4. Generate Build Files
+### 6. Generate Build Files
 
 Run the `setup` command to configure the CMake environment and generate interface files.
 ```bash
 # Setup all packages
-python3 raisin.py setup
+raisin setup
 
 # Setup specific packages
-python3 raisin.py setup raisin_network
+raisin setup raisin_network
 ```
 
-### 5. Build the Project
+### 7. Build the Project
 
 Use the `build` command to compile the project. You must specify the build type using `--type` (or `-t`).
 
 ```bash
 # Build release version
-python3 raisin.py build --type release
+raisin build --type release
 
 # Build debug version
-python3 raisin.py build --type debug
+raisin build --type debug
 
 # Build and install
-python3 raisin.py build --type release --install
+raisin build --type release --install
 
 # Short form
-python3 raisin.py build -t release -i
+raisin build -t release -i
 
 # Build specific target
-python3 raisin.py build -t release raisin_network
+raisin build -t release raisin_network
 ```
 
 Alternatively, advanced users can use standard CMake commands in the `cmake-build-debug/` or `cmake-build-release/` directories.
 
-### 6. Additional Commands
+### 8. Additional Commands
 
 #### Publish a Release
 Build, package, and upload a release to GitHub:
 ```bash
-# Publish release build
-python3 raisin.py publish raisin_network
+# Publish both release and debug builds (default)
+raisin publish raisin_network
 
-# Publish debug build
-python3 raisin.py publish raisin_network --type debug
+# Publish only release build
+raisin publish raisin_network --type release
+
+# Publish only debug build
+raisin publish raisin_network --type debug
+
+# Dry run without uploading
+raisin publish raisin_network --dry-run
 ```
 
 #### List Packages
 View available packages:
 ```bash
 # List local packages
-python3 raisin.py index local
+raisin index local
 
 # List all remote packages on GitHub
-python3 raisin.py index release
+raisin index release
 
 # List versions of a specific package
-python3 raisin.py index release raisin_network
+raisin index release raisin_network
 ```
 
 #### Git Operations
 Manage multiple repositories:
 ```bash
 # Show status of all repositories
-python3 raisin.py git status
+raisin git status
 
 # Pull all repositories
-python3 raisin.py git pull
+raisin git pull
 
 # Pull from specific remote
-python3 raisin.py git pull --remote upstream
+raisin git pull --remote upstream
 
 # Fetch from a remote for all src repositories (default: origin)
-python3 raisin.py git fetch --remote origin
+raisin git fetch --remote origin
 
 # Checkout or create a branch across all repositories in src
-python3 raisin.py git checkout --branch feature-branch
+raisin git checkout --branch feature-branch
 
 # Delete a local branch across all repositories in src (use -f to force)
-python3 raisin.py git delete-branch --branch old-feature
-python3 raisin.py git delete-branch -b old-feature -f
+raisin git delete-branch --branch old-feature
+raisin git delete-branch -b old-feature -f
 
 # List local branches for all repositories in src
-python3 raisin.py git list-branches
+raisin git list-branches
 
 # Push the current branch to the same branch name on a remote for all src repositories
-python3 raisin.py git push-current --remote origin
+raisin git push-current --remote origin
 
 # Setup git remotes
-python3 raisin.py git setup origin:raionrobotics dev:yourusername
+raisin git setup origin:raionrobotics dev:yourusername
 ```
 
 #### Get Help
 View help for any command:
 ```bash
 # Main help
-python3 raisin.py --help
-python3 raisin.py -h
+raisin --help
+raisin -h
 
 # Command-specific help
-python3 raisin.py build --help
-python3 raisin.py publish -h
+raisin build --help
+raisin publish -h
 ```
 
-#### Use `raisin` Command (Optional)
-Use the wrapper script so you can run `raisin ...` instead of `python3 raisin.py ...`:
-```bash
-# One-time install (creates a copy at ~/.local/bin/raisin)
-./raisin --install
-
-# Then you can run from anywhere (ensure ~/.local/bin is in PATH)
-raisin --help
-raisin publish <target>
-```
-Note: If you have multiple RAISIN repo clones, `raisin ...` prefers the clone that contains your current working directory (walks up to find `raisin.py`).
+> **Note:** If you have multiple RAISIN repo clones, `raisin` prefers the clone that contains your current working directory (walks up to find `raisin.py`). You can also use `python3 raisin.py` directly if needed.
 
 ---
 
