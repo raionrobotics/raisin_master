@@ -2,11 +2,11 @@
 # install_dependencies.sh
 # -----------------------
 # Purpose  : Run package-specific dependency installers.
-# Sources  : Searches for install_dependencies.sh in:
-#            1. src/<pkg>/install_dependencies.sh (source packages)
-#            2. install/dependencies/<pkg>/install_dependencies.sh (release packages)
+# Source   : install/dependencies/<pkg>/install_dependencies.sh
 # Usage    : sudo bash install_dependencies.sh
-# Note     : Run `raisin setup` first to copy install scripts from release packages.
+# Note     : Run `raisin setup` first to copy install scripts to install/dependencies/.
+#            - Source packages (src/) are copied by copy_installers()
+#            - Release packages are copied by deploy_install_packages()
 
 set -euo pipefail
 
@@ -59,24 +59,10 @@ run_installer() {
     fi
 }
 
-# --- 1. Run installers from src/<pkg>/install_dependencies.sh ---
-if [[ -d "${SCRIPT_DIR}/src" ]]; then
-    for pkg_dir in "${SCRIPT_DIR}"/src/*/; do
-        if [[ -d "${pkg_dir}" ]]; then
-            installer="${pkg_dir}install_dependencies.sh"
-            if [[ -f "${installer}" ]]; then
-                pkg_name="$(basename "${pkg_dir}")"
-                ((found_installers++))
-                if ! run_installer "${installer}" "${pkg_name}"; then
-                    failed_installers+=("${pkg_name} (src)")
-                fi
-                echo ""
-            fi
-        fi
-    done
-fi
-
-# --- 2. Run installers from install/dependencies/<pkg>/install_dependencies.sh ---
+# --- Run installers from install/dependencies/<pkg>/install_dependencies.sh ---
+# All installers are copied here by 'raisin setup':
+#   - Source packages: copied by copy_installers()
+#   - Release packages: copied by deploy_install_packages()
 if [[ -d "${SCRIPT_DIR}/install/dependencies" ]]; then
     for pkg_dir in "${SCRIPT_DIR}"/install/dependencies/*/; do
         if [[ -d "${pkg_dir}" ]]; then
@@ -85,7 +71,7 @@ if [[ -d "${SCRIPT_DIR}/install/dependencies" ]]; then
                 pkg_name="$(basename "${pkg_dir}")"
                 ((found_installers++))
                 if ! run_installer "${installer}" "${pkg_name}"; then
-                    failed_installers+=("${pkg_name} (release)")
+                    failed_installers+=("${pkg_name}")
                 fi
                 echo ""
             fi
@@ -96,13 +82,12 @@ fi
 # --- Summary ---
 echo "================================================================="
 if [[ ${found_installers} -eq 0 ]]; then
-    echo -e "${YELLOW}📦 No package dependency installers found.${NC}"
+    echo -e "${YELLOW}📦 No package dependency installers found in install/dependencies/.${NC}"
     echo ""
     echo "To install package dependencies:"
-    echo "  1. Clone source packages to src/"
-    echo "  2. Run 'raisin install <pkg>' to download release packages"
-    echo "  3. Run 'raisin setup' to copy install scripts"
-    echo "  4. Run 'sudo bash install_dependencies.sh' again"
+    echo "  1. Clone source packages to src/ and/or run 'raisin install <pkg>'"
+    echo "  2. Run 'raisin setup' to copy install scripts to install/dependencies/"
+    echo "  3. Run 'sudo bash install_dependencies.sh' again"
 else
     if [[ ${#failed_installers[@]} -eq 0 ]]; then
         echo -e "${GREEN}✅ All ${found_installers} package installer(s) completed successfully.${NC}"
