@@ -92,7 +92,7 @@ raisin_create_env() {
 
   mkdir -p "$(dirname "${env_dir}")"
 
-  if [[ ! -x "${env_dir}/bin/python" && ! -x "${env_dir}/bin/python3" ]]; then
+  if ! raisin_resolve_python "${env_dir}" > /dev/null 2>&1; then
     if ! raisin_ensure_virtualenv "${bootstrap_python}"; then
       echo "❌ Error: failed to install virtualenv." >&2
       return 1
@@ -121,25 +121,15 @@ raisin_resolve_python() {
   fi
 
   if [[ -d "${target}" ]]; then
-    if [[ "$(uname -s)" == "CYGWIN"* || "$(uname -s)" == "MINGW"* || "$(uname -s)" == "MSYS"* ]]; then
-      if [[ -x "${target}/bin/python" ]]; then
-        printf '%s\n' "${target}/bin/python"
-        return 0
-      elif [[ -x "${target}/bin/python3" ]]; then
-        printf '%s\n' "${target}/bin/python3"
-        return 0
-      elif [[ -x "${target}/Scripts/python.exe" ]]; then
-        printf '%s\n' "${target}/Scripts/python.exe"
-        return 0
-      fi
-    else
-      if [[ -x "${target}/bin/python" ]]; then
-        printf '%s\n' "${target}/bin/python"
-        return 0
-      elif [[ -x "${target}/bin/python3" ]]; then
-        printf '%s\n' "${target}/bin/python3"
-        return 0
-      fi
+    if [[ -x "${target}/bin/python" ]]; then
+      printf '%s\n' "${target}/bin/python"
+      return 0
+    elif [[ -x "${target}/bin/python3" ]]; then
+      printf '%s\n' "${target}/bin/python3"
+      return 0
+    elif [[ "$(uname -s)" =~ ^(CYGWIN|MINGW|MSYS) && -x "${target}/Scripts/python.exe" ]]; then
+      printf '%s\n' "${target}/Scripts/python.exe"
+      return 0
     fi
   fi
 
@@ -286,13 +276,17 @@ if [[ "${1:-}" == "--install" ]]; then
   shell_function="
 # RAISIN: Auto-activate venv when running raisin commands
 raisin() {
-    source \"${install_env_path}/bin/activate\"
+    if [[ -f \"${install_env_path}/bin/activate\" ]]; then
+        source \"${install_env_path}/bin/activate\"
+    elif [[ -f \"${install_env_path}/Scripts/activate\" ]]; then
+        source \"${install_env_path}/Scripts/activate\"
+    fi
     \"${install_path}\" \"\$@\"
 }"
 
   # Check if function already exists
   if [[ -f "${shell_config}" ]] && grep -q "^raisin()" "${shell_config}"; then
-    echo "  Shell function already exists in ${shell_config}"
+    echo "  Shell function already exists in ${shell_config}. To update, please remove it and re-run the installer."
   else
     # Backup and append
     cp "${shell_config}" "${shell_config}.bak" 2>/dev/null || true
