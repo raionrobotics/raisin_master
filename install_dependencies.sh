@@ -16,28 +16,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 shopt -s nullglob
 
 # --- Detect system info ---
+# These functions match the logic in commands/utils.py get_os_info()
 detect_os_type() {
-    case "$(uname -s)" in
-        Linux*)  echo "linux" ;;
-        Darwin*) echo "darwin" ;;
-        CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
-        *)       echo "unknown" ;;
-    esac
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck source=/dev/null
+        . /etc/os-release
+        echo "${ID:-linux}"
+    else
+        case "$(uname -s)" in
+            Linux*)  echo "linux" ;;
+            Darwin*) echo "macos" ;;
+            CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
+            *)       echo "unknown" ;;
+        esac
+    fi
 }
 
 detect_os_version() {
     if [[ -f /etc/os-release ]]; then
         # shellcheck source=/dev/null
         . /etc/os-release
-        local id="${ID:-unknown}"
-        local version="${VERSION_ID:-}"
-        if [[ -n "${version}" ]]; then
-            echo "${id}${version}"
-        else
-            echo "${id}"
-        fi
+        echo "${VERSION_ID:-unknown}"
     elif [[ "$(uname -s)" == "Darwin" ]]; then
-        echo "macos$(sw_vers -productVersion | cut -d. -f1,2)"
+        # Match Python's platform.mac_ver() format
+        sw_vers -productVersion
     else
         echo "unknown"
     fi
@@ -114,7 +116,7 @@ if [[ -d "${SCRIPT_DIR}/src" ]]; then
             if [[ -f "${installer}" ]]; then
                 pkg_name="$(basename "${pkg_dir}")"
                 processed_packages["${pkg_name}"]=1
-                ((found_installers++))
+                ((found_installers++)) || true
                 if ! run_installer "${installer}" "${pkg_name}" "src"; then
                     failed_installers+=("${pkg_name}")
                 fi
@@ -147,7 +149,7 @@ if [[ -d "${release_install_dir}" ]]; then
                         # Only run once per package (first build_type found)
                         if [[ -z "${processed_packages[${pkg_name}]:-}" ]]; then
                             processed_packages["${pkg_name}"]=1
-                            ((found_installers++))
+                            ((found_installers++)) || true
                             build_type="$(basename "${build_type_dir}")"
                             if ! run_installer "${installer}" "${pkg_name}" "release/${build_type}"; then
                                 failed_installers+=("${pkg_name}")
