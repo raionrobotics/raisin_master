@@ -61,8 +61,7 @@ def setup_command(no_test, targets):
         raisin setup raisin_network         # Build specific package
         raisin setup raibo_controller gui   # Build multiple packages
 
-    Note: Package dependency installers are copied to install/dependencies/.
-    Run 'sudo bash install_dependencies.sh' afterwards to install them.
+    Note: Run 'sudo bash install_dependencies.sh' to install package dependencies.
     """
     targets = list(targets)
     process_build_targets(targets)
@@ -1759,63 +1758,11 @@ def deploy_install_packages():
             if (p / "generated").is_dir():
                 shutil.copytree(p / "generated", generated_dest_dir, dirs_exist_ok=True)
 
-            if (p / "install_dependencies.sh").is_file():
-                os.makedirs(
-                    Path(g.script_directory) / "install/dependencies" / target_name,
-                    exist_ok=True,
-                )
-                shutil.copy(
-                    p / "install_dependencies.sh",
-                    Path(g.script_directory)
-                    / "install/dependencies"
-                    / target_name
-                    / "install_dependencies.sh",
-                )
-
         if deployed_targets:
             print(f"\n✅ Successfully deployed {deployed_targets} target(s).")
 
     except Exception as e:
         print(f"❌ An error occurred during deployment: {e}")
-
-
-def copy_installers(repos_to_ignore: list) -> None:
-    """
-    Copy install_dependencies.sh from src packages to install/dependencies/.
-
-    This makes package-specific dependency installers available for the user
-    to run manually with: sudo bash install_dependencies.sh
-
-    Args:
-        repos_to_ignore: List of repository names to skip
-    """
-    repos_to_ignore_set = set(repos_to_ignore or [])
-    src_path = Path(g.script_directory) / "src"
-    deps_dest = Path(g.script_directory) / "install" / "dependencies"
-
-    if not src_path.is_dir():
-        return
-
-    copied_count = 0
-    for pkg_dir in src_path.iterdir():
-        if not pkg_dir.is_dir():
-            continue
-        if pkg_dir.name in repos_to_ignore_set:
-            continue
-
-        installer = pkg_dir / "install_dependencies.sh"
-        if installer.is_file():
-            dest_dir = deps_dest / pkg_dir.name
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy(installer, dest_dir / "install_dependencies.sh")
-            copied_count += 1
-            print(f"  -> Copied installer from: {pkg_dir.name}")
-
-    if copied_count > 0:
-        print(f"📦 Copied {copied_count} package installer(s) to install/dependencies/")
-        print(
-            "   Run 'sudo bash install_dependencies.sh' to install package dependencies."
-        )
 
 
 def collect_src_vcpkg_dependencies(repos_to_ignore=None):
@@ -2115,9 +2062,6 @@ def setup(
     repos_to_ignore = get_repos_to_ignore()
 
     deploy_install_packages()
-
-    # Copy package-specific dependency installers to install/dependencies/
-    copy_installers(repos_to_ignore)
 
     guard_src_repo_release_yaml_dependencies(packages_to_ignore, repos_to_ignore)
 

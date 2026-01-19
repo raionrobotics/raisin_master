@@ -96,9 +96,18 @@ raisin install raisin_network --type debug
 raisin install package1 package2 package3
 ```
 
-### 5. Setup and Generate Build Files
+### 5. Install Package Dependencies
 
-Run the `setup` command to configure the CMake environment and generate interface files. This also copies package-specific dependency installers to `install/dependencies/`.
+Run the package dependency installer to install package-specific dependencies (e.g., vcpkg packages, ROS packages, custom libraries).
+```bash
+sudo bash install_dependencies.sh
+```
+
+> **Note:** This script runs `install_dependencies.sh` files directly from source packages (`src/`) and release packages (`release/install/`).
+
+### 6. Setup and Generate Build Files
+
+Run the `setup` command to configure the CMake environment and generate interface files.
 ```bash
 # Setup all packages
 raisin setup
@@ -106,15 +115,6 @@ raisin setup
 # Setup specific packages
 raisin setup raisin_network
 ```
-
-### 6. Install Package Dependencies
-
-After setup, run the package dependency installer to install package-specific dependencies (e.g., ROS packages, custom libraries).
-```bash
-sudo bash install_dependencies.sh
-```
-
-> **Note:** This script runs all `install_dependencies.sh` files from your source packages (`src/`) and release packages (`install/dependencies/`).
 
 ### 7. Build the Project
 
@@ -236,11 +236,11 @@ cd ..
 # 4. Download release packages
 raisin install <package_name>
 
-# 5. Generate build files (copies install scripts)
-raisin setup
-
-# 6. Install package-specific dependencies
+# 5. Install package-specific dependencies
 sudo bash install_dependencies.sh
+
+# 6. Generate build files
+raisin setup
 
 # 7. Build
 raisin build -t release
