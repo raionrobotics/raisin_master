@@ -50,7 +50,7 @@ PURE_CMAKE_CACHE_FILE = ".cache/pure_cmake_build_cache.json"
 
 def _compute_source_hash(source_dir: Path) -> str:
     """Compute hash of all source files in directory based on file names and mtimes."""
-    hasher = hashlib.md5()
+    hasher = hashlib.sha256()
     for filepath in sorted(source_dir.rglob("*")):
         if filepath.is_file() and not filepath.name.startswith("."):
             hasher.update(str(filepath.relative_to(source_dir)).encode())
