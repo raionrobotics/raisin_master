@@ -264,6 +264,7 @@ def _find_src_git_repos(base_directory=None):
         if repo_path.is_dir() and (repo_path / ".git").is_dir()
     ]
 
+
 def process_repo(repo_path, pull_mode, origin="origin"):
     """
     Processes a single Git repository.
@@ -873,9 +874,7 @@ def git_delete_branch_command(branch, force=False):
         return
 
     flag = "-D" if force else "-d"
-    print(
-        f"Deleting branch '{branch}' ({flag}) across repositories in 'src'..."
-    )
+    print(f"Deleting branch '{branch}' ({flag}) across repositories in 'src'...")
 
     for repo_path in repo_paths:
         repo_name = os.path.basename(repo_path)
@@ -888,7 +887,9 @@ def git_delete_branch_command(branch, force=False):
             print(f"❌ {repo_name}: Unable to determine current branch. Skipping.")
             continue
         if current_branch == branch:
-            print(f"⚠️ {repo_name}: Branch '{branch}' is currently checked out. Skipping.")
+            print(
+                f"⚠️ {repo_name}: Branch '{branch}' is currently checked out. Skipping."
+            )
             continue
 
         # Check if branch exists locally
@@ -970,7 +971,9 @@ def git_push_current_command(remote="origin"):
         print("No Git repositories found in 'src'.")
         return
 
-    print(f"Pushing current branches to remote '{remote}' across repositories in 'src'...")
+    print(
+        f"Pushing current branches to remote '{remote}' across repositories in 'src'..."
+    )
     for repo_path in repo_paths:
         repo_name = os.path.basename(repo_path)
 
@@ -978,7 +981,9 @@ def git_push_current_command(remote="origin"):
             ["git", "symbolic-ref", "--short", "HEAD"], repo_path
         )
         if not current_branch:
-            print(f"⚠️ {repo_name}: Detached HEAD or unable to detect current branch. Skipping.")
+            print(
+                f"⚠️ {repo_name}: Detached HEAD or unable to detect current branch. Skipping."
+            )
             continue
 
         # Verify remote exists

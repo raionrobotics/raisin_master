@@ -24,6 +24,7 @@ def _is_unittest_executable(path: Path) -> bool:
         return path.suffix.lower() in {".exe", ".bat", ".cmd"}
     return os.access(path, os.X_OK)
 
+
 def _get_build_dir_from_config(build_type: str) -> Path:
     config_path = Path(g.script_directory) / "configuration_setting.yaml"
     if not config_path.is_file():

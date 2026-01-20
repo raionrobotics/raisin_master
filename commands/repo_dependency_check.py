@@ -64,7 +64,9 @@ def _normalize_dependency_name(spec: str) -> str:
 def _discover_repo_dirs(src_dir: Path, repos_to_ignore: Set[str]) -> List[Path]:
     if not src_dir.is_dir():
         return []
-    repos = [p for p in src_dir.iterdir() if p.is_dir() and p.name not in repos_to_ignore]
+    repos = [
+        p for p in src_dir.iterdir() if p.is_dir() and p.name not in repos_to_ignore
+    ]
     return sorted(repos, key=lambda p: p.name)
 
 
@@ -90,7 +92,9 @@ def _find_package_dirs(repo_dir: Path, packages_to_ignore: Set[str]) -> List[Pat
     candidates.sort(key=lambda p: len(p.parts))
     package_dirs: List[Path] = []
     for candidate in candidates:
-        if any(candidate == pkg or _is_relative_to(candidate, pkg) for pkg in package_dirs):
+        if any(
+            candidate == pkg or _is_relative_to(candidate, pkg) for pkg in package_dirs
+        ):
             continue
         package_dirs.append(candidate)
     return package_dirs
@@ -308,7 +312,9 @@ def guard_src_repo_release_yaml_dependencies(
             print(f"  - {pkg}: {shown}")
         sys.exit(1)
 
-    package_to_repo: Dict[str, str] = {pkg: sources[0][0] for pkg, sources in package_sources.items()}
+    package_to_repo: Dict[str, str] = {
+        pkg: sources[0][0] for pkg, sources in package_sources.items()
+    }
 
     binary_pkg_to_repo = _discover_binary_packages(release_install_dir)
     binary_conflicts: Dict[str, List[Tuple[str, Path]]] = defaultdict(list)
@@ -321,7 +327,9 @@ def guard_src_repo_release_yaml_dependencies(
             package_to_repo[pkg_name] = repo_name
 
     if binary_conflicts:
-        print("❌ Error: Conflicting binary package providers found in `release/install`.")
+        print(
+            "❌ Error: Conflicting binary package providers found in `release/install`."
+        )
         for pkg, sources in sorted(binary_conflicts.items()):
             shown = ", ".join(f"{repo} ({path})" for repo, path in sorted(sources))
             print(f"  - {pkg}: {shown}")
@@ -443,5 +451,7 @@ def guard_src_repo_release_yaml_dependencies(
         )
         return
 
-    print("\nFix: add the missing repos to each repo's `release.yaml:dependencies` list.")
+    print(
+        "\nFix: add the missing repos to each repo's `release.yaml:dependencies` list."
+    )
     sys.exit(1)
