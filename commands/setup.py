@@ -83,7 +83,7 @@ def _build_single_cmake_project(
     install_prefix: Path,
     vcpkg_parent: Path,
     vcpkg_installed: Path,
-):
+) -> None:
     """Build a single CMake project - unified Windows/Unix implementation."""
     build_dir.mkdir(parents=True, exist_ok=True)
 
