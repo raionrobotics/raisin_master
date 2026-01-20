@@ -53,7 +53,7 @@ def _compute_source_hash(source_dir: Path) -> str:
     hasher = hashlib.md5()
     for filepath in sorted(source_dir.rglob("*")):
         if filepath.is_file() and not filepath.name.startswith("."):
-            hasher.update(filepath.name.encode())
+            hasher.update(str(filepath.relative_to(source_dir)).encode())
             hasher.update(str(filepath.stat().st_mtime).encode())
     return hasher.hexdigest()
 
