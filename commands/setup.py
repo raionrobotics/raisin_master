@@ -77,12 +77,12 @@ def _save_build_cache(cache: dict):
 
 
 def _build_single_cmake_project(
-    source_dir,
-    build_dir,
-    cmake_build_type,
-    install_prefix,
-    vcpkg_parent,
-    vcpkg_installed,
+    source_dir: Path,
+    build_dir: Path,
+    cmake_build_type: str,
+    install_prefix: Path,
+    vcpkg_parent: Path,
+    vcpkg_installed: Path,
 ):
     """Build a single CMake project - unified Windows/Unix implementation."""
     build_dir.mkdir(parents=True, exist_ok=True)
