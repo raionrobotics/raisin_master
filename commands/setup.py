@@ -8,8 +8,10 @@ import os
 import re
 import sys
 import glob
+import json
 import yaml
 import shutil
+import hashlib
 import platform
 import subprocess
 import requests
@@ -37,6 +39,100 @@ def _resolve_vcpkg_cache_dir(env_var_name, default_path):
     path = Path(env_value) if env_value else Path(default_path)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+# ============================================================================
+# Pure CMake Build Cache
+# ============================================================================
+
+PURE_CMAKE_CACHE_FILE = ".cache/pure_cmake_build_cache.json"
+
+
+def _compute_source_hash(source_dir: Path) -> str:
+    """Compute hash of all source files in directory based on file names and mtimes."""
+    hasher = hashlib.md5()
+    for filepath in sorted(source_dir.rglob("*")):
+        if filepath.is_file() and not filepath.name.startswith("."):
+            hasher.update(filepath.name.encode())
+            hasher.update(str(filepath.stat().st_mtime).encode())
+    return hasher.hexdigest()
+
+
+def _load_build_cache() -> dict:
+    """Load the pure CMake build cache from disk."""
+    cache_path = Path(g.script_directory) / PURE_CMAKE_CACHE_FILE
+    if cache_path.exists():
+        try:
+            return json.loads(cache_path.read_text())
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def _save_build_cache(cache: dict):
+    """Save the pure CMake build cache to disk."""
+    cache_path = Path(g.script_directory) / PURE_CMAKE_CACHE_FILE
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache, indent=2))
+
+
+def _build_single_cmake_project(
+    source_dir,
+    build_dir,
+    cmake_build_type,
+    install_prefix,
+    vcpkg_parent,
+    vcpkg_installed,
+):
+    """Build a single CMake project - unified Windows/Unix implementation."""
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    # Common CMake arguments
+    cmake_args = [
+        "cmake",
+        "-S",
+        str(source_dir),
+        "-B",
+        str(build_dir),
+        f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
+        f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
+        f"-DVCPKG_PARENT_DIR={vcpkg_parent}",
+        f"-DVCPKG_INSTALLED_DIR={vcpkg_installed}",
+        "-DBUILD_SHARED_LIBS=ON",
+    ]
+
+    env = None
+    is_windows = platform.system().lower() == "windows"
+
+    if is_windows:
+        cmake_args.append(
+            f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}"
+        )
+        env = g.developer_env
+        if g.ninja_path:
+            cmake_args.extend(["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}"])
+        elif shutil.which("ninja"):
+            cmake_args.extend(["-G", "Ninja"])
+    else:
+        cmake_args.extend(["-G", "Ninja"])
+
+    # Configure
+    subprocess.run(cmake_args, check=True, text=True, env=env)
+
+    # Build
+    build_cmd = ["cmake", "--build", str(build_dir), "--config", cmake_build_type]
+    if is_windows:
+        build_cmd.append("--parallel")
+        subprocess.run(build_cmd, check=True, text=True, env=env)
+    else:
+        core_count = max(1, (os.cpu_count() or 2) // 2)
+        build_cmd.extend(["--target", "install", "--", f"-j{core_count}"])
+        subprocess.run(build_cmd, check=True, text=True, env=env)
+        return  # Unix already installed via --target install
+
+    # Install (Windows only - Unix uses --target install above)
+    install_cmd = ["cmake", "--install", str(build_dir), "--config", cmake_build_type]
+    subprocess.run(install_cmd, check=True, text=True, env=env)
 
 
 # ============================================================================
@@ -1321,12 +1417,19 @@ def _discover_pure_cmake_projects(
 
 
 def build_pure_cmake_projects(
-    install_dir, build_type, package_name, packages_to_ignore=None, repos_to_ignore=None
+    install_dir,
+    build_type,
+    package_name,
+    packages_to_ignore=None,
+    repos_to_ignore=None,
+    force_rebuild=False,
 ):
     """
     Build pure CMake projects in both debug and release dirs and install them to install_dir.
-    """
 
+    Uses a hash-based cache to skip rebuilding unchanged projects.
+    Pass force_rebuild=True to bypass the cache and rebuild everything.
+    """
     projects = _discover_pure_cmake_projects(
         package_name, packages_to_ignore, repos_to_ignore
     )
@@ -1334,115 +1437,66 @@ def build_pure_cmake_projects(
         return []
 
     install_prefix = Path(g.script_directory) / install_dir
-    vcpkg_parent_dir = _resolve_vcpkg_cache_dir(
+    vcpkg_parent = _resolve_vcpkg_cache_dir(
         "RAISIN_VCPKG_PARENT_DIR",
         Path(g.script_directory) / ".cache" / "vcpkg",
     )
-    vcpkg_installed_dir = _resolve_vcpkg_cache_dir(
+    vcpkg_installed = _resolve_vcpkg_cache_dir(
         "RAISIN_VCPKG_INSTALLED_DIR",
         Path(g.script_directory) / ".cache" / "vcpkg_installed",
     )
+
+    cache = {} if force_rebuild else _load_build_cache()
+    built = set()
+
+    # Determine which configurations to build
+    all_configs = [("debug", "Debug"), ("release", "Release")]
+    if build_type:
+        normalized = build_type.lower()
+        all_configs = [(t, c) for t, c in all_configs if t == normalized]
+
     print(f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}")
 
-    built = set()
-    for build_type_token, cmake_build_type in (
-        ("debug", "Debug"),
-        ("release", "Release"),
-    ):
+    for build_type_token, cmake_build_type in all_configs:
         build_root = (
             Path(g.script_directory) / f"cmake-build-{build_type_token}" / "pure_cmake"
         )
+
         for repo_name, project_name, source_dir in projects:
+            cache_key = f"{project_name}_{build_type_token}"
+            source_hash = _compute_source_hash(source_dir)
+
+            # Check cache - skip if unchanged
+            cached = cache.get(cache_key, {})
+            if cached.get("hash") == source_hash and cached.get("prefix") == str(
+                install_prefix
+            ):
+                print(f"  -> {project_name} [{cmake_build_type}] (unchanged, skipping)")
+                built.add(project_name)
+                continue
+
+            # Build required
             build_dir = build_root / project_name
             delete_directory(build_dir)
-            build_dir.mkdir(parents=True, exist_ok=True)
             print(f"  -> {project_name} (from {repo_name}) [{cmake_build_type}]")
 
             try:
-                if platform.system().lower() == "windows":
-                    cmake_command = [
-                        "cmake",
-                        "-S",
-                        str(source_dir),
-                        "-B",
-                        str(build_dir),
-                        f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
-                        f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}",
-                        f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
-                        f"-DVCPKG_PARENT_DIR={vcpkg_parent_dir}",
-                        f"-DVCPKG_INSTALLED_DIR={vcpkg_installed_dir}",
-                        "-DBUILD_SHARED_LIBS=ON",
-                    ]
-                    if g.ninja_path:
-                        cmake_command.extend(
-                            ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}"]
-                        )
-                    elif shutil.which("ninja"):
-                        cmake_command.extend(["-G", "Ninja"])
-                    subprocess.run(
-                        cmake_command, check=True, text=True, env=g.developer_env
-                    )
-                    subprocess.run(
-                        [
-                            "cmake",
-                            "--build",
-                            str(build_dir),
-                            "--config",
-                            cmake_build_type,
-                            "--parallel",
-                        ],
-                        check=True,
-                        text=True,
-                        env=g.developer_env,
-                    )
-                    subprocess.run(
-                        [
-                            "cmake",
-                            "--install",
-                            str(build_dir),
-                            "--config",
-                            cmake_build_type,
-                        ],
-                        check=True,
-                        text=True,
-                        env=g.developer_env,
-                    )
-                else:
-                    cmake_command = [
-                        "cmake",
-                        "-S",
-                        str(source_dir),
-                        "-B",
-                        str(build_dir),
-                        "-G",
-                        "Ninja",
-                        f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
-                        f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
-                        f"-DVCPKG_PARENT_DIR={vcpkg_parent_dir}",
-                        f"-DVCPKG_INSTALLED_DIR={vcpkg_installed_dir}",
-                        "-DBUILD_SHARED_LIBS=ON",
-                    ]
-                    subprocess.run(cmake_command, check=True, text=True)
-                    core_count = max(1, (os.cpu_count() or 2) // 2)
-                    subprocess.run(
-                        [
-                            "cmake",
-                            "--build",
-                            str(build_dir),
-                            "--target",
-                            "install",
-                            "--",
-                            f"-j{core_count}",
-                        ],
-                        check=True,
-                        text=True,
-                    )
+                _build_single_cmake_project(
+                    source_dir,
+                    build_dir,
+                    cmake_build_type,
+                    install_prefix,
+                    vcpkg_parent,
+                    vcpkg_installed,
+                )
+                cache[cache_key] = {"hash": source_hash, "prefix": str(install_prefix)}
                 built.add(project_name)
             except subprocess.CalledProcessError as e:
                 raise SystemExit(
                     f"❌ Failed to build pure_cmake project '{project_name}' (repo: {repo_name})."
                 ) from e
 
+    _save_build_cache(cache)
     return list(built)
 
 
