@@ -63,7 +63,7 @@ def _load_build_cache() -> dict:
     cache_path = Path(g.script_directory) / PURE_CMAKE_CACHE_FILE
     if cache_path.exists():
         try:
-            return json.loads(cache_path.read_text())
+            return json.loads(cache_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, IOError):
             return {}
     return {}
