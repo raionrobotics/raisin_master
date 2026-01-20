@@ -73,7 +73,7 @@ def _save_build_cache(cache: dict):
     """Save the pure CMake build cache to disk."""
     cache_path = Path(g.script_directory) / PURE_CMAKE_CACHE_FILE
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(cache, indent=2))
+    cache_path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
 
 
 def _build_single_cmake_project(
