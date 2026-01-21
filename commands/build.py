@@ -38,7 +38,7 @@ def build_command(build_types, to_install=False):
             continue
 
         # Setup build directory
-        # If the pure_cmake file exists, it is moved to a temporary folder and restored later. Temporary folder are deleted.
+        # Preserve the pure_cmake directory by stashing it before cleaning the build directory.
         build_type = build_type.lower()
         build_dir = Path(script_directory) / f"cmake-build-{build_type}"
         build_type_capitalized = build_type.capitalize()
