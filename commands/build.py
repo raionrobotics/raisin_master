@@ -8,6 +8,7 @@ import os
 import sys
 import platform
 import subprocess
+import shutil
 import click
 from pathlib import Path
 
@@ -37,11 +38,14 @@ def build_command(build_types, to_install=False):
             continue
 
         # Setup build directory
+        # If the pure_cmake file exists, it is moved to a temporary folder and restored later. Temporary folder are deleted.
         build_type = build_type.lower()
         build_dir = Path(script_directory) / f"cmake-build-{build_type}"
         build_type_capitalized = build_type.capitalize()
+        stash_pure_cmake_build_dir(script_directory, build_dir, build_type)
         delete_directory(build_dir)
         build_dir.mkdir(parents=True, exist_ok=True)
+        restore_pure_cmake_build_dir(script_directory, build_dir, build_type)
         print(f"building in {build_dir}, build type is {build_type_capitalized}")
 
         if platform.system().lower() == "linux":
@@ -129,6 +133,33 @@ def build_command(build_types, to_install=False):
                 )
 
     print("🎉🎉🎉 Building process finished successfully.")
+
+
+def stash_pure_cmake_build_dir(script_directory, build_dir, build_type):
+    pure_cmake_dir = build_dir / "pure_cmake"
+    if not pure_cmake_dir.is_dir():
+        return
+
+    stash_dir = Path(script_directory) / ".cache" / "pure_cmake_build_stash" / build_type
+    stash_dir.parent.mkdir(parents=True, exist_ok=True)
+    if stash_dir.exists():
+        shutil.rmtree(stash_dir)
+    shutil.move(str(pure_cmake_dir), str(stash_dir))
+
+
+def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
+    pure_cmake_dir = build_dir / "pure_cmake"
+    if pure_cmake_dir.exists():
+        return
+
+    stash_root = Path(script_directory) / ".cache" / "pure_cmake_build_stash"
+    stash_dir = stash_root / build_type
+    if not stash_dir.is_dir():
+        return
+
+    shutil.move(str(stash_dir), str(pure_cmake_dir))
+    if stash_root.exists() and not any(stash_root.iterdir()):
+        stash_root.rmdir()
 
 
 # ============================================================================
