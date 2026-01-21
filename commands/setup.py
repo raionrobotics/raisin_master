@@ -14,6 +14,7 @@ import shutil
 import hashlib
 import platform
 import subprocess
+import stat
 import requests
 import click
 from pathlib import Path
@@ -74,6 +75,21 @@ def _save_build_cache(cache: dict):
     cache_path = Path(g.script_directory) / PURE_CMAKE_CACHE_FILE
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+
+
+def _has_project_cmake_config(install_prefix: Path, project_name: str) -> bool:
+    """
+    Check whether the install prefix contains a CMake package config for a project.
+    """
+    expected = {
+        f"{project_name}config.cmake",
+        f"{project_name}-config.cmake",
+    }
+    expected = {name.lower() for name in expected}
+    for path in install_prefix.rglob("*.cmake"):
+        if path.is_file() and path.name.lower() in expected:
+            return True
+    return False
 
 
 def _build_single_cmake_project(
@@ -622,6 +638,21 @@ def find_project_directories(
                 shutil.copytree(source_dir, target_path, dirs_exist_ok=True)
 
     return project_directories
+
+
+def _ensure_scripts_executable(install_dir):
+    scripts_root = Path(g.script_directory) / install_dir / "scripts"
+    if not scripts_root.is_dir():
+        return
+    for script_path in scripts_root.rglob("*.sh"):
+        if script_path.is_file():
+            try:
+                mode = script_path.stat().st_mode
+                script_path.chmod(
+                    mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+                )
+            except OSError:
+                print(f"⚠️  Failed to set executable: {script_path}")
 
 
 def find_interface_files(
@@ -1468,8 +1499,10 @@ def build_pure_cmake_projects(
 
             # Check cache - skip if unchanged
             cached = cache.get(cache_key, {})
-            if cached.get("hash") == source_hash and cached.get("prefix") == str(
-                install_prefix
+            if (
+                cached.get("hash") == source_hash
+                and cached.get("prefix") == str(install_prefix)
+                and _has_project_cmake_config(install_prefix, project_name)
             ):
                 print(f"  -> {project_name} [{cmake_build_type}] (unchanged, skipping)")
                 built.add(project_name)
@@ -2139,6 +2172,7 @@ def setup(
     project_directories = find_project_directories(
         [src_dir], install_dir, packages_to_ignore, repos_to_ignore
     )
+    _ensure_scripts_executable(install_dir)
 
     # Handle .action files
     for action_file in action_files:
