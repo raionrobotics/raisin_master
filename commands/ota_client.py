@@ -1,0 +1,694 @@
+"""
+OTA client for RAISIN.
+
+Handles all interactions with the raisin-ota-server:
+- SSH challenge-response authentication (no passwords)
+- Package upload (used by publish command)
+- Package download (used by install command)
+
+Requires RAISIN_OTA_ENDPOINT environment variable to be set.
+All operations fail gracefully — OTA is supplementary, never blocks existing flows.
+"""
+
+import base64
+import json
+import os
+import re
+import hashlib
+import shutil
+import struct
+import subprocess
+import tempfile
+import time
+import zipfile
+
+import requests
+import yaml
+from cryptography.hazmat.primitives import serialization
+from pathlib import Path
+from typing import Optional
+
+from commands import globals as g
+
+# Module-level cached auth token (lives for the CLI session)
+_cached_token = None
+
+# Prevents repeated auth attempts after a failure within the same session
+_auth_failed = False
+
+# Module-level archive manifest cache to avoid repeated API calls
+# Key: (platform_str, build_type) → Value: (packages_list, archive_id)
+_archive_cache = {}
+
+# Persistent token cache file name (stored in script_directory)
+_TOKEN_CACHE_FILE = ".ota_token_cache.json"
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+
+def get_ota_endpoint() -> Optional[str]:
+    """Read RAISIN_OTA_ENDPOINT env var. Returns None if not set."""
+    endpoint = os.environ.get("RAISIN_OTA_ENDPOINT", "").strip()
+    return endpoint if endpoint else None
+
+
+def get_ssh_key_path() -> Path:
+    """Read RAISIN_SSH_KEY env var, default ~/.ssh/id_ed25519."""
+    return Path(os.environ.get("RAISIN_SSH_KEY", "~/.ssh/id_ed25519")).expanduser()
+
+
+def is_ota_configured() -> bool:
+    """True if RAISIN_OTA_ENDPOINT is set and non-empty."""
+    return get_ota_endpoint() is not None
+
+
+# ============================================================================
+# Token Persistence
+# ============================================================================
+
+
+def _get_token_cache_path() -> Path:
+    """Path to the persistent token cache file."""
+    return Path(g.script_directory) / _TOKEN_CACHE_FILE
+
+
+def _is_jwt_expired(token: str) -> bool:
+    """Check if a JWT token is expired by decoding its payload.
+
+    Decodes the JWT payload (no signature verification — just reading
+    the ``exp`` claim) and returns True if the token expires within
+    30 seconds.
+    """
+    try:
+        payload_b64 = token.split(".")[1]
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.b64decode(padded))
+        exp = payload.get("exp")
+        if exp is None:
+            return False
+        return time.time() > (exp - 30)
+    except Exception:
+        return True
+
+
+def _load_cached_token() -> Optional[str]:
+    """Load token from persistent cache file if it's still valid.
+
+    Uses the ``expiresAt`` timestamp saved alongside the token rather
+    than re-parsing the JWT, so this works for opaque tokens too.
+    """
+    cache_path = _get_token_cache_path()
+    try:
+        if not cache_path.is_file():
+            return None
+        with open(cache_path, "r") as f:
+            data = json.loads(f.read())
+        token = data.get("accessToken")
+        endpoint = data.get("endpoint")
+        expires_at = data.get("expiresAt", 0)
+        if endpoint != get_ota_endpoint():
+            return None
+        if not token:
+            return None
+        # 30-second buffer to avoid using a token that's about to expire
+        if time.time() > (expires_at - 30):
+            return None
+        return token
+    except Exception:
+        return None
+
+
+def _extract_jwt_expiry(token: str) -> float:
+    """Try to read the ``exp`` claim from a JWT. Returns epoch seconds.
+
+    Falls back to 1 hour from now if the token can't be parsed.
+    """
+    try:
+        payload_b64 = token.split(".")[1]
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.b64decode(padded))
+        exp = payload.get("exp")
+        if exp is not None:
+            return float(exp)
+    except Exception:
+        pass
+    return time.time() + 3600
+
+
+def _save_token(token: str):
+    """Save token and its expiry to persistent cache file."""
+    try:
+        cache_path = _get_token_cache_path()
+        data = {
+            "accessToken": token,
+            "endpoint": get_ota_endpoint(),
+            "expiresAt": _extract_jwt_expiry(token),
+        }
+        with open(cache_path, "w") as f:
+            f.write(json.dumps(data))
+    except Exception:
+        pass
+
+
+def _clear_cached_token():
+    """Clear both in-memory and persistent token caches, and reset failure flag."""
+    global _cached_token, _auth_failed
+    _cached_token = None
+    _auth_failed = False
+    try:
+        cache_path = _get_token_cache_path()
+        if cache_path.is_file():
+            cache_path.unlink()
+    except Exception:
+        pass
+
+
+# ============================================================================
+# SSH Authentication
+# ============================================================================
+
+
+def _get_ssh_fingerprint(key_path: Path) -> str:
+    """Run ssh-keygen -lf <key.pub> and return hex-encoded SHA256 fingerprint.
+
+    The OTA server expects the fingerprint as a hex string without the
+    ``SHA256:`` prefix that ssh-keygen normally prints.
+    """
+    pub_key = key_path.with_suffix(".pub") if key_path.suffix != ".pub" else key_path
+    result = subprocess.run(
+        ["ssh-keygen", "-lf", str(pub_key)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # Output format: "256 SHA256:<base64> user@host (ED25519)"
+    parts = result.stdout.strip().split()
+    sha256_b64 = parts[1].split(":", 1)[1]  # strip "SHA256:" prefix
+    # Convert base64 → raw bytes → hex
+    padded = sha256_b64 + "=" * (-len(sha256_b64) % 4)
+    return base64.b64decode(padded).hex()
+
+
+def _extract_sig_from_sshsig(data: bytes) -> bytes:
+    """Extract the SSH wire-format signature blob from SSHSIG binary data.
+
+    SSHSIG layout: magic("SSHSIG", 6B) | version(uint32) |
+    publickey(string) | namespace(string) | reserved(string) |
+    hash_algorithm(string) | **signature(string)**
+
+    Each ``string`` is a uint32 length followed by that many bytes.
+    Returns the final signature field (SSH wire format:
+    algorithm-name + raw-signature, both length-prefixed).
+    """
+    offset = 6 + 4  # skip "SSHSIG" magic + version uint32
+
+    # Skip 4 length-prefixed fields: publickey, namespace, reserved, hash_algo
+    for _ in range(4):
+        str_len = struct.unpack(">I", data[offset : offset + 4])[0]
+        offset += 4 + str_len
+
+    # Read the signature blob
+    str_len = struct.unpack(">I", data[offset : offset + 4])[0]
+    return data[offset + 4 : offset + 4 + str_len]
+
+
+def _sign_nonce(nonce: str, key_path: Path) -> str:
+    """Sign nonce directly with ed25519 private key.
+
+    Loads the SSH private key via the ``cryptography`` library and signs
+    the nonce string (UTF-8 bytes) directly — no ssh-keygen subprocess.
+    Returns the signature as base64-encoded SSH wire format
+    (length-prefixed algorithm name + length-prefixed raw signature).
+    """
+    with open(key_path, "rb") as f:
+        private_key = serialization.load_ssh_private_key(f.read(), password=None)
+
+    raw_sig = private_key.sign(bytes.fromhex(nonce))
+
+    algo = b"ssh-ed25519"
+    sig_wire = (
+        struct.pack(">I", len(algo)) + algo + struct.pack(">I", len(raw_sig)) + raw_sig
+    )
+    return base64.b64encode(sig_wire).decode()
+
+
+def authenticate() -> Optional[str]:
+    """Return a valid JWT access token, authenticating only if necessary.
+
+    Token resolution order:
+    1. In-memory cache (fastest, same CLI session)
+    2. Persistent file cache (~/.ota_token_cache.json)
+    3. SSH challenge-response against the OTA server
+
+    Tokens are checked for JWT expiry before reuse.
+    Returns access token string, or None on failure.
+    """
+    global _cached_token, _auth_failed
+
+    # 1. In-memory cache (same CLI session — always trust it; if expired
+    #    the server returns 401 and the retry handler clears the cache)
+    if _cached_token:
+        return _cached_token
+
+    # Don't retry after a failure in the same session
+    if _auth_failed:
+        return None
+
+    # 2. Persistent file cache
+    file_token = _load_cached_token()
+    if file_token:
+        _cached_token = file_token
+        return _cached_token
+
+    # 3. SSH challenge-response
+    endpoint = get_ota_endpoint()
+    key_path = get_ssh_key_path()
+
+    if not key_path.exists():
+        print(f"⚠️ SSH key not found at {key_path}. Skipping OTA.")
+        _auth_failed = True
+        return None
+
+    try:
+        fingerprint = _get_ssh_fingerprint(key_path)
+        base = endpoint.rstrip("/")
+
+        # Step 1: Request challenge
+        resp = requests.post(
+            f"{base}/auth/ssh/challenge",
+            json={"fingerprint": fingerprint},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        nonce = _unwrap_response(resp.json())["nonce"]
+
+        # Step 2: Sign nonce locally
+        signature = _sign_nonce(nonce, key_path)
+
+        # Step 3: Verify signature with server
+        resp = requests.post(
+            f"{base}/auth/ssh/verify",
+            json={
+                "fingerprint": fingerprint,
+                "nonce": nonce,
+                "signature": signature,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        _cached_token = _unwrap_response(resp.json())["accessToken"]
+        _save_token(_cached_token)
+        return _cached_token
+
+    except FileNotFoundError:
+        print("⚠️ ssh-keygen not found. Skipping OTA authentication.")
+        _auth_failed = True
+        return None
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ SSH key operation failed: {e.stderr.strip()}. Skipping OTA.")
+        _auth_failed = True
+        return None
+    except requests.RequestException as e:
+        print(f"⚠️ OTA server unreachable: {e}. Skipping OTA.")
+        _auth_failed = True
+        return None
+    except (KeyError, ValueError) as e:
+        print(f"⚠️ Unexpected OTA auth response: {e}. Skipping OTA.")
+        _auth_failed = True
+        return None
+
+
+def _unwrap_response(resp_json):
+    """Unwrap the OTA server's standard response envelope.
+
+    The server wraps all JSON responses in ``{"success": bool, "data": ...}``.
+    Returns the inner ``data`` payload, or the original value if not wrapped.
+    """
+    if isinstance(resp_json, dict) and "data" in resp_json:
+        return resp_json["data"]
+    return resp_json
+
+
+def _auth_headers(token: str) -> dict:
+    """Build Authorization header dict for authenticated requests."""
+    return {"Authorization": f"Bearer {token}"}
+
+
+# ============================================================================
+# Upload Functions (used by publish command)
+# ============================================================================
+
+
+def _compute_sha256(file_path: Path) -> str:
+    """SHA256 hex digest of file, read in 8KB chunks."""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def upload_package(
+    archive_path: Path,
+    package_name: str,
+    version: str,
+    build_type: str,
+    _retry: bool = True,
+) -> bool:
+    """Upload a package archive to the OTA server.
+
+    Steps:
+    1. Authenticate (SSH challenge-response)
+    2. Compute SHA256 of archive for deduplication
+    3. Check if blob already exists on server
+    4. Upload blob if needed
+    5. Ensure package record exists
+    6. Create manifest entry
+    7. Create version tag
+
+    Returns True on success, False on failure. Never raises.
+    """
+    endpoint = get_ota_endpoint()
+    if not endpoint:
+        return False
+
+    token = authenticate()
+    if not token:
+        return False
+
+    headers = _auth_headers(token)
+    base = endpoint.rstrip("/")
+
+    try:
+        # 1. Compute SHA256
+        sha256 = _compute_sha256(archive_path)
+        platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+
+        # 2. Check if blob already exists (deduplication)
+        resp = requests.get(
+            f"{base}/blobs/{sha256}/exists", headers=headers, timeout=10
+        )
+        resp.raise_for_status()
+        blob_exists = _unwrap_response(resp.json()).get("exists", False)
+
+        # 3. Upload blob if needed
+        if not blob_exists:
+            with open(archive_path, "rb") as f:
+                resp = requests.post(
+                    f"{base}/blobs",
+                    headers=headers,
+                    files={"file": (archive_path.name, f, "application/zip")},
+                    data={"sha256": sha256},
+                    timeout=120,
+                )
+                resp.raise_for_status()
+
+        # 4. Ensure package record exists
+        resp = requests.get(
+            f"{base}/packages",
+            headers=headers,
+            params={"name": package_name},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        packages = _unwrap_response(resp.json())
+
+        if packages and len(packages) > 0:
+            package_id = packages[0]["id"]
+        else:
+            resp = requests.post(
+                f"{base}/packages",
+                headers=headers,
+                json={"name": package_name},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            package_id = _unwrap_response(resp.json())["id"]
+
+        # 5. Create manifest
+        resp = requests.post(
+            f"{base}/packages/{package_id}/manifests",
+            headers=headers,
+            json={
+                "version": version,
+                "platform": platform_str,
+                "buildType": build_type,
+                "blobHash": sha256,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        # 6. Create version tag
+        resp = requests.post(
+            f"{base}/packages/{package_id}/tags",
+            headers=headers,
+            json={
+                "tag": f"v{version.lstrip('v')}",
+                "version": version,
+                "platform": platform_str,
+                "buildType": build_type,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        return True
+
+    except requests.HTTPError as e:
+        if _retry and e.response is not None and e.response.status_code == 401:
+            # Token may have expired — clear caches and retry auth once
+            _clear_cached_token()
+            token = authenticate()
+            if token:
+                print("🔄 Re-authenticated with OTA server, retrying upload...")
+                return upload_package(
+                    archive_path, package_name, version, build_type, _retry=False
+                )
+        print(f"⚠️ OTA upload failed: {e}")
+        return False
+    except requests.RequestException as e:
+        print(f"⚠️ OTA upload failed: {e}")
+        return False
+
+
+# ============================================================================
+# Download Functions (used by install command)
+# ============================================================================
+
+
+def _fetch_archive_manifest(platform_str: str):
+    """Fetch available archive manifest for a platform from OTA server.
+
+    Returns (packages_list, archive_id) tuple, or None on failure.
+    Uses a module-level cache to avoid repeated calls during a single install run.
+    """
+    if platform_str in _archive_cache:
+        return _archive_cache[platform_str]
+
+    endpoint = get_ota_endpoint()
+    if not endpoint:
+        return None
+
+    token = authenticate()
+    if not token:
+        return None
+
+    headers = _auth_headers(token)
+    base = endpoint.rstrip("/")
+
+    try:
+        resp = requests.get(
+            f"{base}/archives",
+            headers=headers,
+            params={
+                "platform": platform_str,
+                "status": "available",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        result_data = _unwrap_response(resp.json())
+        # Response is paginated: {archives: [...], total, page, ...}
+        archives = (
+            result_data.get("archives", [])
+            if isinstance(result_data, dict)
+            else result_data
+        )
+        if not archives:
+            return None
+
+        # Use the most recent archive
+        archive = archives[0]
+        result = (archive.get("packages", []), archive.get("id"))
+        _archive_cache[platform_str] = result
+        return result
+
+    except requests.RequestException as e:
+        print(f"⚠️ OTA server unreachable: {e}")
+        return None
+
+
+def _download_package_blob(
+    archive_id: str,
+    package_id: str,
+    package_name: str,
+    download_path: Path,
+) -> bool:
+    """Download a single package blob from an archive.
+
+    Streams GET /archives/:id/packages/:pkgId/download to download_path.
+    Returns True on success, False on failure.
+    """
+    endpoint = get_ota_endpoint()
+    if not endpoint:
+        return False
+
+    token = authenticate()
+    if not token:
+        return False
+
+    headers = _auth_headers(token)
+    base = endpoint.rstrip("/")
+
+    try:
+        download_path.parent.mkdir(parents=True, exist_ok=True)
+        with requests.get(
+            f"{base}/archives/{archive_id}/packages/{package_id}/download",
+            headers=headers,
+            stream=True,
+            timeout=60,
+        ) as resp:
+            resp.raise_for_status()
+            with open(download_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        return True
+
+    except requests.RequestException as e:
+        print(f"⚠️ OTA download failed for '{package_name}': {e}")
+        return False
+
+
+def download_package(
+    package_name: str,
+    spec_str: str,
+    build_type: str,
+    install_base_path: Path,
+) -> Optional[dict]:
+    """Download a single package from the OTA server's archive.
+
+    Looks up the package in the archive manifest for the current platform,
+    checks version compatibility, downloads and extracts to install_base_path.
+
+    Args:
+        package_name: Name of the package to download.
+        spec_str: Version specifier string (e.g. ">=1.0", "" for any).
+        build_type: "debug" or "release".
+        install_base_path: Path to release/install/ directory.
+
+    Returns:
+        dict with 'version' and 'dependencies' on success, None on failure.
+    """
+    from packaging.version import parse as parse_version, InvalidVersion
+    from packaging.specifiers import SpecifierSet
+
+    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+
+    manifest = _fetch_archive_manifest(platform_str)
+    if manifest is None:
+        return None
+
+    packages, archive_id = manifest
+    if not archive_id:
+        return None
+
+    # Parse version specifier
+    try:
+        if not spec_str:
+            spec = SpecifierSet(">=0.0.0")
+        else:
+            specifiers_list = re.findall(r"[<>=!~]+[\d.]+", spec_str)
+            formatted = ", ".join(specifiers_list).replace(">, =", ">=")
+            spec = SpecifierSet(formatted)
+    except Exception:
+        return None
+
+    # Find best matching package in archive
+    # Manifest entries have tagName (e.g. "v1.0.0") instead of version
+    best_pkg = None
+    best_version = None
+    for pkg in packages:
+        name = pkg.get("packageName") or pkg.get("name", "")
+        if name != package_name:
+            continue
+        tag = pkg.get("tagName") or pkg.get("version", "")
+        pkg_version_str = tag.lstrip("v") if tag else ""
+        try:
+            pkg_version = parse_version(pkg_version_str)
+            if spec.contains(pkg_version):
+                if best_version is None or pkg_version > best_version:
+                    best_version = pkg_version
+                    best_pkg = pkg
+        except InvalidVersion:
+            continue
+
+    if not best_pkg:
+        return None
+
+    # Download the package
+    pkg_id = best_pkg.get("packageId") or best_pkg.get("id")
+    if not pkg_id:
+        return None
+    tag = best_pkg.get("tagName") or best_pkg.get("version", "")
+    version = tag.lstrip("v") if tag else "0.0.0"
+
+    install_dir = (
+        install_base_path
+        / package_name
+        / g.os_type
+        / g.os_version
+        / g.architecture
+        / build_type
+    )
+
+    download_file = (
+        Path(g.script_directory) / "install" / f"{package_name}-ota-{version}.zip"
+    )
+
+    print(f"⬇️  Downloading '{package_name}' v{version} from OTA server...")
+    if not _download_package_blob(archive_id, pkg_id, package_name, download_file):
+        return None
+
+    # Extract
+    if install_dir.exists():
+        shutil.rmtree(install_dir)
+    install_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(download_file, "r") as zip_ref:
+            zip_ref.extractall(install_dir)
+        download_file.unlink()
+    except (zipfile.BadZipFile, OSError) as e:
+        print(f"⚠️ Failed to extract OTA package '{package_name}': {e}")
+        if download_file.exists():
+            download_file.unlink()
+        return None
+
+    print(f"✅ Successfully installed '{package_name}=={version}' from OTA server.")
+
+    # Read dependencies from release.yaml
+    dependencies = []
+    release_yaml = install_dir / "release.yaml"
+    if release_yaml.is_file():
+        with open(release_yaml, "r") as f:
+            release_info = yaml.safe_load(f) or {}
+            dependencies = release_info.get("dependencies", [])
+
+    return {"version": version, "dependencies": dependencies}

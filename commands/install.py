@@ -18,6 +18,7 @@ from packaging.specifiers import SpecifierSet
 # Import globals and utilities
 from commands import globals as g
 from commands.utils import load_configuration
+from commands.ota_client import is_ota_configured
 
 
 def install_command(targets, build_type):
@@ -49,9 +50,13 @@ def install_command(targets, build_type):
     if not all_repositories:
         print("❌ Error: No repositories found in configuration_setting.yaml")
         return
-    if not tokens:
+    if not tokens and not is_ota_configured():
         print("❌ Error: No GitHub tokens found in configuration_setting.yaml")
         return
+    if not tokens:
+        print(
+            "⚠️ No GitHub tokens found. Packages not available via OTA will be skipped."
+        )
 
     # Process installation queue
     install_queue = list(targets)
@@ -161,7 +166,27 @@ def install_command(targets, build_type):
             print(f"Skipping '{package_name}' because it exists in local source")
             continue
 
-        # Priority 3: Find and install remote release
+        # Priority 3: OTA Server (if configured)
+        if is_ota_configured():
+            try:
+                from commands.ota_client import download_package as ota_download
+
+                ota_result = ota_download(
+                    package_name,
+                    spec_str,
+                    build_type,
+                    script_dir_path / "release" / "install",
+                )
+                if ota_result:
+                    processed_packages[package_name] = ota_result["version"]
+                    install_queue.extend(ota_result.get("dependencies", []))
+                    continue
+            except Exception as e:
+                print(
+                    f"⚠️ OTA download failed for '{package_name}': {e}. Falling back to GitHub."
+                )
+
+        # Priority 4: Find and install remote release
         repo_info = all_repositories.get(package_name)
         if not repo_info or "url" not in repo_info:
             print(f"⚠️ Warning: No repository URL found for '{package_name}'. Skipping.")

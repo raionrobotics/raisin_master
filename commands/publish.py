@@ -18,6 +18,7 @@ from pathlib import Path
 # Import globals and utilities
 from commands import globals as g
 from commands.utils import load_configuration
+from commands.ota_client import is_ota_configured
 from commands.setup import (
     setup,
     get_commit_hash,
@@ -178,14 +179,37 @@ def publish(target, build_type, dry_run=False):
                 print("\n--- [DRY-RUN] Skipping GitHub Release ---")
                 print(f"[DRY-RUN] Would upload '{archive_file}.zip' to GitHub")
                 print(f"[DRY-RUN] Tag: v{version}")
+                if is_ota_configured():
+                    print("[DRY-RUN] Would also upload to OTA server")
                 print("[DRY-RUN] Build and archive completed successfully.")
                 return
 
             repositories, secrets, _, _, _ = load_configuration()
 
             if not secrets:
+                if is_ota_configured():
+                    print(
+                        "⚠️ GitHub tokens not found. Skipping GitHub release, uploading to OTA only."
+                    )
+                    print("\n--- Uploading to OTA Server ---")
+                    try:
+                        from commands.ota_client import upload_package as ota_upload
+
+                        ota_success = ota_upload(
+                            archive_path=Path(archive_file_str),
+                            package_name=target,
+                            version=version,
+                            build_type=build_type,
+                        )
+                        if ota_success:
+                            print(f"✅ OTA upload successful for '{target}'.")
+                        else:
+                            print(f"❌ OTA upload failed for '{target}'.")
+                    except Exception as e:
+                        print(f"❌ OTA upload failed: {e}")
+                    return
                 print(
-                    "❌ Error: GitHub tokens not found in configuration. Cannot upload to GitHub."
+                    "❌ Error: GitHub tokens not found in configuration. Cannot upload."
                 )
                 return
 
@@ -345,34 +369,53 @@ def publish(target, build_type, dry_run=False):
                     env=auth_env,
                 )
                 print(f"✅ Successfully uploaded asset to prerelease '{tag_name}'.")
-                return
 
-            # Create a new prerelease and upload the asset.
-            print(f"✅ Release '{tag_name}' does not exist. Creating a new one...")
-            gh_create_cmd = [
-                "gh",
-                "release",
-                "create",
-                tag_name,
-                archive_file_str,
-                "--repo",
-                repo_slug,
-                "--title",
-                f"{tag_name}",
-                "--notes",
-                new_release_notes,
-                "--prerelease",
-            ]
-            subprocess.run(
-                gh_create_cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                env=auth_env,
-            )
-            print(
-                f"✅ Successfully created new prerelease and uploaded '{archive_filename}'."
-            )
+            else:
+                # Create a new prerelease and upload the asset.
+                print(f"✅ Release '{tag_name}' does not exist. Creating a new one...")
+                gh_create_cmd = [
+                    "gh",
+                    "release",
+                    "create",
+                    tag_name,
+                    archive_file_str,
+                    "--repo",
+                    repo_slug,
+                    "--title",
+                    f"{tag_name}",
+                    "--notes",
+                    new_release_notes,
+                    "--prerelease",
+                ]
+                subprocess.run(
+                    gh_create_cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=auth_env,
+                )
+                print(
+                    f"✅ Successfully created new prerelease and uploaded '{archive_filename}'."
+                )
+
+            # --- Upload to OTA Server ---
+            if is_ota_configured():
+                print("\n--- Uploading to OTA Server ---")
+                try:
+                    from commands.ota_client import upload_package as ota_upload
+
+                    ota_success = ota_upload(
+                        archive_path=Path(archive_file_str),
+                        package_name=target,
+                        version=version,
+                        build_type=build_type,
+                    )
+                    if ota_success:
+                        print(f"✅ OTA upload successful for '{target}'.")
+                    else:
+                        print(f"⚠️ OTA upload failed. GitHub release was successful.")
+                except Exception as e:
+                    print(f"⚠️ OTA upload failed: {e}. GitHub release was successful.")
 
     # Keep your existing exception handling
     except FileNotFoundError as e:
