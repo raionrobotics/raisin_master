@@ -615,7 +615,7 @@ def download_package(
             spec = SpecifierSet(">=0.0.0")
         else:
             specifiers_list = re.findall(r"[<>=!~]+[\d.]+", spec_str)
-            formatted = ", ".join(specifiers_list).replace(">, =", ">=")
+            formatted = ", ".join(specifiers_list)
             spec = SpecifierSet(formatted)
     except Exception:
         return None
