@@ -65,6 +65,7 @@ release/*
 secrets.yaml
 *_repositories.yaml
 configuration_setting.yaml
+.ota_token_cache.json
 
 .cache
 

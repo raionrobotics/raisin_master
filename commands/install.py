@@ -1,13 +1,19 @@
 """
 Install command for RAISIN.
 
-Downloads and installs packages from GitHub releases with dependency resolution.
+Downloads and installs packages from OTA server (primary) or GitHub releases (fallback).
+
+Install modes:
+- Default: Download from latest archive based on build type
+- --archive-version: Download from a specific archive version
+- --at: Download packages at a specific timestamp (time-travel)
 """
 
 import re
 import shutil
 import click
 from pathlib import Path
+from typing import Optional
 import requests
 import zipfile
 import yaml
@@ -18,17 +24,25 @@ from packaging.specifiers import SpecifierSet
 # Import globals and utilities
 from commands import globals as g
 from commands.utils import load_configuration
+from commands.ota_client import is_ota_configured
 
 
-def install_command(targets, build_type):
+def install_command(
+    targets,
+    build_type,
+    archive_version: Optional[str] = None,
+    at_timestamp: Optional[str] = None,
+):
     """
-    Install packages and their dependencies from GitHub releases.
+    Install packages and their dependencies.
 
     Args:
         targets (list): List of package specifications (e.g., ["raisin", "my-plugin>=1.2"])
         build_type (str): 'debug' or 'release'
+        archive_version (str): Optional specific archive version (e.g., 'v2024.01')
+        at_timestamp (str): Optional timestamp for time-travel install (e.g., '2024-01-15')
     """
-    print("🚀 Starting recursive installation process...")
+    print("🚀 Starting installation process...")
 
     # Access globals
     script_directory = g.script_directory
@@ -49,9 +63,13 @@ def install_command(targets, build_type):
     if not all_repositories:
         print("❌ Error: No repositories found in configuration_setting.yaml")
         return
-    if not tokens:
+    if not tokens and not is_ota_configured():
         print("❌ Error: No GitHub tokens found in configuration_setting.yaml")
         return
+    if not tokens:
+        print(
+            "⚠️ No GitHub tokens found. Packages not available via OTA will be skipped."
+        )
 
     # Process installation queue
     install_queue = list(targets)
@@ -161,7 +179,41 @@ def install_command(targets, build_type):
             print(f"Skipping '{package_name}' because it exists in local source")
             continue
 
-        # Priority 3: Find and install remote release
+        # Priority 3: OTA Server (if configured)
+        if is_ota_configured():
+            try:
+                ota_result = None
+                if at_timestamp:
+                    # Timestamp-based download (time-travel)
+                    from commands.ota_client import download_package_at_timestamp
+
+                    ota_result = download_package_at_timestamp(
+                        package_name,
+                        at_timestamp,
+                        build_type,
+                        script_dir_path / "release" / "install",
+                    )
+                else:
+                    # Archive-based download (default or specific version)
+                    from commands.ota_client import download_package as ota_download
+
+                    ota_result = ota_download(
+                        package_name,
+                        spec_str,
+                        build_type,
+                        script_dir_path / "release" / "install",
+                        archive_version=archive_version,
+                    )
+                if ota_result:
+                    processed_packages[package_name] = ota_result["version"]
+                    install_queue.extend(ota_result.get("dependencies", []))
+                    continue
+            except Exception as e:
+                print(
+                    f"⚠️ OTA download failed for '{package_name}': {e}. Falling back to GitHub."
+                )
+
+        # Priority 4: Find and install remote release
         repo_info = all_repositories.get(package_name)
         if not repo_info or "url" not in repo_info:
             print(f"⚠️ Warning: No repository URL found for '{package_name}'. Skipping.")
@@ -321,17 +373,34 @@ def install_command(targets, build_type):
     is_flag=True,
     help="Install both debug and release builds",
 )
-def install_cli_command(packages, build_type, install_all):
+@click.option(
+    "--archive-version",
+    "-v",
+    "archive_version",
+    default=None,
+    help="Install from a specific archive version (e.g., 'v2024.01')",
+)
+@click.option(
+    "--at",
+    "at_timestamp",
+    default=None,
+    help="Install packages at a specific timestamp (e.g., '2024-01-15' or '2024-01-15T10:00:00Z')",
+)
+def install_cli_command(
+    packages, build_type, install_all, archive_version, at_timestamp
+):
     """
-    Download and install packages from GitHub releases.
+    Download and install packages from OTA server or GitHub releases.
 
     \b
     Examples:
-        raisin install                               # Install all packages from src/
-        raisin install raisin_network                # Install release version
-        raisin install raisin_network --type debug   # Install debug version
-        raisin install raisin_network --all          # Install both debug and release
-        raisin install pkg1 pkg2 pkg3                # Install multiple packages
+        raisin install                               # Install from latest archive
+        raisin install raisin_network                # Install specific package
+        raisin install raisin_network==1.1.0         # Install specific version
+        raisin install --type debug                  # Install debug builds
+        raisin install --all                         # Install both debug and release
+        raisin install --archive-version v2024.01   # Install from specific archive
+        raisin install --at 2024-01-15               # Install packages at timestamp
     """
     packages = list(packages)
 
@@ -341,8 +410,12 @@ def install_cli_command(packages, build_type, install_all):
         build_types = [build_type]
 
     for bt in build_types:
-        if packages:
+        if at_timestamp:
+            click.echo(f"📥 Installing packages at {at_timestamp} ({bt})...")
+        elif archive_version:
+            click.echo(f"📥 Installing from archive {archive_version} ({bt})...")
+        elif packages:
             click.echo(f"📥 Installing {len(packages)} package(s) ({bt})...")
         else:
-            click.echo(f"📥 Installing all packages from src/ ({bt})...")
-        install_command(packages, bt)
+            click.echo(f"📥 Installing all packages from latest archive ({bt})...")
+        install_command(packages, bt, archive_version, at_timestamp)
