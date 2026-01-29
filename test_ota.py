@@ -653,6 +653,7 @@ class TestDownload(unittest.TestCase):
         archive_list = [
             {
                 "id": "arch-1",
+                "version": "v2024.01",
                 "packages": [
                     {"packageName": "mypkg", "tagName": "v1.0.0", "packageId": "p1"}
                 ],
@@ -664,10 +665,11 @@ class TestDownload(unittest.TestCase):
             }
         )
 
-        result = ota._fetch_archive_manifest("linux-22.04-x86_64")
+        result = ota._fetch_archive_manifest("raisin-robot", "linux-22.04-x86_64")
         self.assertIsNotNone(result)
-        packages, archive_id = result
+        packages, archive_id, archive_version = result
         self.assertEqual(archive_id, "arch-1")
+        self.assertEqual(archive_version, "v2024.01")
         self.assertEqual(len(packages), 1)
 
     @patch("commands.ota_client.authenticate", return_value="tok")
@@ -676,15 +678,15 @@ class TestDownload(unittest.TestCase):
     )
     @patch("commands.ota_client.requests.get")
     def test_fetch_archive_manifest_caching(self, mock_get, _ep, _auth):
-        archive_list = [{"id": "arch-1", "packages": []}]
+        archive_list = [{"id": "arch-1", "version": "v2024.01", "packages": []}]
         mock_get.return_value = _mock_response(
             json_data={
                 "data": {"archives": archive_list, "total": 1, "page": 1, "limit": 20}
             }
         )
 
-        r1 = ota._fetch_archive_manifest("linux-22.04-x86_64")
-        r2 = ota._fetch_archive_manifest("linux-22.04-x86_64")
+        r1 = ota._fetch_archive_manifest("raisin-robot", "linux-22.04-x86_64")
+        r2 = ota._fetch_archive_manifest("raisin-robot", "linux-22.04-x86_64")
         self.assertEqual(r1, r2)
         # Only one HTTP call thanks to caching
         self.assertEqual(mock_get.call_count, 1)
@@ -700,7 +702,7 @@ class TestDownload(unittest.TestCase):
                 "manifestHash": "a" * 64,
             },
         ]
-        mock_manifest.return_value = (packages, "arch-1")
+        mock_manifest.return_value = (packages, "arch-1", "v2024.01")
         mock_blob.return_value = True
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -752,7 +754,7 @@ class TestDownload(unittest.TestCase):
                 "manifestHash": "c" * 64,
             },
         ]
-        mock_manifest.return_value = (packages, "arch-1")
+        mock_manifest.return_value = (packages, "arch-1", "v2024.01")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
@@ -787,7 +789,7 @@ class TestDownload(unittest.TestCase):
                 "manifestHash": "a" * 64,
             },
         ]
-        mock_manifest.return_value = (packages, "arch-1")
+        mock_manifest.return_value = (packages, "arch-1", "v2024.01")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
@@ -804,6 +806,118 @@ class TestDownload(unittest.TestCase):
             g.script_directory = tmpdir
             result = ota.download_package("mypkg", "", "release", Path(tmpdir))
         self.assertIsNone(result)
+
+
+class TestArchiveNameAndTimestamp(unittest.TestCase):
+    """Test archive name derivation and timestamp-based downloads."""
+
+    def setUp(self):
+        ota._cached_token = None
+        ota._auth_failed = False
+        ota._archive_cache.clear()
+        self._orig_os_type = g.os_type
+        self._orig_os_version = g.os_version
+        self._orig_architecture = g.architecture
+        self._orig_script_directory = g.script_directory
+        g.os_type = "linux"
+        g.os_version = "22.04"
+        g.architecture = "x86_64"
+
+    def tearDown(self):
+        ota._cached_token = None
+        ota._auth_failed = False
+        ota._archive_cache.clear()
+        g.os_type = self._orig_os_type
+        g.os_version = self._orig_os_version
+        g.architecture = self._orig_architecture
+        g.script_directory = self._orig_script_directory
+        # Clear env var if set
+        if "RAISIN_ARCHIVE_NAME" in os.environ:
+            del os.environ["RAISIN_ARCHIVE_NAME"]
+
+    def test_get_archive_name_release(self):
+        """Release build type should return 'raisin-robot'."""
+        self.assertEqual(ota.get_archive_name("release"), "raisin-robot")
+
+    def test_get_archive_name_debug(self):
+        """Debug build type should return 'raisin-robot-debug'."""
+        self.assertEqual(ota.get_archive_name("debug"), "raisin-robot-debug")
+
+    @patch.dict(os.environ, {"RAISIN_ARCHIVE_NAME": "custom-archive"})
+    def test_get_archive_name_custom_env(self):
+        """Custom archive name from env var should be respected."""
+        self.assertEqual(ota.get_archive_name("release"), "custom-archive")
+        self.assertEqual(ota.get_archive_name("debug"), "custom-archive-debug")
+
+    @patch("commands.ota_client._download_blob_by_hash", return_value=True)
+    @patch("commands.ota_client._fetch_package_id_by_name", return_value="pkg-uuid")
+    @patch("commands.ota_client.authenticate", return_value="tok")
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
+    def test_download_package_at_timestamp(
+        self, mock_get, _ep, _auth, mock_pkg_id, mock_blob_dl
+    ):
+        """Download package at a specific timestamp using manifests/at API."""
+        # Mock the manifests/at response
+        mock_get.return_value = _mock_response(
+            json_data={
+                "data": {
+                    "blobHash": "abc123" * 10 + "abcd",
+                    "version": "1.5.0",
+                }
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            install_base = Path(tmpdir) / "release" / "install"
+            install_base.mkdir(parents=True)
+
+            # Pre-create the zip file that _download_blob_by_hash would write
+            download_file = Path(tmpdir) / "install" / "mypkg-ota-1.5.0.zip"
+            download_file.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(download_file, "w") as zf:
+                zf.writestr("release.yaml", "version: 1.5.0\ndependencies:\n  - depB\n")
+
+            result = ota.download_package_at_timestamp(
+                "mypkg", "2024-01-15T10:00:00Z", "release", install_base
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["version"], "1.5.0")
+        self.assertIn("depB", result["dependencies"])
+
+    @patch("commands.ota_client._download_package_blob", return_value=True)
+    @patch("commands.ota_client._fetch_archive_manifest")
+    def test_download_all_from_archive(self, mock_manifest, mock_blob):
+        """Download all packages from an archive."""
+        packages = [
+            {"packageName": "pkg1", "tagName": "v1.0.0", "packageId": "p1"},
+            {"packageName": "pkg2", "tagName": "v2.0.0", "packageId": "p2"},
+        ]
+        mock_manifest.return_value = (packages, "arch-1", "v2024.01")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            install_base = Path(tmpdir) / "release" / "install"
+            install_base.mkdir(parents=True)
+
+            # Pre-create zip files for each package
+            for name, ver in [("pkg1", "1.0.0"), ("pkg2", "2.0.0")]:
+                download_file = Path(tmpdir) / "install" / f"{name}-ota-{ver}.zip"
+                download_file.parent.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(download_file, "w") as zf:
+                    zf.writestr("release.yaml", f"version: {ver}\n")
+
+            result = ota.download_all_from_archive("release", install_base)
+
+        self.assertEqual(len(result), 2)
+        self.assertIn("pkg1", result)
+        self.assertIn("pkg2", result)
+        self.assertEqual(result["pkg1"]["version"], "1.0.0")
+        self.assertEqual(result["pkg2"]["version"], "2.0.0")
 
 
 # ============================================================================

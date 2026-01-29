@@ -37,8 +37,11 @@ _cached_token = None
 _auth_failed = False
 
 # Module-level archive manifest cache to avoid repeated API calls
-# Key: (platform_str, build_type) → Value: (packages_list, archive_id)
+# Key: (archive_name, platform_str) → Value: (packages_list, archive_id, archive_version)
 _archive_cache = {}
+
+# Default archive name prefix (build_type is appended for debug)
+DEFAULT_ARCHIVE_NAME = "raisin-robot"
 
 # Persistent token cache file name (stored in script_directory)
 _TOKEN_CACHE_FILE = ".ota_token_cache.json"
@@ -63,6 +66,19 @@ def get_ssh_key_path() -> Path:
 def is_ota_configured() -> bool:
     """True if RAISIN_OTA_ENDPOINT is set and non-empty."""
     return get_ota_endpoint() is not None
+
+
+def get_archive_name(build_type: str) -> str:
+    """Get archive name based on build type.
+
+    Convention:
+        - release → 'raisin-robot'
+        - debug → 'raisin-robot-debug'
+    """
+    base = os.environ.get("RAISIN_ARCHIVE_NAME", DEFAULT_ARCHIVE_NAME)
+    if build_type.lower() == "debug":
+        return f"{base}-debug"
+    return base
 
 
 # ============================================================================
@@ -483,14 +499,26 @@ def upload_package(
 # ============================================================================
 
 
-def _fetch_archive_manifest(platform_str: str):
-    """Fetch available archive manifest for a platform from OTA server.
+def _fetch_archive_manifest(
+    archive_name: str,
+    platform_str: str,
+    archive_version: Optional[str] = None,
+):
+    """Fetch available archive manifest from OTA server.
 
-    Returns (packages_list, archive_id) tuple, or None on failure.
-    Uses a module-level cache to avoid repeated calls during a single install run.
+    Args:
+        archive_name: Name of the archive (e.g., 'raisin-robot', 'raisin-robot-debug')
+        platform_str: Platform string (e.g., 'ubuntu-24.04-x86_64')
+        archive_version: Optional specific version (e.g., 'v2024.01'). If None,
+            fetches the latest available archive.
+
+    Returns:
+        Tuple of (packages_list, archive_id, archive_version) on success, None on failure.
+        Uses a module-level cache to avoid repeated calls during a single install run.
     """
-    if platform_str in _archive_cache:
-        return _archive_cache[platform_str]
+    cache_key = (archive_name, platform_str, archive_version)
+    if cache_key in _archive_cache:
+        return _archive_cache[cache_key]
 
     endpoint = get_ota_endpoint()
     if not endpoint:
@@ -504,13 +532,18 @@ def _fetch_archive_manifest(platform_str: str):
     base = endpoint.rstrip("/")
 
     try:
+        params = {
+            "name": archive_name,
+            "platform": platform_str,
+            "status": "available",
+        }
+        if archive_version:
+            params["search"] = archive_version
+
         resp = requests.get(
             f"{base}/archives",
             headers=headers,
-            params={
-                "platform": platform_str,
-                "status": "available",
-            },
+            params=params,
             timeout=10,
         )
         resp.raise_for_status()
@@ -524,10 +557,30 @@ def _fetch_archive_manifest(platform_str: str):
         if not archives:
             return None
 
-        # Use the most recent archive
-        archive = archives[0]
-        result = (archive.get("packages", []), archive.get("id"))
-        _archive_cache[platform_str] = result
+        # Find matching archive (exact version match if specified)
+        archive = None
+        if archive_version:
+            for a in archives:
+                if a.get("version") == archive_version:
+                    archive = a
+                    break
+            if not archive:
+                # Try without 'v' prefix
+                v_stripped = archive_version.lstrip("v")
+                for a in archives:
+                    if a.get("version", "").lstrip("v") == v_stripped:
+                        archive = a
+                        break
+        if not archive:
+            # Use the most recent archive
+            archive = archives[0]
+
+        result = (
+            archive.get("packages", []),
+            archive.get("id"),
+            archive.get("version"),
+        )
+        _archive_cache[cache_key] = result
         return result
 
     except requests.RequestException as e:
@@ -576,11 +629,49 @@ def _download_package_blob(
         return False
 
 
+def _extract_and_read_deps(
+    download_file: Path,
+    install_dir: Path,
+    package_name: str,
+    version: str,
+) -> Optional[dict]:
+    """Extract downloaded package and read dependencies.
+
+    Returns dict with 'version' and 'dependencies' on success, None on failure.
+    """
+    if install_dir.exists():
+        shutil.rmtree(install_dir)
+    install_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(download_file, "r") as zip_ref:
+            zip_ref.extractall(install_dir)
+        download_file.unlink()
+    except (zipfile.BadZipFile, OSError) as e:
+        print(f"⚠️ Failed to extract OTA package '{package_name}': {e}")
+        if download_file.exists():
+            download_file.unlink()
+        return None
+
+    print(f"✅ Successfully installed '{package_name}=={version}' from OTA server.")
+
+    # Read dependencies from release.yaml
+    dependencies = []
+    release_yaml = install_dir / "release.yaml"
+    if release_yaml.is_file():
+        with open(release_yaml, "r") as f:
+            release_info = yaml.safe_load(f) or {}
+            dependencies = release_info.get("dependencies", [])
+
+    return {"version": version, "dependencies": dependencies}
+
+
 def download_package(
     package_name: str,
     spec_str: str,
     build_type: str,
     install_base_path: Path,
+    archive_version: Optional[str] = None,
 ) -> Optional[dict]:
     """Download a single package from the OTA server's archive.
 
@@ -589,9 +680,11 @@ def download_package(
 
     Args:
         package_name: Name of the package to download.
-        spec_str: Version specifier string (e.g. ">=1.0", "" for any).
+        spec_str: Version specifier string (e.g. ">=1.0", "==1.1.0", "" for any).
         build_type: "debug" or "release".
         install_base_path: Path to release/install/ directory.
+        archive_version: Optional specific archive version (e.g., 'v2024.01').
+            If None, uses the latest available archive.
 
     Returns:
         dict with 'version' and 'dependencies' on success, None on failure.
@@ -600,12 +693,13 @@ def download_package(
     from packaging.specifiers import SpecifierSet
 
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+    archive_name = get_archive_name(build_type)
 
-    manifest = _fetch_archive_manifest(platform_str)
+    manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
     if manifest is None:
         return None
 
-    packages, archive_id = manifest
+    packages, archive_id, actual_version = manifest
     if not archive_id:
         return None
 
@@ -666,29 +760,314 @@ def download_package(
     if not _download_package_blob(archive_id, pkg_id, package_name, download_file):
         return None
 
-    # Extract
-    if install_dir.exists():
-        shutil.rmtree(install_dir)
-    install_dir.mkdir(parents=True, exist_ok=True)
+    return _extract_and_read_deps(download_file, install_dir, package_name, version)
 
-    try:
-        with zipfile.ZipFile(download_file, "r") as zip_ref:
-            zip_ref.extractall(install_dir)
-        download_file.unlink()
-    except (zipfile.BadZipFile, OSError) as e:
-        print(f"⚠️ Failed to extract OTA package '{package_name}': {e}")
-        if download_file.exists():
-            download_file.unlink()
+
+def download_all_from_archive(
+    build_type: str,
+    install_base_path: Path,
+    archive_version: Optional[str] = None,
+    package_filter: Optional[list] = None,
+) -> dict:
+    """Download all packages from an archive.
+
+    Args:
+        build_type: "debug" or "release".
+        install_base_path: Path to release/install/ directory.
+        archive_version: Optional specific archive version (e.g., 'v2024.01').
+            If None, uses the latest available archive.
+        package_filter: Optional list of package names to download. If None,
+            downloads all packages in the archive.
+
+    Returns:
+        dict mapping package_name to {'version': str, 'dependencies': list}
+        for successfully downloaded packages. Empty dict on complete failure.
+    """
+    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+    archive_name = get_archive_name(build_type)
+
+    manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
+    if manifest is None:
+        print(f"⚠️ No archive found for '{archive_name}' on {platform_str}")
+        return {}
+
+    packages, archive_id, actual_version = manifest
+    if not archive_id:
+        return {}
+
+    print(f"📦 Using archive: {archive_name} v{actual_version or 'latest'}")
+
+    results = {}
+    for pkg in packages:
+        name = pkg.get("packageName") or pkg.get("name", "")
+        if not name:
+            continue
+        if package_filter and name not in package_filter:
+            continue
+
+        pkg_id = pkg.get("packageId") or pkg.get("id")
+        if not pkg_id:
+            continue
+
+        tag = pkg.get("tagName") or pkg.get("version", "")
+        version = tag.lstrip("v") if tag else "0.0.0"
+
+        install_dir = (
+            install_base_path
+            / name
+            / g.os_type
+            / g.os_version
+            / g.architecture
+            / build_type
+        )
+
+        download_file = (
+            Path(g.script_directory) / "install" / f"{name}-ota-{version}.zip"
+        )
+
+        print(f"⬇️  Downloading '{name}' v{version} from OTA server...")
+        if not _download_package_blob(archive_id, pkg_id, name, download_file):
+            continue
+
+        result = _extract_and_read_deps(download_file, install_dir, name, version)
+        if result:
+            results[name] = result
+
+    return results
+
+
+def _fetch_package_id_by_name(package_name: str) -> Optional[str]:
+    """Fetch package ID by name from the OTA server.
+
+    Returns package UUID on success, None on failure.
+    """
+    endpoint = get_ota_endpoint()
+    if not endpoint:
         return None
 
-    print(f"✅ Successfully installed '{package_name}=={version}' from OTA server.")
+    token = authenticate()
+    if not token:
+        return None
 
-    # Read dependencies from release.yaml
-    dependencies = []
-    release_yaml = install_dir / "release.yaml"
-    if release_yaml.is_file():
-        with open(release_yaml, "r") as f:
-            release_info = yaml.safe_load(f) or {}
-            dependencies = release_info.get("dependencies", [])
+    headers = _auth_headers(token)
+    base = endpoint.rstrip("/")
 
-    return {"version": version, "dependencies": dependencies}
+    try:
+        resp = requests.get(
+            f"{base}/packages",
+            headers=headers,
+            params={"name": package_name},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        result = _unwrap_response(resp.json())
+        packages = (
+            result.get("packages", result) if isinstance(result, dict) else result
+        )
+        if packages and len(packages) > 0:
+            return packages[0].get("id")
+        return None
+    except requests.RequestException:
+        return None
+
+
+def _download_blob_by_hash(blob_hash: str, download_path: Path) -> bool:
+    """Download a blob directly by its hash.
+
+    Streams GET /blobs/:hash/download to download_path.
+    Returns True on success, False on failure.
+    """
+    endpoint = get_ota_endpoint()
+    if not endpoint:
+        return False
+
+    token = authenticate()
+    if not token:
+        return False
+
+    headers = _auth_headers(token)
+    base = endpoint.rstrip("/")
+
+    try:
+        download_path.parent.mkdir(parents=True, exist_ok=True)
+        with requests.get(
+            f"{base}/blobs/{blob_hash}/download",
+            headers=headers,
+            stream=True,
+            timeout=60,
+        ) as resp:
+            resp.raise_for_status()
+            with open(download_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        return True
+    except requests.RequestException as e:
+        print(f"⚠️ Blob download failed: {e}")
+        return False
+
+
+def download_package_at_timestamp(
+    package_name: str,
+    timestamp: str,
+    build_type: str,
+    install_base_path: Path,
+) -> Optional[dict]:
+    """Download a package at a specific timestamp (time-travel).
+
+    Uses the /packages/:id/manifests/at API to find the manifest that was
+    current at the given timestamp, then downloads the blob directly.
+
+    Args:
+        package_name: Name of the package to download.
+        timestamp: ISO 8601 timestamp (e.g., '2024-01-15' or '2024-01-15T10:00:00Z').
+        build_type: "debug" or "release".
+        install_base_path: Path to release/install/ directory.
+
+    Returns:
+        dict with 'version' and 'dependencies' on success, None on failure.
+    """
+    endpoint = get_ota_endpoint()
+    if not endpoint:
+        return None
+
+    token = authenticate()
+    if not token:
+        return None
+
+    # Get package ID
+    package_id = _fetch_package_id_by_name(package_name)
+    if not package_id:
+        print(f"⚠️ Package '{package_name}' not found on OTA server.")
+        return None
+
+    headers = _auth_headers(token)
+    base = endpoint.rstrip("/")
+    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+
+    try:
+        # Fetch manifest at timestamp
+        resp = requests.get(
+            f"{base}/packages/{package_id}/manifests/at",
+            headers=headers,
+            params={
+                "timestamp": timestamp,
+                "platform": platform_str,
+                "buildType": build_type,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        manifest = _unwrap_response(resp.json())
+
+        if not manifest:
+            print(f"⚠️ No manifest found for '{package_name}' at {timestamp}")
+            return None
+
+        blob_hash = manifest.get("blobHash")
+        version = manifest.get("version", "0.0.0")
+
+        if not blob_hash:
+            print(f"⚠️ Manifest for '{package_name}' has no blob hash")
+            return None
+
+        install_dir = (
+            install_base_path
+            / package_name
+            / g.os_type
+            / g.os_version
+            / g.architecture
+            / build_type
+        )
+
+        download_file = (
+            Path(g.script_directory) / "install" / f"{package_name}-ota-{version}.zip"
+        )
+
+        print(f"⬇️  Downloading '{package_name}' v{version} (at {timestamp})...")
+        if not _download_blob_by_hash(blob_hash, download_file):
+            return None
+
+        return _extract_and_read_deps(download_file, install_dir, package_name, version)
+
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            print(f"⚠️ No manifest found for '{package_name}' at {timestamp}")
+        else:
+            print(f"⚠️ OTA error: {e}")
+        return None
+    except requests.RequestException as e:
+        print(f"⚠️ OTA server unreachable: {e}")
+        return None
+
+
+def download_all_at_timestamp(
+    timestamp: str,
+    build_type: str,
+    install_base_path: Path,
+    package_filter: Optional[list] = None,
+) -> dict:
+    """Download all packages at a specific timestamp.
+
+    Fetches the list of all packages, then downloads each one's manifest
+    at the given timestamp.
+
+    Args:
+        timestamp: ISO 8601 timestamp (e.g., '2024-01-15').
+        build_type: "debug" or "release".
+        install_base_path: Path to release/install/ directory.
+        package_filter: Optional list of package names to download.
+
+    Returns:
+        dict mapping package_name to {'version': str, 'dependencies': list}
+        for successfully downloaded packages.
+    """
+    endpoint = get_ota_endpoint()
+    if not endpoint:
+        return {}
+
+    token = authenticate()
+    if not token:
+        return {}
+
+    headers = _auth_headers(token)
+    base = endpoint.rstrip("/")
+
+    try:
+        # Fetch all packages
+        resp = requests.get(
+            f"{base}/packages",
+            headers=headers,
+            params={"limit": 1000},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        result = _unwrap_response(resp.json())
+        packages = (
+            result.get("packages", result) if isinstance(result, dict) else result
+        )
+
+        if not packages:
+            print("⚠️ No packages found on OTA server.")
+            return {}
+
+        print(f"📦 Downloading packages at timestamp: {timestamp}")
+
+        results = {}
+        for pkg in packages:
+            name = pkg.get("name", "")
+            if not name:
+                continue
+            if package_filter and name not in package_filter:
+                continue
+
+            result = download_package_at_timestamp(
+                name, timestamp, build_type, install_base_path
+            )
+            if result:
+                results[name] = result
+
+        return results
+
+    except requests.RequestException as e:
+        print(f"⚠️ OTA server unreachable: {e}")
+        return {}
