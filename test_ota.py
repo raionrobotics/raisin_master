@@ -1037,7 +1037,8 @@ class TestPublishIntegration(unittest.TestCase):
 
             buf = io.StringIO()
             with redirect_stdout(buf):
-                publish("mypkg", "release", dry_run=True)
+                # --upload-ota flag triggers OTA message in dry-run
+                publish("mypkg", "release", dry_run=True, upload_ota=True)
 
             output = buf.getvalue()
             self.assertIn("OTA", output)

@@ -26,7 +26,7 @@ from commands.setup import (
 )
 
 
-def publish(target, build_type, dry_run=False):
+def publish(target, build_type, dry_run=False, upload_ota=False):
     """
     Builds the project, creates a release archive, and uploads it to GitHub,
     prompting for overwrite if the asset already exists.
@@ -35,6 +35,7 @@ def publish(target, build_type, dry_run=False):
         target: Target package name
         build_type: Build type (debug/release)
         dry_run: If True, skip actual publishing
+        upload_ota: If True, also upload to OTA server (requires RAISIN_OTA_ENDPOINT)
     """
 
     guard_require_version_bump_for_src_packages()
@@ -176,38 +177,45 @@ def publish(target, build_type, dry_run=False):
             print(f"✅ Successfully created archive: {archive_file}.zip")
 
             if dry_run:
-                print("\n--- [DRY-RUN] Skipping GitHub Release ---")
-                print(f"[DRY-RUN] Would upload '{archive_file}.zip' to GitHub")
+                if upload_ota:
+                    print("\n--- [DRY-RUN] Skipping OTA Upload ---")
+                    print(f"[DRY-RUN] Would upload '{archive_file}.zip' to OTA server")
+                else:
+                    print("\n--- [DRY-RUN] Skipping GitHub Release ---")
+                    print(f"[DRY-RUN] Would upload '{archive_file}.zip' to GitHub")
                 print(f"[DRY-RUN] Tag: v{version}")
-                if is_ota_configured():
-                    print("[DRY-RUN] Would also upload to OTA server")
                 print("[DRY-RUN] Build and archive completed successfully.")
                 return
 
+            # --- Upload to OTA Server (--upload-ota flag) ---
+            if upload_ota:
+                if not is_ota_configured():
+                    print(
+                        "❌ Error: --upload-ota specified but RAISIN_OTA_ENDPOINT is not set."
+                    )
+                    return
+                print("\n--- Uploading to OTA Server ---")
+                try:
+                    from commands.ota_client import upload_package as ota_upload
+
+                    ota_success = ota_upload(
+                        archive_path=Path(archive_file_str),
+                        package_name=target,
+                        version=version,
+                        build_type=build_type,
+                    )
+                    if ota_success:
+                        print(f"✅ OTA upload successful for '{target}'.")
+                    else:
+                        print(f"❌ OTA upload failed for '{target}'.")
+                except Exception as e:
+                    print(f"❌ OTA upload failed: {e}")
+                return
+
+            # --- Upload to GitHub Release (default) ---
             repositories, secrets, _, _, _ = load_configuration()
 
             if not secrets:
-                if is_ota_configured():
-                    print(
-                        "⚠️ GitHub tokens not found. Skipping GitHub release, uploading to OTA only."
-                    )
-                    print("\n--- Uploading to OTA Server ---")
-                    try:
-                        from commands.ota_client import upload_package as ota_upload
-
-                        ota_success = ota_upload(
-                            archive_path=Path(archive_file_str),
-                            package_name=target,
-                            version=version,
-                            build_type=build_type,
-                        )
-                        if ota_success:
-                            print(f"✅ OTA upload successful for '{target}'.")
-                        else:
-                            print(f"❌ OTA upload failed for '{target}'.")
-                    except Exception as e:
-                        print(f"❌ OTA upload failed: {e}")
-                    return
                 print(
                     "❌ Error: GitHub tokens not found in configuration. Cannot upload."
                 )
@@ -398,25 +406,6 @@ def publish(target, build_type, dry_run=False):
                     f"✅ Successfully created new prerelease and uploaded '{archive_filename}'."
                 )
 
-            # --- Upload to OTA Server ---
-            if is_ota_configured():
-                print("\n--- Uploading to OTA Server ---")
-                try:
-                    from commands.ota_client import upload_package as ota_upload
-
-                    ota_success = ota_upload(
-                        archive_path=Path(archive_file_str),
-                        package_name=target,
-                        version=version,
-                        build_type=build_type,
-                    )
-                    if ota_success:
-                        print(f"✅ OTA upload successful for '{target}'.")
-                    else:
-                        print(f"⚠️ OTA upload failed. GitHub release was successful.")
-                except Exception as e:
-                    print(f"⚠️ OTA upload failed: {e}. GitHub release was successful.")
-
     # Keep your existing exception handling
     except FileNotFoundError as e:
         print(
@@ -455,15 +444,20 @@ def publish(target, build_type, dry_run=False):
     is_flag=True,
     help="Perform a dry run without actual publishing",
 )
-def publish_command(target, build_type, dry_run):
+@click.option(
+    "--upload-ota",
+    is_flag=True,
+    help="Upload to OTA server instead of GitHub (requires RAISIN_OTA_ENDPOINT)",
+)
+def publish_command(target, build_type, dry_run, upload_ota):
     """
-    Build, package, and upload a release to GitHub.
+    Build, package, and upload a release to GitHub or OTA server.
 
     \b
     Examples:
-        raisin publish raisin_network                # Publish both release+debug builds
+        raisin publish raisin_network                # Publish to GitHub
         raisin publish raisin_network --type release # Publish only release build
-        raisin publish raisin_network --type debug   # Publish only debug build
+        raisin publish raisin_network --upload-ota   # Publish to OTA server instead
         raisin publish my_package -t release
         raisin publish my_package -t both --dry-run  # Dry run without uploading
 
@@ -476,4 +470,4 @@ def publish_command(target, build_type, dry_run):
     )
     click.echo(f"📦 Publishing {target} ({', '.join(build_types)} builds)...")
     for bt in build_types:
-        publish(target, bt, dry_run)
+        publish(target, bt, dry_run, upload_ota)
