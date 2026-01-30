@@ -129,11 +129,14 @@ raisin install --archive-version v2024.01
 raisin install --at 2024-01-15
 raisin install --at 2024-01-15T10:00:00Z
 
+# Skip OTA and download directly from GitHub (for debugging)
+raisin install --from-github
+
 # Combine options
 raisin install raisin_network --type debug --archive-version v2024.01
 ```
 
-> **Note:** When OTA is configured, packages are downloaded from the OTA server's archive. The archive name is derived from the build type: `raisin-robot` for release, `raisin-robot-debug` for debug.
+> **Note:** Packages are downloaded from the OTA server by default. Use `--from-github` to bypass OTA and download directly from GitHub releases (useful for debugging or when OTA is unavailable).
 
 ### 6. Install Package Dependencies
 

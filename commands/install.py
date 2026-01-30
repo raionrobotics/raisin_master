@@ -32,6 +32,7 @@ def install_command(
     build_type,
     archive_version: Optional[str] = None,
     at_timestamp: Optional[str] = None,
+    from_github: bool = False,
 ):
     """
     Install packages and their dependencies.
@@ -41,6 +42,7 @@ def install_command(
         build_type (str): 'debug' or 'release'
         archive_version (str): Optional specific archive version (e.g., 'v2024.01')
         at_timestamp (str): Optional timestamp for time-travel install (e.g., '2024-01-15')
+        from_github (bool): If True, skip OTA and download directly from GitHub
     """
     print("🚀 Starting installation process...")
 
@@ -179,8 +181,8 @@ def install_command(
             print(f"Skipping '{package_name}' because it exists in local source")
             continue
 
-        # Priority 3: OTA Server (if configured)
-        if is_ota_configured():
+        # Priority 3: OTA Server (skip if --from-github specified)
+        if is_ota_configured() and not from_github:
             try:
                 ota_result = None
                 if at_timestamp:
@@ -386,8 +388,14 @@ def install_command(
     default=None,
     help="Install packages at a specific timestamp (e.g., '2024-01-15' or '2024-01-15T10:00:00Z')",
 )
+@click.option(
+    "--from-github",
+    "from_github",
+    is_flag=True,
+    help="Skip OTA and download directly from GitHub releases",
+)
 def install_cli_command(
-    packages, build_type, install_all, archive_version, at_timestamp
+    packages, build_type, install_all, archive_version, at_timestamp, from_github
 ):
     """
     Download and install packages from OTA server or GitHub releases.
@@ -401,6 +409,7 @@ def install_cli_command(
         raisin install --all                         # Install both debug and release
         raisin install --archive-version v2024.01   # Install from specific archive
         raisin install --at 2024-01-15               # Install packages at timestamp
+        raisin install --from-github                 # Skip OTA, use GitHub only
     """
     packages = list(packages)
 
@@ -410,7 +419,9 @@ def install_cli_command(
         build_types = [build_type]
 
     for bt in build_types:
-        if at_timestamp:
+        if from_github:
+            click.echo(f"📥 Installing from GitHub releases ({bt})...")
+        elif at_timestamp:
             click.echo(f"📥 Installing packages at {at_timestamp} ({bt})...")
         elif archive_version:
             click.echo(f"📥 Installing from archive {archive_version} ({bt})...")
@@ -418,4 +429,4 @@ def install_cli_command(
             click.echo(f"📥 Installing {len(packages)} package(s) ({bt})...")
         else:
             click.echo(f"📥 Installing all packages from latest archive ({bt})...")
-        install_command(packages, bt, archive_version, at_timestamp)
+        install_command(packages, bt, archive_version, at_timestamp, from_github)
