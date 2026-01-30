@@ -64,18 +64,18 @@ Create your local configuration file by copying the provided example.
 cp configuration_setting_example.yaml configuration_setting.yaml
 ```
 Next, open **`configuration_setting.yaml`** and edit the following fields:
-* **`gh_tokens`**: Set your GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`). Not required if using OTA server.
+* **`gh_tokens`**: (Optional) GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`). Only needed for GitHub fallback or publishing to GitHub.
 * **`user_type`**: Set to `"user"` for stable releases or `"devel"` for development builds.
 * **`packages_to_ignore`**: (Optional) List of packages to exclude from the build process.
 * **`repos_to_ignore`**: (Optional) List of repositories to exclude (uses prebuilt binaries instead).
 
-### 3. OTA Server Configuration (Optional)
+### 3. OTA Server Configuration
 
-RAISIN supports downloading packages from an OTA (Over-The-Air) server as the primary source, with GitHub releases as fallback. To enable OTA:
+RAISIN downloads packages from the OTA (Over-The-Air) server by default, with GitHub releases as fallback. The default endpoint is `https://raisin-ota-api.raionrobotics.com/api`.
 
 ```bash
-# Set the OTA server endpoint
-export RAISIN_OTA_ENDPOINT="https://your-ota-server.com/api"
+# (Optional) Override the default OTA endpoint
+export RAISIN_OTA_ENDPOINT="https://your-custom-ota-server.com/api"
 
 # (Optional) Custom SSH key path for authentication (default: ~/.ssh/id_ed25519)
 export RAISIN_SSH_KEY="~/.ssh/my_key"

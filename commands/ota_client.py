@@ -6,7 +6,7 @@ Handles all interactions with the raisin-ota-server:
 - Package upload (used by publish command)
 - Package download (used by install command)
 
-Requires RAISIN_OTA_ENDPOINT environment variable to be set.
+Uses DEFAULT_OTA_ENDPOINT by default. Override with RAISIN_OTA_ENDPOINT env var.
 All operations fail gracefully — OTA is supplementary, never blocks existing flows.
 """
 
@@ -43,6 +43,9 @@ _archive_cache = {}
 # Default archive name prefix (build_type is appended for debug)
 DEFAULT_ARCHIVE_NAME = "raisin-robot"
 
+# Default OTA server endpoint
+DEFAULT_OTA_ENDPOINT = "https://raisin-ota-api.raionrobotics.com/api"
+
 # Persistent token cache file name (stored in script_directory)
 _TOKEN_CACHE_FILE = ".ota_token_cache.json"
 
@@ -52,10 +55,13 @@ _TOKEN_CACHE_FILE = ".ota_token_cache.json"
 # ============================================================================
 
 
-def get_ota_endpoint() -> Optional[str]:
-    """Read RAISIN_OTA_ENDPOINT env var. Returns None if not set."""
+def get_ota_endpoint() -> str:
+    """Read RAISIN_OTA_ENDPOINT env var, or use default.
+
+    Returns the OTA server endpoint. Uses DEFAULT_OTA_ENDPOINT if env var is not set.
+    """
     endpoint = os.environ.get("RAISIN_OTA_ENDPOINT", "").strip()
-    return endpoint if endpoint else None
+    return endpoint if endpoint else DEFAULT_OTA_ENDPOINT
 
 
 def get_ssh_key_path() -> Path:
@@ -64,8 +70,8 @@ def get_ssh_key_path() -> Path:
 
 
 def is_ota_configured() -> bool:
-    """True if RAISIN_OTA_ENDPOINT is set and non-empty."""
-    return get_ota_endpoint() is not None
+    """True if OTA endpoint is available (always True with default endpoint)."""
+    return True
 
 
 def get_archive_name(build_type: str) -> str:

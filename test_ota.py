@@ -105,23 +105,26 @@ def _make_sshsig_pem(raw_sig=None):
 class TestConfiguration(unittest.TestCase):
     """Verify env-var-based configuration helpers."""
 
-    def test_is_ota_configured_false_when_unset(self):
+    def test_is_ota_configured_always_true(self):
+        """OTA is always configured with default endpoint."""
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("RAISIN_OTA_ENDPOINT", None)
-            self.assertFalse(ota.is_ota_configured())
+            self.assertTrue(ota.is_ota_configured())
 
-    def test_is_ota_configured_false_when_empty(self):
+    def test_is_ota_configured_true_when_empty(self):
+        """OTA uses default endpoint when env var is empty."""
         with patch.dict(os.environ, {"RAISIN_OTA_ENDPOINT": "  "}, clear=False):
-            self.assertFalse(ota.is_ota_configured())
+            self.assertTrue(ota.is_ota_configured())
 
     def test_is_ota_configured_true_when_set(self):
         with patch.dict(os.environ, {"RAISIN_OTA_ENDPOINT": "https://ota.example.com"}):
             self.assertTrue(ota.is_ota_configured())
 
-    def test_get_ota_endpoint_none_when_unset(self):
+    def test_get_ota_endpoint_returns_default_when_unset(self):
+        """Should return default endpoint when env var is not set."""
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("RAISIN_OTA_ENDPOINT", None)
-            self.assertIsNone(ota.get_ota_endpoint())
+            self.assertEqual(ota.get_ota_endpoint(), ota.DEFAULT_OTA_ENDPOINT)
 
     def test_get_ota_endpoint_returns_value(self):
         with patch.dict(os.environ, {"RAISIN_OTA_ENDPOINT": "https://ota.example.com"}):
