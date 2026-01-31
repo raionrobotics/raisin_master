@@ -914,40 +914,11 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
 
 
 class TestInstallIntegration(unittest.TestCase):
-    """Verify OTA is used (or skipped) correctly in install_command."""
+    """Verify OTA is used correctly in install_command."""
 
-    @patch("commands.install.is_ota_configured", return_value=False)
     @patch("commands.install.load_configuration")
-    def test_ota_skipped_when_not_configured(self, mock_config, mock_ota_check):
-        """When RAISIN_OTA_ENDPOINT is unset, install should not call OTA."""
-        mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
-            {"org": "ghtoken"},
-            "devel",
-            None,
-            [],
-        )
-
-        # Patch the requests.Session to avoid real HTTP calls
-        with patch("commands.install.requests.Session") as MockSession:
-            session = MagicMock()
-            MockSession.return_value = session
-
-            # Simulate GitHub API returning no matching releases
-            resp = _mock_response(json_data=[])
-            session.get.return_value = resp
-
-            from commands.install import install_command
-
-            install_command(["mypkg"], "release")
-
-        # is_ota_configured should have been checked but returned False
-        mock_ota_check.assert_called()
-
-    @patch("commands.install.is_ota_configured", return_value=True)
-    @patch("commands.install.load_configuration")
-    def test_ota_attempted_when_configured(self, mock_config, mock_ota_check):
-        """When OTA is configured, install should try OTA before GitHub."""
+    def test_ota_attempted_when_configured(self, mock_config):
+        """Install should try OTA before GitHub."""
         mock_config.return_value = (
             {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
             {"org": "ghtoken"},
@@ -982,7 +953,6 @@ class TestInstallIntegration(unittest.TestCase):
 class TestPublishIntegration(unittest.TestCase):
     """Verify OTA messaging in publish dry-run mode."""
 
-    @patch("commands.publish.is_ota_configured", return_value=True)
     @patch("commands.publish.load_configuration")
     @patch("commands.publish.setup")
     @patch("commands.publish.guard_require_version_bump_for_src_packages")
@@ -999,7 +969,6 @@ class TestPublishIntegration(unittest.TestCase):
         _guard,
         _setup,
         mock_config,
-        mock_ota_check,
         capsys=None,
     ):
         mock_config.return_value = (
@@ -1030,52 +999,6 @@ class TestPublishIntegration(unittest.TestCase):
 
             output = buf.getvalue()
             self.assertIn("OTA", output)
-
-    @patch("commands.publish.is_ota_configured", return_value=False)
-    @patch("commands.publish.load_configuration")
-    @patch("commands.publish.setup")
-    @patch("commands.publish.guard_require_version_bump_for_src_packages")
-    @patch("commands.publish.get_commit_hash", return_value="abc123")
-    @patch("commands.publish.subprocess.run")
-    @patch("commands.publish.shutil.make_archive")
-    @patch("commands.publish.shutil.copy")
-    def test_dry_run_no_ota_message_when_unconfigured(
-        self,
-        _copy,
-        _archive,
-        _subproc,
-        _commit,
-        _guard,
-        _setup,
-        mock_config,
-        mock_ota_check,
-    ):
-        mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
-            {"org": "ghtoken"},
-            "devel",
-            None,
-            [],
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            g.script_directory = tmpdir
-            target_dir = Path(tmpdir) / "src" / "mypkg"
-            target_dir.mkdir(parents=True)
-            release_yaml = target_dir / "release.yaml"
-            release_yaml.write_text("version: 1.0.0\n")
-
-            from commands.publish import publish
-
-            import io
-            from contextlib import redirect_stdout
-
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                publish("mypkg", "release", dry_run=True)
-
-            output = buf.getvalue()
-            self.assertNotIn("Would also upload to OTA", output)
 
 
 # ============================================================================
