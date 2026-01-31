@@ -60,8 +60,7 @@ def get_ota_endpoint() -> str:
 
     Returns the OTA server endpoint. Uses DEFAULT_OTA_ENDPOINT if env var is not set.
     """
-    endpoint = os.environ.get("RAISIN_OTA_ENDPOINT", "").strip()
-    return endpoint if endpoint else DEFAULT_OTA_ENDPOINT
+    return os.environ.get("RAISIN_OTA_ENDPOINT", DEFAULT_OTA_ENDPOINT).strip()
 
 
 def get_ssh_key_path() -> Path:
