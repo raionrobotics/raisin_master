@@ -69,11 +69,6 @@ def get_ssh_key_path() -> Path:
     return Path(os.environ.get("RAISIN_SSH_KEY", "~/.ssh/id_ed25519")).expanduser()
 
 
-def is_ota_configured() -> bool:
-    """True if OTA endpoint is available (always True with default endpoint)."""
-    return True
-
-
 def get_archive_name(build_type: str) -> str:
     """Get archive name based on build type.
 
@@ -359,6 +354,21 @@ def _auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _get_auth_context() -> Optional[tuple]:
+    """Get authenticated context for OTA API calls.
+
+    Returns:
+        Tuple of (base_url, headers) on success, None on auth failure.
+        base_url is the endpoint with trailing slash stripped.
+    """
+    token = authenticate()
+    if not token:
+        return None
+    base = get_ota_endpoint().rstrip("/")
+    headers = _auth_headers(token)
+    return (base, headers)
+
+
 # ============================================================================
 # Upload Functions (used by publish command)
 # ============================================================================
@@ -396,16 +406,10 @@ def upload_package(
 
     Returns True on success, False on failure. Never raises.
     """
-    endpoint = get_ota_endpoint()
-    if not endpoint:
+    ctx = _get_auth_context()
+    if not ctx:
         return False
-
-    token = authenticate()
-    if not token:
-        return False
-
-    headers = _auth_headers(token)
-    base = endpoint.rstrip("/")
+    base, headers = ctx
 
     try:
         # 1. Compute SHA256
@@ -526,16 +530,10 @@ def _fetch_archive_manifest(
     if cache_key in _archive_cache:
         return _archive_cache[cache_key]
 
-    endpoint = get_ota_endpoint()
-    if not endpoint:
+    ctx = _get_auth_context()
+    if not ctx:
         return None
-
-    token = authenticate()
-    if not token:
-        return None
-
-    headers = _auth_headers(token)
-    base = endpoint.rstrip("/")
+    base, headers = ctx
 
     try:
         params = {
@@ -594,45 +592,46 @@ def _fetch_archive_manifest(
         return None
 
 
+def _stream_download(url: str, download_path: Path, error_context: str = "") -> bool:
+    """Stream download a file from a URL.
+
+    Args:
+        url: Full URL to download from.
+        download_path: Local path to save the file.
+        error_context: Context string for error messages (e.g., package name).
+
+    Returns:
+        True on success, False on failure.
+    """
+    ctx = _get_auth_context()
+    if not ctx:
+        return False
+    _, headers = ctx
+
+    try:
+        download_path.parent.mkdir(parents=True, exist_ok=True)
+        with requests.get(url, headers=headers, stream=True, timeout=60) as resp:
+            resp.raise_for_status()
+            with open(download_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        return True
+    except requests.RequestException as e:
+        context = f" for '{error_context}'" if error_context else ""
+        print(f"⚠️ OTA download failed{context}: {e}")
+        return False
+
+
 def _download_package_blob(
     archive_id: str,
     package_id: str,
     package_name: str,
     download_path: Path,
 ) -> bool:
-    """Download a single package blob from an archive.
-
-    Streams GET /archives/:id/packages/:pkgId/download to download_path.
-    Returns True on success, False on failure.
-    """
-    endpoint = get_ota_endpoint()
-    if not endpoint:
-        return False
-
-    token = authenticate()
-    if not token:
-        return False
-
-    headers = _auth_headers(token)
-    base = endpoint.rstrip("/")
-
-    try:
-        download_path.parent.mkdir(parents=True, exist_ok=True)
-        with requests.get(
-            f"{base}/archives/{archive_id}/packages/{package_id}/download",
-            headers=headers,
-            stream=True,
-            timeout=60,
-        ) as resp:
-            resp.raise_for_status()
-            with open(download_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        return True
-
-    except requests.RequestException as e:
-        print(f"⚠️ OTA download failed for '{package_name}': {e}")
-        return False
+    """Download a single package blob from an archive."""
+    base = get_ota_endpoint().rstrip("/")
+    url = f"{base}/archives/{archive_id}/packages/{package_id}/download"
+    return _stream_download(url, download_path, package_name)
 
 
 def _extract_and_read_deps(
@@ -847,16 +846,10 @@ def _fetch_package_id_by_name(package_name: str) -> Optional[str]:
 
     Returns package UUID on success, None on failure.
     """
-    endpoint = get_ota_endpoint()
-    if not endpoint:
+    ctx = _get_auth_context()
+    if not ctx:
         return None
-
-    token = authenticate()
-    if not token:
-        return None
-
-    headers = _auth_headers(token)
-    base = endpoint.rstrip("/")
+    base, headers = ctx
 
     try:
         resp = requests.get(
@@ -878,38 +871,10 @@ def _fetch_package_id_by_name(package_name: str) -> Optional[str]:
 
 
 def _download_blob_by_hash(blob_hash: str, download_path: Path) -> bool:
-    """Download a blob directly by its hash.
-
-    Streams GET /blobs/:hash/download to download_path.
-    Returns True on success, False on failure.
-    """
-    endpoint = get_ota_endpoint()
-    if not endpoint:
-        return False
-
-    token = authenticate()
-    if not token:
-        return False
-
-    headers = _auth_headers(token)
-    base = endpoint.rstrip("/")
-
-    try:
-        download_path.parent.mkdir(parents=True, exist_ok=True)
-        with requests.get(
-            f"{base}/blobs/{blob_hash}/download",
-            headers=headers,
-            stream=True,
-            timeout=60,
-        ) as resp:
-            resp.raise_for_status()
-            with open(download_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        return True
-    except requests.RequestException as e:
-        print(f"⚠️ Blob download failed: {e}")
-        return False
+    """Download a blob directly by its hash."""
+    base = get_ota_endpoint().rstrip("/")
+    url = f"{base}/blobs/{blob_hash}/download"
+    return _stream_download(url, download_path, f"blob {blob_hash[:8]}")
 
 
 def download_package_at_timestamp(
@@ -932,22 +897,16 @@ def download_package_at_timestamp(
     Returns:
         dict with 'version' and 'dependencies' on success, None on failure.
     """
-    endpoint = get_ota_endpoint()
-    if not endpoint:
-        return None
-
-    token = authenticate()
-    if not token:
-        return None
-
-    # Get package ID
+    # Get package ID first (this handles its own auth)
     package_id = _fetch_package_id_by_name(package_name)
     if not package_id:
         print(f"⚠️ Package '{package_name}' not found on OTA server.")
         return None
 
-    headers = _auth_headers(token)
-    base = endpoint.rstrip("/")
+    ctx = _get_auth_context()
+    if not ctx:
+        return None
+    base, headers = ctx
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
 
     try:
@@ -1027,16 +986,10 @@ def download_all_at_timestamp(
         dict mapping package_name to {'version': str, 'dependencies': list}
         for successfully downloaded packages.
     """
-    endpoint = get_ota_endpoint()
-    if not endpoint:
+    ctx = _get_auth_context()
+    if not ctx:
         return {}
-
-    token = authenticate()
-    if not token:
-        return {}
-
-    headers = _auth_headers(token)
-    base = endpoint.rstrip("/")
+    base, headers = ctx
 
     try:
         # Fetch all packages

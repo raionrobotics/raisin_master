@@ -24,7 +24,6 @@ from packaging.specifiers import SpecifierSet
 # Import globals and utilities
 from commands import globals as g
 from commands.utils import load_configuration
-from commands.ota_client import is_ota_configured
 
 
 def install_command(
@@ -64,9 +63,6 @@ def install_command(
     ) = load_configuration()
     if not all_repositories:
         print("❌ Error: No repositories found in configuration_setting.yaml")
-        return
-    if not tokens and not is_ota_configured():
-        print("❌ Error: No GitHub tokens found in configuration_setting.yaml")
         return
     if not tokens:
         print(
@@ -182,7 +178,7 @@ def install_command(
             continue
 
         # Priority 3: OTA Server (skip if --from-github specified)
-        if is_ota_configured() and not from_github:
+        if not from_github:
             try:
                 ota_result = None
                 if at_timestamp:

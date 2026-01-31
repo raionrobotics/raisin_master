@@ -18,7 +18,6 @@ from pathlib import Path
 # Import globals and utilities
 from commands import globals as g
 from commands.utils import load_configuration
-from commands.ota_client import is_ota_configured
 from commands.setup import (
     setup,
     get_commit_hash,
@@ -189,11 +188,6 @@ def publish(target, build_type, dry_run=False, upload_ota=False):
 
             # --- Upload to OTA Server (--upload-ota flag) ---
             if upload_ota:
-                if not is_ota_configured():
-                    print(
-                        "❌ Error: --upload-ota specified but RAISIN_OTA_ENDPOINT is not set."
-                    )
-                    return
                 print("\n--- Uploading to OTA Server ---")
                 try:
                     from commands.ota_client import upload_package as ota_upload
