@@ -193,7 +193,7 @@ def publish(target, build_type, dry_run=False, upload_ota=False):
                     from commands.ota_client import upload_package as ota_upload
 
                     ota_success = ota_upload(
-                        archive_path=Path(archive_file_str),
+                        archive_path=Path(str(archive_file) + ".zip"),
                         package_name=target,
                         version=version,
                         build_type=build_type,
