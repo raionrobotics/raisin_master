@@ -77,14 +77,23 @@ RAISIN downloads packages from the OTA (Over-The-Air) server by default, with Gi
 # (Optional) Override the default OTA endpoint
 export RAISIN_OTA_ENDPOINT="https://your-custom-ota-server.com/api"
 
-# (Optional) Custom SSH key path for authentication (default: ~/.ssh/id_ed25519)
+# (Optional) Specify SSH key path for authentication
 export RAISIN_SSH_KEY="~/.ssh/my_key"
 
 # (Optional) Custom archive name prefix (default: raisin-robot)
 export RAISIN_ARCHIVE_NAME="raisin-robot"
 ```
 
-> **Note:** OTA authentication uses SSH key-based challenge-response. Ensure your SSH public key is registered with the OTA server.
+#### SSH Key Authentication
+
+OTA authentication uses SSH key-based challenge-response. The following key types are supported:
+- **Ed25519** (`id_ed25519`) - Recommended
+- **ECDSA** (`id_ecdsa`) - nistp256, nistp384, nistp521 curves
+- **RSA** (`id_rsa`)
+
+If `RAISIN_SSH_KEY` is not set, RAISIN auto-detects existing keys in `~/.ssh/` in the order above.
+
+> **Note:** Ensure your SSH public key is registered with the OTA server before using OTA features.
 
 ### 4. Add Source Packages
 
