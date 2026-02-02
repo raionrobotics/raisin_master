@@ -23,7 +23,7 @@ from packaging.specifiers import SpecifierSet
 
 # Import globals and utilities
 from commands import globals as g
-from commands.utils import load_configuration
+from commands.utils import load_configuration, parse_version_specifier
 
 from commands.ota_client import download_package_at_timestamp, download_all_from_archive
 
@@ -115,17 +115,10 @@ def install_command(
         package_name, spec_str = match.groups()
         spec_str = spec_str.strip()
 
-        try:
-            if not spec_str:
-                spec = SpecifierSet(">=0.0.0")
-            else:
-                specifiers_list = re.findall(r"[<>=!~]+[\d.]+", spec_str)
-                formatted_spec_str = ", ".join(specifiers_list)
-                formatted_spec_str = formatted_spec_str.replace(">, =", ">=")
-                spec = SpecifierSet(formatted_spec_str)
-        except Exception as e:
+        spec = parse_version_specifier(spec_str)
+        if spec is None:
             print(
-                f"❌ Error: Invalid version specifier '{spec_str}' for package '{package_name}'. Skipping. Error: {e}"
+                f"❌ Error: Invalid version specifier '{spec_str}' for package '{package_name}'. Skipping."
             )
             is_successful = False
             continue

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 from commands import globals as g
+from commands.utils import parse_version_specifier
 
 # Module-level cached auth token (lives for the CLI session)
 _cached_token = None
@@ -723,7 +724,6 @@ def download_package(
         dict with 'version' and 'dependencies' on success, None on failure.
     """
     from packaging.version import parse as parse_version, InvalidVersion
-    from packaging.specifiers import SpecifierSet
 
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
     archive_name = get_archive_name(build_type)
@@ -737,14 +737,8 @@ def download_package(
         return None
 
     # Parse version specifier
-    try:
-        if not spec_str:
-            spec = SpecifierSet(">=0.0.0")
-        else:
-            specifiers_list = re.findall(r"[<>=!~]+[\d.]+", spec_str)
-            formatted = ", ".join(specifiers_list)
-            spec = SpecifierSet(formatted)
-    except Exception:
+    spec = parse_version_specifier(spec_str)
+    if spec is None:
         return None
 
     # Find best matching package in archive
