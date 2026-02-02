@@ -1,21 +1,22 @@
 """
-Release command for RAISIN.
+Publish command for RAISIN.
 
-Builds, archives, and uploads releases to GitHub.
+Builds, archives, and uploads releases to GitHub or OTA server.
 """
 
-import os
-import re
-import sys
 import json
-import yaml
-import shutil
+import os
 import platform
+import re
+import shutil
 import subprocess
-import click
+import sys
 from pathlib import Path
+from typing import Optional
 
-# Import globals and utilities
+import click
+import yaml
+
 from commands import globals as g
 from commands.utils import load_configuration
 from commands.setup import (
@@ -25,395 +26,515 @@ from commands.setup import (
 )
 
 
-def publish(target, build_type, dry_run=False, upload_ota=False):
+# ============================================================================
+# Path Helpers
+# ============================================================================
+
+
+def _get_paths(target: str, build_type: str) -> dict:
+    """Get all relevant paths for a publish operation.
+
+    Returns dict with: script_dir, target_dir, install_dir, build_dir, release_dir
     """
-    Builds the project, creates a release archive, and uploads it to GitHub,
-    prompting for overwrite if the asset already exists.
+    script_dir = Path(g.script_directory)
+    return {
+        "script_dir": script_dir,
+        "target_dir": script_dir / "src" / target,
+        "install_dir": (
+            script_dir
+            / "release"
+            / "install"
+            / target
+            / g.os_type
+            / g.os_version
+            / g.architecture
+            / build_type
+        ),
+        "build_dir": script_dir / "release" / "build" / target / build_type.lower(),
+        "release_dir": script_dir / "release",
+    }
+
+
+# ============================================================================
+# Validation
+# ============================================================================
+
+
+def _validate_target(target_dir: Path) -> Optional[dict]:
+    """Validate target exists and has release.yaml.
+
+    Returns release details dict on success, None on failure.
+    """
+    if not target_dir.is_dir():
+        print(f"❌ Error: Target not found in '{target_dir}'.")
+        return None
+
+    release_file = target_dir / "release.yaml"
+    if not release_file.is_file():
+        print(f"❌ Error: 'release.yaml' not found in '{target_dir}'.")
+        return None
+
+    try:
+        with open(release_file, "r") as f:
+            details = yaml.safe_load(f)
+            if not isinstance(details, dict):
+                print(f"❌ Error: Invalid YAML structure in '{release_file}'.")
+                return None
+            return details
+    except yaml.YAMLError as e:
+        print(f"❌ Error parsing YAML: {e}")
+        return None
+
+
+# ============================================================================
+# Build
+# ============================================================================
+
+
+def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
+    """Run CMake + Ninja build on Linux."""
+    cmake_cmd = [
+        "cmake",
+        "-S",
+        g.script_directory,
+        "-G",
+        "Ninja",
+        "-B",
+        str(build_dir),
+        f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+        f"-DCMAKE_BUILD_TYPE={build_type}",
+        "-DRAISIN_RELEASE_BUILD=ON",
+    ]
+    subprocess.run(cmake_cmd, check=True, text=True)
+    print("✅ CMake configuration successful.")
+
+    print("🛠️  Building with Ninja...")
+    core_count = max(os.cpu_count() // 2, 1)
+    print(f"🔩 Using {core_count} cores for the build.")
+    subprocess.run(
+        ["ninja", "install", f"-j{core_count}"],
+        cwd=build_dir,
+        check=True,
+        text=True,
+    )
+
+
+def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
+    """Run CMake + build on Windows."""
+    cmake_cmd = [
+        "cmake",
+        "--preset",
+        f"windows-{build_type.lower()}",
+        "-S",
+        g.script_directory,
+        "-B",
+        str(build_dir),
+        f"-DCMAKE_TOOLCHAIN_FILE={g.script_directory}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+        "-DRAISIN_RELEASE_BUILD=ON",
+    ]
+    if g.ninja_path:
+        cmake_cmd.append(f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}")
+
+    subprocess.run(cmake_cmd, check=True, text=True, env=g.developer_env)
+    print("✅ CMake configuration successful.")
+
+    print("🛠️  Building...")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel"],
+        check=True,
+        text=True,
+        env=g.developer_env,
+    )
+    subprocess.run(
+        ["cmake", "--install", str(build_dir)],
+        check=True,
+        text=True,
+        env=g.developer_env,
+    )
+
+
+def _build_package(
+    target: str,
+    build_type: str,
+    paths: dict,
+) -> bool:
+    """Build the package using CMake + Ninja.
+
+    Returns True on success, False on failure.
+    """
+    build_dir = paths["build_dir"]
+    install_dir = paths["install_dir"]
+    target_dir = paths["target_dir"]
+
+    print(f"\n--- Setting up build for '{target}' ---")
+    setup(
+        package_name=target,
+        build_type=build_type,
+        build_dir=str(build_dir),
+    )
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    print("⚙️  Running CMake...")
+    if platform.system().lower() == "linux":
+        _build_linux(build_dir, install_dir, build_type)
+    else:
+        _build_windows(build_dir, install_dir, build_type)
+
+    print(f"✅ Build for '{target}' complete!")
+
+    # Copy release.yaml and install_dependencies.sh to install dir
+    install_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(target_dir / "release.yaml", install_dir / "release.yaml")
+
+    deps_script = target_dir / "install_dependencies.sh"
+    if deps_script.is_file():
+        shutil.copy(deps_script, install_dir / "install_dependencies.sh")
+
+    return True
+
+
+# ============================================================================
+# Archive
+# ============================================================================
+
+
+def _create_archive(
+    target: str,
+    version: str,
+    build_type: str,
+    paths: dict,
+) -> Path:
+    """Create a zip archive of the built package.
+
+    Returns the path to the created archive (with .zip extension).
+    """
+    install_dir = paths["install_dir"]
+    release_dir = paths["release_dir"]
+
+    archive_name = (
+        f"{target}-{g.os_type}-{g.os_version}-{g.architecture}-{build_type}-v{version}"
+    )
+    archive_base = release_dir / archive_name
+
+    print("\n--- Creating Release Archive ---")
+    print(f"📦 Compressing '{install_dir}'...")
+    shutil.make_archive(
+        base_name=str(archive_base),
+        format="zip",
+        root_dir=str(install_dir),
+    )
+    archive_path = Path(str(archive_base) + ".zip")
+    print(f"✅ Successfully created archive: {archive_path}")
+    return archive_path
+
+
+# ============================================================================
+# Upload: OTA
+# ============================================================================
+
+
+def _upload_to_ota(
+    archive_path: Path,
+    target: str,
+    version: str,
+    build_type: str,
+) -> bool:
+    """Upload archive to OTA server.
+
+    Returns True on success, False on failure.
+    """
+    print("\n--- Uploading to OTA Server ---")
+    try:
+        from commands.ota_client import upload_package as ota_upload
+
+        success = ota_upload(
+            archive_path=archive_path,
+            package_name=target,
+            version=version,
+            build_type=build_type,
+        )
+        if success:
+            print(f"✅ OTA upload successful for '{target}'.")
+        else:
+            print(f"❌ OTA upload failed for '{target}'.")
+        return success
+    except Exception as e:
+        print(f"❌ OTA upload failed: {e}")
+        return False
+
+
+# ============================================================================
+# Upload: GitHub
+# ============================================================================
+
+
+def _parse_github_repo(repo_url: str) -> Optional[str]:
+    """Extract 'owner/repo' slug from git URL."""
+    match = re.search(r"git@github\.com:(.*)\.git", repo_url)
+    return match.group(1) if match else None
+
+
+def _check_github_release(
+    tag_name: str,
+    repo_slug: str,
+    auth_env: dict,
+) -> tuple:
+    """Check if a GitHub release exists.
+
+    Returns (exists: bool, is_prerelease: bool, assets: list[str])
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "release",
+                "view",
+                tag_name,
+                "--repo",
+                repo_slug,
+                "--json",
+                "assets,isPrerelease",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=auth_env,
+        )
+        data = json.loads(result.stdout)
+        assets = [a["name"] for a in data.get("assets", [])]
+        return (True, bool(data.get("isPrerelease")), assets)
+    except subprocess.CalledProcessError as e:
+        if "release not found" in e.stderr:
+            return (False, False, [])
+        raise
+
+
+def _update_github_release_notes(
+    tag_name: str,
+    repo_slug: str,
+    notes: str,
+    auth_env: dict,
+):
+    """Update release notes for an existing GitHub release."""
+    # Get release ID
+    release_id = subprocess.run(
+        ["gh", "api", f"repos/{repo_slug}/releases/tags/{tag_name}", "--jq", ".id"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=auth_env,
+    ).stdout.strip()
+
+    if not release_id:
+        raise RuntimeError(f"Could not resolve release id for '{tag_name}'")
+
+    # Patch release notes
+    subprocess.run(
+        [
+            "gh",
+            "api",
+            "-X",
+            "PATCH",
+            f"repos/{repo_slug}/releases/{release_id}",
+            "-f",
+            f"body={notes}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=auth_env,
+    )
+
+
+def _upload_to_github(
+    archive_path: Path,
+    target: str,
+    version: str,
+    paths: dict,
+) -> bool:
+    """Upload archive to GitHub release.
+
+    Returns True on success, False on failure.
+    """
+    repositories, secrets, _, _, _ = load_configuration()
+
+    if not secrets:
+        print("❌ Error: GitHub tokens not found in configuration. Cannot upload.")
+        return False
+
+    print("\n--- Uploading to GitHub Release ---")
+
+    # Get commit hash for release notes
+    target_dir = paths["target_dir"]
+    commit_hash = get_commit_hash(str(target_dir)) or "UNKNOWN"
+    release_notes = f"Commit: {commit_hash}\n"
+
+    # Get repo info
+    release_info = repositories.get(target)
+    if not (release_info and release_info.get("url")):
+        print(
+            f"ℹ️ Repository URL for '{target}' not found in configuration. Skipping GitHub release."
+        )
+        return False
+
+    repo_slug = _parse_github_repo(release_info["url"])
+    if not repo_slug:
+        print(f"❌ Error: Could not parse repository from URL: {release_info['url']}")
+        return False
+
+    owner = repo_slug.split("/")[0]
+    token = secrets.get(owner)
+    if not token:
+        print(f"❌ Error: Token for owner '{owner}' not found in configuration.")
+        return False
+
+    auth_env = os.environ.copy()
+    auth_env["GH_TOKEN"] = token
+    tag_name = f"v{version}"
+    archive_filename = archive_path.name
+
+    print(f"Checking status of release '{tag_name}' in '{repo_slug}'...")
+
+    try:
+        exists, is_prerelease, assets = _check_github_release(
+            tag_name, repo_slug, auth_env
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error checking release status: {e.stderr}")
+        return False
+
+    if exists:
+        if not is_prerelease:
+            print(f"🚫 Release '{tag_name}' exists and is not a prerelease. Aborting.")
+            return False
+
+        # Update existing prerelease
+        clobber = archive_filename in assets
+        action = "overwriting" if clobber else "uploading new"
+        print(
+            f"🚀 Prerelease '{tag_name}' exists; {action} asset '{archive_filename}'..."
+        )
+
+        _update_github_release_notes(tag_name, repo_slug, release_notes, auth_env)
+
+        upload_cmd = [
+            "gh",
+            "release",
+            "upload",
+            tag_name,
+            str(archive_path),
+            "--repo",
+            repo_slug,
+        ]
+        if clobber:
+            upload_cmd.append("--clobber")
+
+        subprocess.run(
+            upload_cmd, check=True, capture_output=True, text=True, env=auth_env
+        )
+        print(f"✅ Successfully uploaded asset to prerelease '{tag_name}'.")
+
+    else:
+        # Create new prerelease
+        print(f"✅ Release '{tag_name}' does not exist. Creating a new one...")
+        subprocess.run(
+            [
+                "gh",
+                "release",
+                "create",
+                tag_name,
+                str(archive_path),
+                "--repo",
+                repo_slug,
+                "--title",
+                tag_name,
+                "--notes",
+                release_notes,
+                "--prerelease",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=auth_env,
+        )
+        print(
+            f"✅ Successfully created new prerelease and uploaded '{archive_filename}'."
+        )
+
+    return True
+
+
+# ============================================================================
+# Main Publish Function
+# ============================================================================
+
+
+def publish(
+    target: str, build_type: str, dry_run: bool = False, upload_ota: bool = False
+):
+    """Build, archive, and upload a release.
 
     Args:
         target: Target package name
         build_type: Build type (debug/release)
         dry_run: If True, skip actual publishing
-        upload_ota: If True, also upload to OTA server (requires RAISIN_OTA_ENDPOINT)
+        upload_ota: If True, upload to OTA server instead of GitHub
     """
-
     guard_require_version_bump_for_src_packages()
 
-    # --- This initial part of the function remains the same ---
-    target_dir = os.path.join(g.script_directory, "src", target)
-    install_dir = f"{g.script_directory}/release/install/{target}/{g.os_type}/{g.os_version}/{g.architecture}/{build_type}"
+    paths = _get_paths(target, build_type)
 
-    if not os.path.isdir(target_dir):
-        print(
-            f"❌ Error: Target '{target}' not found in '{os.path.join(g.script_directory, 'src')}'."
-        )
-        return
-
-    release_file_path = os.path.join(target_dir, "release.yaml")
-
-    if not os.path.isfile(release_file_path):
-        print(f"❌ Error: 'release.yaml' not found in '{target_dir}'.")
+    # Validate target
+    details = _validate_target(paths["target_dir"])
+    if not details:
         return
 
     print(f"✅ Found release file for '{target}'.")
+    version = details.get("version", "0.0.0")
+
+    # Check user type
+    _, _, user_type, _, _ = load_configuration()
+    if user_type != "devel":
+        print(
+            "ℹ️  Note: This publish flow creates prerelease GitHub releases; "
+            "non-'devel' users may not install prereleases."
+        )
 
     try:
-        with open(release_file_path, "r") as file:
-            details = yaml.safe_load(file)
-            if not isinstance(details, dict):
-                print(f"❌ Error: Invalid YAML structure in '{release_file_path}'.")
-                sys.exit(1)
-            (
-                repositories,
-                secrets_config,
-                user_type,
-                _,
-                _,
-            ) = load_configuration()
-            if user_type != "devel":
-                print(
-                    "ℹ️  Note: This publish flow creates prerelease GitHub releases; non-'devel' users may not install prereleases."
-                )
+        # Build
+        if not _build_package(target, build_type, paths):
+            return
 
-            print(f"\n--- Setting up build for '{target}' ---")
-            build_dir = (
-                Path(g.script_directory)
-                / "release"
-                / "build"
-                / target
-                / build_type.lower()
-            )
-            setup(
-                package_name=target,
-                build_type=build_type,
-                build_dir=str(build_dir),
-            )
-            os.makedirs(build_dir, exist_ok=True)
+        # Archive
+        archive_path = _create_archive(target, version, build_type, paths)
 
-            print("⚙️  Running CMake...")
+        # Dry run
+        if dry_run:
+            dest = "OTA server" if upload_ota else "GitHub"
+            print(f"\n--- [DRY-RUN] Skipping {dest} Upload ---")
+            print(f"[DRY-RUN] Would upload '{archive_path}' to {dest}")
+            print(f"[DRY-RUN] Tag: v{version}")
+            print("[DRY-RUN] Build and archive completed successfully.")
+            return
 
-            if platform.system().lower() == "linux":
-                cmake_command = [
-                    "cmake",
-                    "-S",
-                    g.script_directory,
-                    "-G",
-                    "Ninja",
-                    "-B",
-                    build_dir,
-                    f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-                    f"-DCMAKE_BUILD_TYPE={build_type}",
-                    "-DRAISIN_RELEASE_BUILD=ON",
-                ]
-                subprocess.run(cmake_command, check=True, text=True)
-                print("✅ CMake configuration successful.")
-                print("🛠️  Building with Ninja...")
-                core_count = int(os.cpu_count() / 2) or 4
-                print(f"🔩 Using {core_count} cores for the build.")
-                build_command = ["ninja", "install", f"-j{core_count}"]
+        # Upload
+        if upload_ota:
+            _upload_to_ota(archive_path, target, version, build_type)
+        else:
+            _upload_to_github(archive_path, target, version, paths)
 
-                subprocess.run(build_command, cwd=build_dir, check=True, text=True)
-            else:
-                cmake_command = [
-                    "cmake",
-                    "--preset",
-                    f"windows-{build_type.lower()}",
-                    "-S",
-                    g.script_directory,
-                    "-B",
-                    build_dir,
-                    f"-DCMAKE_TOOLCHAIN_FILE={g.script_directory}/vcpkg/scripts/buildsystems/vcpkg.cmake",
-                    f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-                    "-DRAISIN_RELEASE_BUILD=ON",
-                    *([f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}"] if g.ninja_path else []),
-                ]
-                subprocess.run(
-                    cmake_command, check=True, text=True, env=g.developer_env
-                )
-                print("✅ CMake configuration successful.")
-                print("🛠️  Building with Ninja...")
-
-                subprocess.run(
-                    ["cmake", "--build", str(build_dir), "--parallel"],
-                    check=True,
-                    text=True,
-                    env=g.developer_env,
-                )
-
-                subprocess.run(
-                    ["cmake", "--install", str(build_dir)],
-                    check=True,
-                    text=True,
-                    env=g.developer_env,
-                )
-
-            print(f"✅ Build for '{target}' complete!")
-
-            shutil.copy(
-                Path(g.script_directory) / "src" / target / "release.yaml",
-                Path(install_dir) / "release.yaml",
-            )
-            if (
-                Path(g.script_directory) / "src" / target / "install_dependencies.sh"
-            ).is_file():
-                shutil.copy(
-                    Path(g.script_directory)
-                    / "src"
-                    / target
-                    / "install_dependencies.sh",
-                    Path(install_dir) / "install_dependencies.sh",
-                )
-
-            print("\n--- Creating Release Archive ---")
-            version = details.get("version", "0.0.0")
-            archive_name_base = f"{target}-{g.os_type}-{g.os_version}-{g.architecture}-{build_type}-v{version}"
-            release_dir = Path(g.script_directory) / "release"
-            archive_file = release_dir / archive_name_base
-            print(f"📦 Compressing '{install_dir}'...")
-            shutil.make_archive(
-                base_name=str(archive_file), format="zip", root_dir=str(install_dir)
-            )
-            print(f"✅ Successfully created archive: {archive_file}.zip")
-
-            if dry_run:
-                if upload_ota:
-                    print("\n--- [DRY-RUN] Skipping OTA Upload ---")
-                    print(f"[DRY-RUN] Would upload '{archive_file}.zip' to OTA server")
-                else:
-                    print("\n--- [DRY-RUN] Skipping GitHub Release ---")
-                    print(f"[DRY-RUN] Would upload '{archive_file}.zip' to GitHub")
-                print(f"[DRY-RUN] Tag: v{version}")
-                print("[DRY-RUN] Build and archive completed successfully.")
-                return
-
-            # --- Upload to OTA Server (--upload-ota flag) ---
-            if upload_ota:
-                print("\n--- Uploading to OTA Server ---")
-                try:
-                    from commands.ota_client import upload_package as ota_upload
-
-                    ota_success = ota_upload(
-                        archive_path=Path(str(archive_file) + ".zip"),
-                        package_name=target,
-                        version=version,
-                        build_type=build_type,
-                    )
-                    if ota_success:
-                        print(f"✅ OTA upload successful for '{target}'.")
-                    else:
-                        print(f"❌ OTA upload failed for '{target}'.")
-                except Exception as e:
-                    print(f"❌ OTA upload failed: {e}")
-                return
-
-            # --- Upload to GitHub Release (default) ---
-            repositories, secrets, _, _, _ = load_configuration()
-
-            if not secrets:
-                print(
-                    "❌ Error: GitHub tokens not found in configuration. Cannot upload."
-                )
-                return
-
-            print("\n--- Uploading to GitHub Release ---")
-
-            # Determine the commit hash of the package being released
-            pkg_repo_path = os.path.join(g.script_directory, "src", target)
-            pkg_commit_hash = get_commit_hash(pkg_repo_path) or "UNKNOWN"
-
-            # This will replace the old generic notes
-            new_release_notes = f"Commit: {pkg_commit_hash}\n"
-
-            release_info = repositories.get(target)
-            if not (release_info and release_info.get("url")):
-                print(
-                    f"ℹ️ Repository URL for '{target}' not found in configuration_setting.yaml. Skipping GitHub release."
-                )
-                return
-
-            repo_url = release_info["url"]
-            match = re.search(r"git@github\.com:(.*)\.git", repo_url)
-            repo_slug = match.group(1) if match else None
-            if not repo_slug:
-                print(f"❌ Error: Could not parse repository from URL: {repo_url}")
-                return
-
-            owner = repo_slug.split("/")[0]
-            token = secrets.get(owner)
-            if not token:
-                print(
-                    f"❌ Error: Token for owner '{owner}' not found in configuration_setting.yaml."
-                )
-                return
-
-            auth_env = os.environ.copy()
-            auth_env["GH_TOKEN"] = token
-            tag_name = f"v{version}"
-
-            archive_filename = os.path.basename(archive_file) + ".zip"
-            archive_file_str = str(archive_file) + ".zip"
-
-            # 1. Check if the release and asset already exist
-            release_exists = True
-            asset_exists = False
-            release_is_prerelease = False
-            try:
-                print(f"Checking status of release '{tag_name}' in '{repo_slug}'...")
-                list_cmd = [
-                    "gh",
-                    "release",
-                    "view",
-                    tag_name,
-                    "--repo",
-                    repo_slug,
-                    "--json",
-                    "assets,isPrerelease",
-                ]
-                result = subprocess.run(
-                    list_cmd, check=True, capture_output=True, text=True, env=auth_env
-                )
-                release_data = json.loads(result.stdout)
-                release_is_prerelease = bool(release_data.get("isPrerelease"))
-                existing_assets = [
-                    asset["name"] for asset in release_data.get("assets", [])
-                ]
-                if archive_filename in existing_assets:
-                    asset_exists = True
-
-            except subprocess.CalledProcessError as e:
-                if "release not found" in e.stderr:
-                    release_exists = False
-                else:
-                    print(f"❌ Error checking release status: {e.stderr}")
-                    return
-
-            # Existing tag behavior:
-            # - If the existing release is a prerelease: overwrite/re-upload the asset.
-            # - If the existing release is NOT a prerelease: terminate.
-            if release_exists:
-                if not release_is_prerelease:
-                    print(
-                        f"🚫 Release '{tag_name}' already exists in '{repo_slug}' and is not a prerelease. Aborting publish for version '{version}'."
-                    )
-                    return
-
-                if asset_exists:
-                    print(
-                        f"🚀 Prerelease '{tag_name}' already exists; overwriting asset '{archive_filename}'..."
-                    )
-                    gh_upload_cmd = [
-                        "gh",
-                        "release",
-                        "upload",
-                        tag_name,
-                        archive_file_str,
-                        "--repo",
-                        repo_slug,
-                        "--clobber",
-                    ]
-                else:
-                    print(
-                        f"🚀 Prerelease '{tag_name}' already exists; uploading new asset '{archive_filename}'..."
-                    )
-                    gh_upload_cmd = [
-                        "gh",
-                        "release",
-                        "upload",
-                        tag_name,
-                        archive_file_str,
-                        "--repo",
-                        repo_slug,
-                    ]
-
-                # Keep release notes in sync with the latest commit hash.
-                # gh 2.4.0 (Ubuntu) doesn't support `gh release edit`, so use the API.
-                gh_get_release_id_cmd = [
-                    "gh",
-                    "api",
-                    f"repos/{repo_slug}/releases/tags/{tag_name}",
-                    "--jq",
-                    ".id",
-                ]
-                release_id = subprocess.run(
-                    gh_get_release_id_cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=auth_env,
-                ).stdout.strip()
-                if not release_id:
-                    print(
-                        f"❌ Error: Could not resolve release id for '{tag_name}' in '{repo_slug}'."
-                    )
-                    return
-                gh_patch_release_cmd = [
-                    "gh",
-                    "api",
-                    "-X",
-                    "PATCH",
-                    f"repos/{repo_slug}/releases/{release_id}",
-                    "-f",
-                    f"body={new_release_notes}",
-                ]
-                subprocess.run(
-                    gh_patch_release_cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=auth_env,
-                )
-
-                subprocess.run(
-                    gh_upload_cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=auth_env,
-                )
-                print(f"✅ Successfully uploaded asset to prerelease '{tag_name}'.")
-
-            else:
-                # Create a new prerelease and upload the asset.
-                print(f"✅ Release '{tag_name}' does not exist. Creating a new one...")
-                gh_create_cmd = [
-                    "gh",
-                    "release",
-                    "create",
-                    tag_name,
-                    archive_file_str,
-                    "--repo",
-                    repo_slug,
-                    "--title",
-                    f"{tag_name}",
-                    "--notes",
-                    new_release_notes,
-                    "--prerelease",
-                ]
-                subprocess.run(
-                    gh_create_cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=auth_env,
-                )
-                print(
-                    f"✅ Successfully created new prerelease and uploaded '{archive_filename}'."
-                )
-
-    # Keep your existing exception handling
     except FileNotFoundError as e:
         print(
-            f"❌ Command not found: '{e.filename}'. Is the required tool (cmake, ninja, zip, gh) installed and in your PATH?"
+            f"❌ Command not found: '{e.filename}'. "
+            "Is the required tool (cmake, ninja, zip, gh) installed and in your PATH?"
         )
         sys.exit(1)
     except subprocess.CalledProcessError as e:
         print(f"❌ A command failed with exit code {e.returncode}:\n{e.stderr}")
         sys.exit(1)
-    except yaml.YAMLError as e:
-        print(f"🔥 Error parsing YAML file: {e}")
-        sys.exit(1)
     except Exception as e:
-        print(f"🔥 An unexpected error occurred: {e}")
+        print(f"❌ An unexpected error occurred: {e}")
         sys.exit(1)
 
 
@@ -441,7 +562,7 @@ def publish(target, build_type, dry_run=False, upload_ota=False):
 @click.option(
     "--upload-ota",
     is_flag=True,
-    help="Upload to OTA server instead of GitHub (requires RAISIN_OTA_ENDPOINT)",
+    help="Upload to OTA server instead of GitHub",
 )
 def publish_command(target, build_type, dry_run, upload_ota):
     """
@@ -454,10 +575,6 @@ def publish_command(target, build_type, dry_run, upload_ota):
         raisin publish raisin_network --upload-ota   # Publish to OTA server instead
         raisin publish my_package -t release
         raisin publish my_package -t both --dry-run  # Dry run without uploading
-
-    \b
-    Note: Previously called 'release' command.
-    Run 'sudo bash install_dependencies.sh' to install package dependencies.
     """
     build_types = (
         ["release", "debug"] if build_type.lower() == "both" else [build_type.lower()]

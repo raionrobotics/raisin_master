@@ -88,6 +88,18 @@ def install_command(
     session = requests.Session()
     is_successful = True
 
+    if not install_queue:
+        print("ℹ️  No packages specified. Installing all packages from latest archive.")
+        from commands.ota_client import download_all_from_archive
+
+        download_all_from_archive(
+            build_type,
+            script_dir_path / "release" / "install",
+            archive_version=archive_version,
+        )
+        print("🎉🎉🎉 Installation process finished successfully.")
+        return
+
     while install_queue:
         target_spec = install_queue.pop(0)
         print(f"🔄 Processing target specifier: '{target_spec}'")
