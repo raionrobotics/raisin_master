@@ -25,6 +25,8 @@ from packaging.specifiers import SpecifierSet
 from commands import globals as g
 from commands.utils import load_configuration
 
+from commands.ota_client import download_package_at_timestamp, download_all_from_archive
+
 
 def install_command(
     targets,
@@ -90,7 +92,6 @@ def install_command(
 
     if not install_queue:
         print("ℹ️  No packages specified. Installing all packages from latest archive.")
-        from commands.ota_client import download_all_from_archive
 
         download_all_from_archive(
             build_type,
@@ -195,7 +196,6 @@ def install_command(
                 ota_result = None
                 if at_timestamp:
                     # Timestamp-based download (time-travel)
-                    from commands.ota_client import download_package_at_timestamp
 
                     ota_result = download_package_at_timestamp(
                         package_name,

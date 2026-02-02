@@ -24,7 +24,8 @@ import zipfile
 
 import requests
 import yaml
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa, padding
 from pathlib import Path
 from typing import Optional
 
@@ -64,8 +65,27 @@ def get_ota_endpoint() -> str:
 
 
 def get_ssh_key_path() -> Path:
-    """Read RAISIN_SSH_KEY env var, default ~/.ssh/id_ed25519."""
-    return Path(os.environ.get("RAISIN_SSH_KEY", "~/.ssh/id_ed25519")).expanduser()
+    """Get SSH private key path for OTA authentication.
+
+    Resolution order:
+        1. RAISIN_SSH_KEY environment variable (if set)
+        2. First existing key from: id_ed25519, id_ecdsa, id_rsa
+        3. Default to ~/.ssh/id_ed25519 (even if not exists)
+    """
+    # 1. Check env var
+    env_key = os.environ.get("RAISIN_SSH_KEY", "").strip()
+    if env_key:
+        return Path(env_key).expanduser()
+
+    # 2. Try common key locations in order of preference
+    ssh_dir = Path.home() / ".ssh"
+    for key_name in ("id_ed25519", "id_ecdsa", "id_rsa"):
+        key_path = ssh_dir / key_name
+        if key_path.exists():
+            return key_path
+
+    # 3. Default fallback
+    return ssh_dir / "id_ed25519"
 
 
 def get_archive_name(build_type: str) -> str:
@@ -208,43 +228,52 @@ def _get_ssh_fingerprint(key_path: Path) -> str:
     return base64.b64decode(padded).hex()
 
 
-def _extract_sig_from_sshsig(data: bytes) -> bytes:
-    """Extract the SSH wire-format signature blob from SSHSIG binary data.
-
-    SSHSIG layout: magic("SSHSIG", 6B) | version(uint32) |
-    publickey(string) | namespace(string) | reserved(string) |
-    hash_algorithm(string) | **signature(string)**
-
-    Each ``string`` is a uint32 length followed by that many bytes.
-    Returns the final signature field (SSH wire format:
-    algorithm-name + raw-signature, both length-prefixed).
-    """
-    offset = 6 + 4  # skip "SSHSIG" magic + version uint32
-
-    # Skip 4 length-prefixed fields: publickey, namespace, reserved, hash_algo
-    for _ in range(4):
-        str_len = struct.unpack(">I", data[offset : offset + 4])[0]
-        offset += 4 + str_len
-
-    # Read the signature blob
-    str_len = struct.unpack(">I", data[offset : offset + 4])[0]
-    return data[offset + 4 : offset + 4 + str_len]
-
-
 def _sign_nonce(nonce: str, key_path: Path) -> str:
-    """Sign nonce directly with ed25519 private key.
+    """Sign nonce with SSH private key (supports ed25519, RSA, ECDSA).
 
     Loads the SSH private key via the ``cryptography`` library and signs
-    the nonce string (UTF-8 bytes) directly — no ssh-keygen subprocess.
-    Returns the signature as base64-encoded SSH wire format
-    (length-prefixed algorithm name + length-prefixed raw signature).
+    the nonce bytes directly. Returns the signature as base64-encoded SSH
+    wire format (length-prefixed algorithm name + length-prefixed raw signature).
+
+    Supported key types:
+        - Ed25519 (ssh-ed25519)
+        - RSA (ssh-rsa) - uses SHA-256 with PKCS1v15 padding
+        - ECDSA (ecdsa-sha2-nistp256, nistp384, nistp521)
     """
     with open(key_path, "rb") as f:
         private_key = serialization.load_ssh_private_key(f.read(), password=None)
 
-    raw_sig = private_key.sign(bytes.fromhex(nonce))
+    data = bytes.fromhex(nonce)
 
-    algo = b"ssh-ed25519"
+    # Sign based on key type
+    if isinstance(private_key, ed25519.Ed25519PrivateKey):
+        algo = b"ssh-ed25519"
+        raw_sig = private_key.sign(data)
+
+    elif isinstance(private_key, rsa.RSAPrivateKey):
+        algo = b"ssh-rsa"
+        raw_sig = private_key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+
+    elif isinstance(private_key, ec.EllipticCurvePrivateKey):
+        # Determine curve and algorithm name
+        curve_name = private_key.curve.name
+        if curve_name == "secp256r1":
+            algo = b"ecdsa-sha2-nistp256"
+            hash_algo = hashes.SHA256()
+        elif curve_name == "secp384r1":
+            algo = b"ecdsa-sha2-nistp384"
+            hash_algo = hashes.SHA384()
+        elif curve_name == "secp521r1":
+            algo = b"ecdsa-sha2-nistp521"
+            hash_algo = hashes.SHA512()
+        else:
+            raise ValueError(f"Unsupported ECDSA curve: {curve_name}")
+        raw_sig = private_key.sign(data, ec.ECDSA(hash_algo))
+
+    else:
+        raise ValueError(f"Unsupported SSH key type: {type(private_key).__name__}")
+
+    # Build SSH wire format: length-prefixed algo + length-prefixed signature
     sig_wire = (
         struct.pack(">I", len(algo)) + algo + struct.pack(">I", len(raw_sig)) + raw_sig
     )
