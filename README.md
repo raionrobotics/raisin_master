@@ -64,12 +64,38 @@ Create your local configuration file by copying the provided example.
 cp configuration_setting_example.yaml configuration_setting.yaml
 ```
 Next, open **`configuration_setting.yaml`** and edit the following fields:
-* **`gh_tokens`**: Set your GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`).
+* **`gh_tokens`**: (Optional) GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`). Only needed for GitHub fallback or publishing to GitHub.
 * **`user_type`**: Set to `"user"` for stable releases or `"devel"` for development builds.
 * **`packages_to_ignore`**: (Optional) List of packages to exclude from the build process.
 * **`repos_to_ignore`**: (Optional) List of repositories to exclude (uses prebuilt binaries instead).
 
-### 3. Add Source Packages
+### 3. OTA Server Configuration
+
+RAISIN downloads packages from the OTA (Over-The-Air) server by default, with GitHub releases as fallback. The default endpoint is `https://raisin-ota-api.raionrobotics.com/api`.
+
+```bash
+# (Optional) Override the default OTA endpoint
+export RAISIN_OTA_ENDPOINT="https://your-custom-ota-server.com/api"
+
+# (Optional) Specify SSH key path for authentication
+export RAISIN_SSH_KEY="~/.ssh/my_key"
+
+# (Optional) Custom archive name prefix (default: raisin-robot)
+export RAISIN_ARCHIVE_NAME="raisin-robot"
+```
+
+#### SSH Key Authentication
+
+OTA authentication uses SSH key-based challenge-response. The following key types are supported:
+- **Ed25519** (`id_ed25519`) - Recommended
+- **ECDSA** (`id_ecdsa`) - nistp256, nistp384, nistp521 curves
+- **RSA** (`id_rsa`)
+
+If `RAISIN_SSH_KEY` is not set, RAISIN auto-detects existing keys in `~/.ssh/` in the order above.
+
+> **Note:** Ensure your SSH public key is registered with the OTA server before using OTA features.
+
+### 4. Add Source Packages
 
 Create a directory named `src` in the root of the repository. Clone any source code packages you are developing or contributing to inside this `src` directory.
 ```bash
@@ -78,25 +104,50 @@ cd src
 git clone <your-package-repository>
 ```
 
-### 4. Install Release Packages
+### 5. Install Release Packages
 
-Run the `install` command to let RAISIN resolve and download release packages for dependencies.
+Run the `install` command to download packages from the OTA server (primary) or GitHub releases (fallback).
+
 ```bash
-raisin install <package_name>
-```
-For example:
-```bash
-# Install a specific package (release version by default)
+# Install from latest archive (default)
+raisin install
+
+# Install a specific package
 raisin install raisin_network
+
+# Install with specific version
+raisin install raisin_network==1.1.0
 
 # Install debug version
 raisin install raisin_network --type debug
+
+# Install both debug and release
+raisin install raisin_network --all
 
 # Install multiple packages
 raisin install package1 package2 package3
 ```
 
-### 5. Install Package Dependencies
+#### Advanced Install Options
+
+```bash
+# Install from a specific archive version
+raisin install --archive-version v2024.01
+
+# Install packages at a specific timestamp (time-travel)
+raisin install --at 2024-01-15
+raisin install --at 2024-01-15T10:00:00Z
+
+# Skip OTA and download directly from GitHub (for debugging)
+raisin install --from-github
+
+# Combine options
+raisin install raisin_network --type debug --archive-version v2024.01
+```
+
+> **Note:** Packages are downloaded from the OTA server by default. Use `--from-github` to bypass OTA and download directly from GitHub releases (useful for debugging or when OTA is unavailable).
+
+### 6. Install Package Dependencies
 
 Run the package dependency installer to install package-specific dependencies (e.g., vcpkg packages, ROS packages, custom libraries).
 ```bash
@@ -105,7 +156,7 @@ sudo bash install_dependencies.sh
 
 > **Note:** This script runs `install_dependencies.sh` files directly from source packages (`src/`) and release packages (`release/install/`).
 
-### 6. Setup and Generate Build Files
+### 7. Setup and Generate Build Files
 
 Run the `setup` command to configure the CMake environment and generate interface files.
 ```bash
@@ -116,7 +167,7 @@ raisin setup
 raisin setup raisin_network
 ```
 
-### 7. Build the Project
+### 8. Build the Project
 
 Use the `build` command to compile the project. You must specify the build type using `--type` (or `-t`).
 
@@ -139,12 +190,12 @@ raisin build -t release raisin_network
 
 Alternatively, advanced users can use standard CMake commands in the `cmake-build-debug/` or `cmake-build-release/` directories.
 
-### 8. Additional Commands
+### 9. Additional Commands
 
 #### Publish a Release
-Build, package, and upload a release to GitHub:
+Build, package, and upload a release to GitHub or OTA server:
 ```bash
-# Publish both release and debug builds (default)
+# Publish to GitHub (default)
 raisin publish raisin_network
 
 # Publish only release build
@@ -153,9 +204,14 @@ raisin publish raisin_network --type release
 # Publish only debug build
 raisin publish raisin_network --type debug
 
+# Publish to OTA server instead of GitHub
+raisin publish raisin_network --upload-ota
+
 # Dry run without uploading
 raisin publish raisin_network --dry-run
 ```
+
+> **Note:** Use `--upload-ota` to upload to the OTA server instead of GitHub. This requires `RAISIN_OTA_ENDPOINT` to be set.
 
 #### List Packages
 View available packages:
@@ -226,23 +282,27 @@ raisin publish -h
 
 # 2. Configure your settings
 cp configuration_setting_example.yaml configuration_setting.yaml
-# Edit configuration_setting.yaml with your GitHub tokens
+# Edit configuration_setting.yaml with your GitHub tokens (optional if using OTA)
 
-# 3. Clone source packages
+# 3. (Optional) Configure OTA server
+export RAISIN_OTA_ENDPOINT="https://your-ota-server.com/api"
+
+# 4. Clone source packages
 mkdir -p src && cd src
 git clone <your-package-repository>
 cd ..
 
-# 4. Download release packages
-raisin install <package_name>
+# 5. Download release packages
+raisin install                        # All packages from latest archive
+raisin install <package_name>         # Specific package
 
-# 5. Install package-specific dependencies
+# 6. Install package-specific dependencies
 sudo bash install_dependencies.sh
 
-# 6. Generate build files
+# 7. Generate build files
 raisin setup
 
-# 7. Build
+# 8. Build
 raisin build -t release
 ```
 
