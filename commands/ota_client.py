@@ -252,7 +252,7 @@ def _sign_nonce(nonce: str, key_path: Path) -> str:
         raw_sig = private_key.sign(data)
 
     elif isinstance(private_key, rsa.RSAPrivateKey):
-        algo = b"ssh-rsa"
+        algo = b"rsa-sha2-256"
         raw_sig = private_key.sign(data, padding.PKCS1v15(), hashes.SHA256())
 
     elif isinstance(private_key, ec.EllipticCurvePrivateKey):

@@ -230,7 +230,7 @@ def install_command(
             continue
 
         owner, repo_name = match.groups()
-        token = tokens.get(owner, tokens.get("default"))
+        token = tokens.get(owner, tokens.get("default")) if tokens else None
         if token:
             session.headers.update(
                 {
