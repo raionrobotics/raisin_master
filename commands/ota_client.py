@@ -238,8 +238,10 @@ def _sign_nonce(nonce: str, key_path: Path) -> str:
 
     Supported key types:
         - Ed25519 (ssh-ed25519)
-        - RSA (ssh-rsa) - uses SHA-256 with PKCS1v15 padding
-        - ECDSA (ecdsa-sha2-nistp256, nistp384, nistp521)
+        - RSA (rsa-sha2-512) - uses SHA-512 with PKCS1v15 padding
+        - ECDSA (ecdsa-sha2-nistp256, nistp384, nistp521) - all use SHA-512
+
+    Note: The OTA server hardcodes SHA-512 for RSA/ECDSA verification.
     """
     with open(key_path, "rb") as f:
         private_key = serialization.load_ssh_private_key(f.read(), password=None)
@@ -252,24 +254,23 @@ def _sign_nonce(nonce: str, key_path: Path) -> str:
         raw_sig = private_key.sign(data)
 
     elif isinstance(private_key, rsa.RSAPrivateKey):
-        algo = b"ssh-rsa"
-        raw_sig = private_key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+        # Server expects rsa-sha2-512 with SHA-512 hash
+        algo = b"rsa-sha2-512"
+        raw_sig = private_key.sign(data, padding.PKCS1v15(), hashes.SHA512())
 
     elif isinstance(private_key, ec.EllipticCurvePrivateKey):
         # Determine curve and algorithm name
+        # Note: Server hardcodes SHA-512 for all ECDSA curves
         curve_name = private_key.curve.name
         if curve_name == "secp256r1":
             algo = b"ecdsa-sha2-nistp256"
-            hash_algo = hashes.SHA256()
         elif curve_name == "secp384r1":
             algo = b"ecdsa-sha2-nistp384"
-            hash_algo = hashes.SHA384()
         elif curve_name == "secp521r1":
             algo = b"ecdsa-sha2-nistp521"
-            hash_algo = hashes.SHA512()
         else:
             raise ValueError(f"Unsupported ECDSA curve: {curve_name}")
-        raw_sig = private_key.sign(data, ec.ECDSA(hash_algo))
+        raw_sig = private_key.sign(data, ec.ECDSA(hashes.SHA512()))
 
     else:
         raise ValueError(f"Unsupported SSH key type: {type(private_key).__name__}")

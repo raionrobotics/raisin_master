@@ -88,8 +88,8 @@ export RAISIN_ARCHIVE_NAME="raisin-robot"
 
 OTA authentication uses SSH key-based challenge-response. The following key types are supported:
 - **Ed25519** (`id_ed25519`) - Recommended
-- **ECDSA** (`id_ecdsa`) - nistp256, nistp384, nistp521 curves
-- **RSA** (`id_rsa`)
+- **ECDSA** (`id_ecdsa`) - nistp256, nistp384, nistp521 curves (SHA-512)
+- **RSA** (`id_rsa`) - rsa-sha2-512
 
 If `RAISIN_SSH_KEY` is not set, RAISIN auto-detects existing keys in `~/.ssh/` in the order above.
 
