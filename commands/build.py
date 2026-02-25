@@ -17,6 +17,34 @@ from commands import globals as g
 from commands.utils import delete_directory
 
 
+def _is_qemu_emulated():
+    """Detect if running under QEMU user-mode emulation (e.g., buildx cross-arch)."""
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            cpuinfo = f.read()
+        # Native ARM reports "CPU implementer", QEMU doesn't
+        if platform.machine() in ("aarch64", "arm64"):
+            return "CPU implementer" not in cpuinfo
+    except OSError:
+        pass
+    return False
+
+
+def _get_build_jobs():
+    """Determine number of parallel build jobs.
+
+    Priority:
+    1. RAISIN_MAX_JOBS env var (user override)
+    2. Auto-detect: 4 under QEMU, cpu_count/2 otherwise
+    """
+    env_jobs = os.environ.get("RAISIN_MAX_JOBS")
+    if env_jobs:
+        return int(env_jobs)
+    if _is_qemu_emulated():
+        return 4
+    return int(os.cpu_count() / 2) or 4
+
+
 def build_command(build_types, to_install=False):
     """
     Build the project with CMake and Ninja.
@@ -75,8 +103,11 @@ def build_command(build_types, to_install=False):
 
             print("✅ CMake configuration successful.")
             print("🛠️  Building with Ninja...")
-            core_count = int(os.cpu_count() / 2) or 4
-            print(f"🔩 Using {core_count} cores for the build.")
+            core_count = _get_build_jobs()
+            if _is_qemu_emulated():
+                print(f"🔩 QEMU detected — limiting to {core_count} parallel jobs.")
+            else:
+                print(f"🔩 Using {core_count} cores for the build.")
 
             # Build with Ninja
             if to_install:

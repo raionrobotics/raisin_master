@@ -33,6 +33,31 @@ from commands.utils import (
 )
 
 
+def _is_qemu_emulated():
+    """Detect if running under QEMU user-mode emulation (e.g., buildx cross-arch)."""
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            cpuinfo = f.read()
+        if platform.machine() in ("aarch64", "arm64"):
+            return "CPU implementer" not in cpuinfo
+    except OSError:
+        pass
+    return False
+
+
+def _get_build_jobs():
+    """Determine number of parallel build jobs.
+
+    Priority: RAISIN_MAX_JOBS env var > auto-detect (4 under QEMU, cpu/2 otherwise).
+    """
+    env_jobs = os.environ.get("RAISIN_MAX_JOBS")
+    if env_jobs:
+        return int(env_jobs)
+    if _is_qemu_emulated():
+        return 4
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
 def _resolve_vcpkg_cache_dir(env_var_name, default_path):
     env_value = os.environ.get(env_var_name)
     if not env_value and env_var_name.startswith("RAISIN_"):
@@ -121,27 +146,19 @@ def _build_single_cmake_project(
     if extra_cmake_args:
         cmake_args.extend(extra_cmake_args)
 
-    # On ARM, disable vcpkg bootstrap for projects that bundle their own vcpkg
-    # (e.g. depthai-core). Their custom vcpkg ports are untested on ARM and fail
-    # to build packages like libarchive. System-installed libraries are used instead.
-    if platform.machine() in ("aarch64", "arm64"):
-        has_vcpkg_json = (source_dir / "vcpkg.json").is_file()
-        already_set = any(
-            "DEPTHAI_BOOTSTRAP_VCPKG" in str(a) for a in (extra_cmake_args or [])
-        )
-        if has_vcpkg_json and not already_set:
-            cmake_args.append("-DDEPTHAI_BOOTSTRAP_VCPKG=OFF")
-
     print(f"  [cmake] {' '.join(str(a) for a in cmake_args)}")
 
-    env = None
     is_windows = platform.system().lower() == "windows"
+
+    # Limit vcpkg concurrency (vcpkg installs during configure phase)
+    core_count = _get_build_jobs()
+    env = {**os.environ, "VCPKG_MAX_CONCURRENCY": str(core_count)}
 
     if is_windows:
         cmake_args.append(
             f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}"
         )
-        env = g.developer_env
+        env.update(g.developer_env or {})
         if g.ninja_path:
             cmake_args.extend(["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}"])
         elif shutil.which("ninja"):
@@ -158,7 +175,6 @@ def _build_single_cmake_project(
         build_cmd.append("--parallel")
         subprocess.run(build_cmd, check=True, text=True, env=env)
     else:
-        core_count = max(1, (os.cpu_count() or 2) // 2)
         build_cmd.extend(["--target", "install", "--", f"-j{core_count}"])
         subprocess.run(build_cmd, check=True, text=True, env=env)
         return  # Unix already installed via --target install
