@@ -121,6 +121,19 @@ def _build_single_cmake_project(
     if extra_cmake_args:
         cmake_args.extend(extra_cmake_args)
 
+    # On ARM, disable vcpkg bootstrap for projects that bundle their own vcpkg
+    # (e.g. depthai-core). Their custom vcpkg ports are untested on ARM and fail
+    # to build packages like libarchive. System-installed libraries are used instead.
+    if platform.machine() in ("aarch64", "arm64"):
+        has_vcpkg_json = (source_dir / "vcpkg.json").is_file()
+        already_set = any(
+            "DEPTHAI_BOOTSTRAP_VCPKG" in str(a) for a in (extra_cmake_args or [])
+        )
+        if has_vcpkg_json and not already_set:
+            cmake_args.append("-DDEPTHAI_BOOTSTRAP_VCPKG=OFF")
+
+    print(f"  [cmake] {' '.join(str(a) for a in cmake_args)}")
+
     env = None
     is_windows = platform.system().lower() == "windows"
 
