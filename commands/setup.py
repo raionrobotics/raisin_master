@@ -99,6 +99,7 @@ def _build_single_cmake_project(
     install_prefix: Path,
     vcpkg_parent: Path,
     vcpkg_installed: Path,
+    extra_cmake_args: list = None,
 ) -> None:
     """Build a single CMake project - unified Windows/Unix implementation."""
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -116,6 +117,9 @@ def _build_single_cmake_project(
         f"-DVCPKG_INSTALLED_DIR={vcpkg_installed}",
         "-DBUILD_SHARED_LIBS=ON",
     ]
+
+    if extra_cmake_args:
+        cmake_args.extend(extra_cmake_args)
 
     env = None
     is_windows = platform.system().lower() == "windows"
@@ -648,9 +652,7 @@ def _ensure_scripts_executable(install_dir):
         if script_path.is_file():
             try:
                 mode = script_path.stat().st_mode
-                script_path.chmod(
-                    mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-                )
+                script_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             except OSError:
                 print(f"⚠️  Failed to set executable: {script_path}")
 
@@ -1431,7 +1433,20 @@ def _discover_pure_cmake_projects(
             )
             continue
 
-        for project in pure_cmake_entries:
+        for entry in pure_cmake_entries:
+            if isinstance(entry, dict):
+                project = entry.get("name", "")
+                raw_args = entry.get("cmake_args", [])
+                # cmake_args can be a list (applies to all) or a dict keyed by architecture
+                if isinstance(raw_args, dict):
+                    arch = platform.machine()  # e.g. "x86_64", "aarch64"
+                    cmake_args = raw_args.get(arch, [])
+                else:
+                    cmake_args = raw_args
+            else:
+                project = entry
+                cmake_args = []
+
             if not project or project in packages_to_ignore:
                 continue
 
@@ -1442,7 +1457,7 @@ def _discover_pure_cmake_projects(
                 )
                 continue
 
-            projects.append((repo_name, project, project_dir))
+            projects.append((repo_name, project, project_dir, cmake_args))
 
     return projects
 
@@ -1493,7 +1508,7 @@ def build_pure_cmake_projects(
             Path(g.script_directory) / f"cmake-build-{build_type_token}" / "pure_cmake"
         )
 
-        for repo_name, project_name, source_dir in projects:
+        for repo_name, project_name, source_dir, cmake_args in projects:
             cache_key = f"{project_name}_{build_type_token}"
             source_hash = _compute_source_hash(source_dir)
 
@@ -1521,6 +1536,7 @@ def build_pure_cmake_projects(
                     install_prefix,
                     vcpkg_parent,
                     vcpkg_installed,
+                    extra_cmake_args=cmake_args,
                 )
                 cache[cache_key] = {"hash": source_hash, "prefix": str(install_prefix)}
                 built.add(project_name)

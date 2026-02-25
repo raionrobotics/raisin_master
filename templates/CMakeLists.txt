@@ -27,9 +27,16 @@ set(RAISIN_MASTER_INCLUDE @@SCRIPT_DIR@@/generated/include CACHE STRING "include
 set(CMAKE_DEBUG_POSTFIX "_debug_build" CACHE STRING "Debug Postfix for lib, samples and tools")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+set(RAISIN_MARCH "native" CACHE STRING "Target CPU architecture (-march=). Use 'native' for local builds, 'x86-64-v3' for portable x86_64, or a specific arch like 'znver2'.")
+
 if (NOT WIN32)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native")
+    include(CheckCCompilerFlag)
+    check_c_compiler_flag("-march=${RAISIN_MARCH}" RAISIN_MARCH_SUPPORTED)
+    if(NOT RAISIN_MARCH_SUPPORTED)
+        message(FATAL_ERROR "RAISIN_MARCH='${RAISIN_MARCH}' is not supported by the compiler on this architecture (${CMAKE_SYSTEM_PROCESSOR}). Use 'native' or a compatible value.")
+    endif()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=${RAISIN_MARCH}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=${RAISIN_MARCH}")
     add_compile_options(-Werror=return-type)
     add_compile_options(-Wno-unused-function)
     add_compile_options(-Wno-sign-compare)

@@ -93,6 +93,12 @@ def _validate_target(target_dir: Path) -> Optional[dict]:
 
 def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
     """Run CMake + Ninja build on Linux."""
+    default_march = (
+        "armv8.2-a+crypto+fp16+dotprod"
+        if platform.machine() in ("aarch64", "arm64")
+        else "x86-64-v3"
+    )
+    raisin_march = os.environ.get("RAISIN_MARCH", default_march)
     cmake_cmd = [
         "cmake",
         "-S",
@@ -104,6 +110,7 @@ def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
         f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         f"-DCMAKE_BUILD_TYPE={build_type}",
         "-DRAISIN_RELEASE_BUILD=ON",
+        f"-DRAISIN_MARCH={raisin_march}",
     ]
     subprocess.run(cmake_cmd, check=True, text=True)
     print("✅ CMake configuration successful.")
