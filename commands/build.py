@@ -90,9 +90,11 @@ def build_command(build_types, to_install=False):
                     f"-DCMAKE_BUILD_TYPE={build_type_capitalized}",
                 ]
                 # Under QEMU, wrap compiler with retry-on-segfault script
-                if _is_qemu_emulated():
+                use_retry = _is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
+                if use_retry:
                     retry_script = str(Path(script_directory) / "scripts" / "retry-on-segfault.sh")
                     cmake_command.append(f"-DQEMU_RETRY_WRAPPER={retry_script}")
+                    print(f"🔄 QEMU retry wrapper enabled: {retry_script}")
                 subprocess.run(cmake_command, check=True, text=True)
             except subprocess.CalledProcessError as e:
                 # If the command fails, print its output to help with debugging
