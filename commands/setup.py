@@ -168,8 +168,19 @@ def _build_single_cmake_project(
     else:
         cmake_args.extend(["-G", "Ninja"])
 
-    # Configure
-    subprocess.run(cmake_args, check=True, text=True, env=env)
+    # Under QEMU, retry on failure since random segfaults are expected
+    max_attempts = 3 if _is_qemu_emulated() else 1
+
+    # Configure (vcpkg port builds happen here)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(cmake_args, check=True, text=True, env=env)
+            break
+        except subprocess.CalledProcessError:
+            if attempt < max_attempts:
+                print(f"  ⚠️  Configure failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)...")
+            else:
+                raise
 
     # Build
     build_cmd = ["cmake", "--build", str(build_dir), "--config", cmake_build_type]
@@ -178,7 +189,15 @@ def _build_single_cmake_project(
         subprocess.run(build_cmd, check=True, text=True, env=env)
     else:
         build_cmd.extend(["--target", "install", "--", f"-j{core_count}"])
-        subprocess.run(build_cmd, check=True, text=True, env=env)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                subprocess.run(build_cmd, check=True, text=True, env=env)
+                break
+            except subprocess.CalledProcessError:
+                if attempt < max_attempts:
+                    print(f"  ⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)...")
+                else:
+                    raise
         return  # Unix already installed via --target install
 
     # Install (Windows only - Unix uses --target install above)

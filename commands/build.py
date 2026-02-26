@@ -109,12 +109,21 @@ def build_command(build_types, to_install=False):
             else:
                 print(f"🔩 Using {core_count} cores for the build.")
 
-            # Build with Ninja
+            # Build with Ninja (retry under QEMU for random segfaults)
             if to_install:
                 build_command = ["ninja", "install", f"-j{core_count}"]
             else:
                 build_command = ["ninja", f"-j{core_count}"]
-            subprocess.run(build_command, cwd=build_dir, check=True, text=True)
+            max_attempts = 3 if _is_qemu_emulated() else 1
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    subprocess.run(build_command, cwd=build_dir, check=True, text=True)
+                    break
+                except subprocess.CalledProcessError:
+                    if attempt < max_attempts:
+                        print(f"⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)...")
+                    else:
+                        raise
 
         else:  # Windows
             try:
