@@ -89,13 +89,18 @@ def build_command(build_types, to_install=False):
                     str(build_dir),
                     f"-DCMAKE_BUILD_TYPE={build_type_capitalized}",
                 ]
-                # Under QEMU, wrap compiler with retry-on-segfault script
+                # Under QEMU, use compiler wrappers that retry on segfault
+                cmake_env = None
                 use_retry = _is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
                 if use_retry:
-                    retry_script = str(Path(script_directory) / "scripts" / "retry-on-segfault.sh")
-                    cmake_command.append(f"-DQEMU_RETRY_WRAPPER={retry_script}")
-                    print(f"🔄 QEMU retry wrapper enabled: {retry_script}")
-                subprocess.run(cmake_command, check=True, text=True)
+                    scripts_dir = Path(script_directory) / "scripts"
+                    cmake_env = {
+                        **os.environ,
+                        "CC": str(scripts_dir / "gcc-retry.sh"),
+                        "CXX": str(scripts_dir / "g++-retry.sh"),
+                    }
+                    print(f"🔄 QEMU retry wrapper enabled via CC/CXX")
+                subprocess.run(cmake_command, check=True, text=True, env=cmake_env)
             except subprocess.CalledProcessError as e:
                 # If the command fails, print its output to help with debugging
                 print("--- CMake Command Failed ---", file=sys.stderr)
