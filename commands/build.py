@@ -42,7 +42,7 @@ def _get_build_jobs():
         return int(env_jobs)
     if _is_qemu_emulated():
         return 4
-    return int(os.cpu_count() / 2) or 4
+    return int((os.cpu_count() or 1) / 2) or 4
 
 
 def build_command(build_types, to_install=False):

@@ -1497,7 +1497,7 @@ def _discover_pure_cmake_projects(
                 project = entry
                 cmake_args = []
 
-            if not project or project in packages_to_ignore:
+            if not project or project in packages_to_ignore or os.path.isabs(project) or ".." in Path(project).parts:
                 continue
 
             project_dir = repo_dir / project
