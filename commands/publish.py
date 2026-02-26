@@ -19,6 +19,7 @@ import yaml
 
 from commands import globals as g
 from commands.utils import load_configuration
+from commands.build import _is_qemu_emulated, _get_build_jobs
 from commands.setup import (
     setup,
     get_commit_hash,
@@ -112,18 +113,40 @@ def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
         "-DRAISIN_RELEASE_BUILD=ON",
         f"-DRAISIN_MARCH={raisin_march}",
     ]
-    subprocess.run(cmake_cmd, check=True, text=True)
+
+    # Under QEMU, use compiler wrappers that retry on segfault
+    cmake_env = None
+    use_retry = _is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
+    if use_retry:
+        scripts_dir = Path(g.script_directory) / "scripts"
+        cmake_env = {
+            **os.environ,
+            "CC": str(scripts_dir / "gcc-retry.sh"),
+            "CXX": str(scripts_dir / "g++-retry.sh"),
+        }
+        print("🔄 QEMU retry wrapper enabled via CC/CXX")
+
+    subprocess.run(cmake_cmd, check=True, text=True, env=cmake_env)
     print("✅ CMake configuration successful.")
 
     print("🛠️  Building with Ninja...")
-    core_count = max(os.cpu_count() // 2, 1)
-    print(f"🔩 Using {core_count} cores for the build.")
-    subprocess.run(
-        ["ninja", "install", f"-j{core_count}"],
-        cwd=build_dir,
-        check=True,
-        text=True,
-    )
+    core_count = _get_build_jobs()
+    if _is_qemu_emulated():
+        print(f"🔩 QEMU detected — limiting to {core_count} parallel jobs.")
+    else:
+        print(f"🔩 Using {core_count} cores for the build.")
+
+    max_attempts = 3 if _is_qemu_emulated() else 1
+    ninja_cmd = ["ninja", "install", f"-j{core_count}"]
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(ninja_cmd, cwd=build_dir, check=True, text=True)
+            break
+        except subprocess.CalledProcessError:
+            if attempt < max_attempts:
+                print(f"⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)...")
+            else:
+                raise
 
 
 def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
