@@ -151,8 +151,10 @@ def _build_single_cmake_project(
     is_windows = platform.system().lower() == "windows"
 
     # Limit vcpkg concurrency (vcpkg installs during configure phase)
+    # Under QEMU, use -j1 for vcpkg to avoid random segfaults in emulated compilation
     core_count = _get_build_jobs()
-    env = {**os.environ, "VCPKG_MAX_CONCURRENCY": str(core_count)}
+    vcpkg_jobs = 1 if _is_qemu_emulated() else core_count
+    env = {**os.environ, "VCPKG_MAX_CONCURRENCY": str(vcpkg_jobs)}
 
     if is_windows:
         cmake_args.append(
