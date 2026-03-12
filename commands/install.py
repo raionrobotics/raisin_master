@@ -32,6 +32,7 @@ def install_command(
     targets,
     build_type,
     archive_version: Optional[str] = None,
+    archive_name: Optional[str] = None,
     at_timestamp: Optional[str] = None,
     from_github: bool = False,
 ):
@@ -42,6 +43,7 @@ def install_command(
         targets (list): List of package specifications (e.g., ["raisin", "my-plugin>=1.2"])
         build_type (str): 'debug' or 'release'
         archive_version (str): Optional specific archive version (e.g., 'v2024.01')
+        archive_name (str): Optional archive base name override (e.g., 'raisin-robot')
         at_timestamp (str): Optional timestamp for time-travel install (e.g., '2024-01-15')
         from_github (bool): If True, skip OTA and download directly from GitHub
     """
@@ -97,6 +99,7 @@ def install_command(
             build_type,
             script_dir_path / "release" / "install",
             archive_version=archive_version,
+            archive_name=archive_name,
         )
         print("🎉🎉🎉 Installation process finished successfully.")
         return
@@ -206,6 +209,7 @@ def install_command(
                         build_type,
                         script_dir_path / "release" / "install",
                         archive_version=archive_version,
+                        archive_name=archive_name,
                     )
                 if ota_result:
                     processed_packages[package_name] = ota_result["version"]
@@ -384,6 +388,12 @@ def install_command(
     help="Install from a specific archive version (e.g., 'v2024.01')",
 )
 @click.option(
+    "--archive-name",
+    "archive_name",
+    default=None,
+    help="Override the OTA archive name (e.g., 'raisin-robot' or 'raisin-robot-debug'). For debug builds, '-debug' is added only if not already present.",
+)
+@click.option(
     "--at",
     "at_timestamp",
     default=None,
@@ -396,7 +406,13 @@ def install_command(
     help="Skip OTA and download directly from GitHub releases",
 )
 def install_cli_command(
-    packages, build_type, install_all, archive_version, at_timestamp, from_github
+    packages,
+    build_type,
+    install_all,
+    archive_version,
+    archive_name,
+    at_timestamp,
+    from_github,
 ):
     """
     Download and install packages from OTA server or GitHub releases.
@@ -409,6 +425,7 @@ def install_cli_command(
         raisin install --type debug                  # Install debug builds
         raisin install --all                         # Install both debug and release
         raisin install --archive-version v2024.01   # Install from specific archive
+        raisin install --archive-name team-robot    # Install from a custom archive name
         raisin install --at 2024-01-15               # Install packages at timestamp
         raisin install --from-github                 # Skip OTA, use GitHub only
     """
@@ -424,10 +441,23 @@ def install_cli_command(
             click.echo(f"📥 Installing from GitHub releases ({bt})...")
         elif at_timestamp:
             click.echo(f"📥 Installing packages at {at_timestamp} ({bt})...")
+        elif archive_name and archive_version:
+            click.echo(
+                f"📥 Installing from archive {archive_name} ({archive_version}, {bt})..."
+            )
+        elif archive_name:
+            click.echo(f"📥 Installing from archive {archive_name} ({bt})...")
         elif archive_version:
             click.echo(f"📥 Installing from archive {archive_version} ({bt})...")
         elif packages:
             click.echo(f"📥 Installing {len(packages)} package(s) ({bt})...")
         else:
             click.echo(f"📥 Installing all packages from latest archive ({bt})...")
-        install_command(packages, bt, archive_version, at_timestamp, from_github)
+        install_command(
+            packages,
+            bt,
+            archive_version,
+            archive_name,
+            at_timestamp,
+            from_github,
+        )

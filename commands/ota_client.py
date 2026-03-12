@@ -89,15 +89,17 @@ def get_ssh_key_path() -> Path:
     return ssh_dir / "id_ed25519"
 
 
-def get_archive_name(build_type: str) -> str:
+def get_archive_name(build_type: str, archive_name: Optional[str] = None) -> str:
     """Get archive name based on build type.
 
     Convention:
         - release → 'raisin-robot'
         - debug → 'raisin-robot-debug'
     """
-    base = os.environ.get("RAISIN_ARCHIVE_NAME", DEFAULT_ARCHIVE_NAME)
+    base = archive_name or os.environ.get("RAISIN_ARCHIVE_NAME", DEFAULT_ARCHIVE_NAME)
     if build_type.lower() == "debug":
+        if archive_name and base.endswith("-debug"):
+            return base
         return f"{base}-debug"
     return base
 
@@ -706,6 +708,7 @@ def download_package(
     build_type: str,
     install_base_path: Path,
     archive_version: Optional[str] = None,
+    archive_name: Optional[str] = None,
 ) -> Optional[dict]:
     """Download a single package from the OTA server's archive.
 
@@ -719,6 +722,8 @@ def download_package(
         install_base_path: Path to release/install/ directory.
         archive_version: Optional specific archive version (e.g., 'v2024.01').
             If None, uses the latest available archive.
+        archive_name: Optional archive base name override. If set, this takes
+            precedence over RAISIN_ARCHIVE_NAME.
 
     Returns:
         dict with 'version' and 'dependencies' on success, None on failure.
@@ -726,7 +731,7 @@ def download_package(
     from packaging.version import parse as parse_version, InvalidVersion
 
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
-    archive_name = get_archive_name(build_type)
+    archive_name = get_archive_name(build_type, archive_name)
 
     manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
     if manifest is None:
@@ -795,6 +800,7 @@ def download_all_from_archive(
     install_base_path: Path,
     archive_version: Optional[str] = None,
     package_filter: Optional[list] = None,
+    archive_name: Optional[str] = None,
 ) -> dict:
     """Download all packages from an archive.
 
@@ -805,13 +811,15 @@ def download_all_from_archive(
             If None, uses the latest available archive.
         package_filter: Optional list of package names to download. If None,
             downloads all packages in the archive.
+        archive_name: Optional archive base name override. If set, this takes
+            precedence over RAISIN_ARCHIVE_NAME.
 
     Returns:
         dict mapping package_name to {'version': str, 'dependencies': list}
         for successfully downloaded packages. Empty dict on complete failure.
     """
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
-    archive_name = get_archive_name(build_type)
+    archive_name = get_archive_name(build_type, archive_name)
 
     manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
     if manifest is None:
