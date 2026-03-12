@@ -23,6 +23,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
+from click.testing import CliRunner
 
 import commands.ota_client as ota
 from commands import globals as g
@@ -847,6 +848,25 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         self.assertEqual(ota.get_archive_name("release"), "custom-archive")
         self.assertEqual(ota.get_archive_name("debug"), "custom-archive-debug")
 
+    @patch.dict(os.environ, {"RAISIN_ARCHIVE_NAME": "env-archive"})
+    def test_get_archive_name_explicit_override_wins(self):
+        """Explicit archive override should take precedence over env var."""
+        self.assertEqual(
+            ota.get_archive_name("release", archive_name="cli-archive"),
+            "cli-archive",
+        )
+        self.assertEqual(
+            ota.get_archive_name("debug", archive_name="cli-archive"),
+            "cli-archive-debug",
+        )
+
+    def test_get_archive_name_explicit_debug_name_not_duplicated(self):
+        """Explicit debug archive name should not gain a second -debug suffix."""
+        self.assertEqual(
+            ota.get_archive_name("debug", archive_name="raisin-robot-debug"),
+            "raisin-robot-debug",
+        )
+
     @patch("commands.ota_client._download_blob_by_hash", return_value=True)
     @patch("commands.ota_client._fetch_package_id_by_name", return_value="pkg-uuid")
     @patch("commands.ota_client.authenticate", return_value="tok")
@@ -917,6 +937,76 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         self.assertEqual(result["pkg1"]["version"], "1.0.0")
         self.assertEqual(result["pkg2"]["version"], "2.0.0")
 
+    @patch(
+        "commands.ota_client._fetch_archive_manifest",
+        return_value=([], "arch-1", "v2024.01"),
+    )
+    def test_download_package_uses_archive_name_override(self, mock_manifest):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            install_base = Path(tmpdir) / "release" / "install"
+            install_base.mkdir(parents=True)
+
+            ota.download_package(
+                "mypkg",
+                "",
+                "release",
+                install_base,
+                archive_name="custom-archive",
+            )
+
+        mock_manifest.assert_called_once_with(
+            "custom-archive",
+            "linux-22.04-x86_64",
+            None,
+        )
+
+    @patch(
+        "commands.ota_client._fetch_archive_manifest",
+        return_value=([], "arch-1", "v2024.01"),
+    )
+    def test_download_all_from_archive_uses_archive_name_override(self, mock_manifest):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            install_base = Path(tmpdir) / "release" / "install"
+            install_base.mkdir(parents=True)
+
+            ota.download_all_from_archive(
+                "debug",
+                install_base,
+                archive_name="custom-archive",
+            )
+
+        mock_manifest.assert_called_once_with(
+            "custom-archive-debug",
+            "linux-22.04-x86_64",
+            None,
+        )
+
+    @patch(
+        "commands.ota_client._fetch_archive_manifest",
+        return_value=([], "arch-1", "v2024.01"),
+    )
+    def test_download_all_from_archive_preserves_explicit_debug_archive_name(
+        self, mock_manifest
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            install_base = Path(tmpdir) / "release" / "install"
+            install_base.mkdir(parents=True)
+
+            ota.download_all_from_archive(
+                "debug",
+                install_base,
+                archive_name="raisin-robot-debug",
+            )
+
+        mock_manifest.assert_called_once_with(
+            "raisin-robot-debug",
+            "linux-22.04-x86_64",
+            None,
+        )
+
 
 # ============================================================================
 # 6. Integration: install.py
@@ -953,6 +1043,43 @@ class TestInstallIntegration(unittest.TestCase):
             # OTA download should have been attempted for 'mypkg'
             call_args_list = [c[0][0] for c in mock_dl.call_args_list]
             self.assertIn("mypkg", call_args_list)
+
+    @patch("commands.install.load_configuration")
+    def test_install_command_passes_archive_name_to_ota(self, mock_config):
+        mock_config.return_value = (
+            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
+            {"org": "ghtoken"},
+            "devel",
+            None,
+            [],
+        )
+
+        with patch(
+            "commands.ota_client.download_package", return_value=None
+        ) as mock_dl:
+            with patch("commands.install.requests.Session") as MockSession:
+                session = MagicMock()
+                MockSession.return_value = session
+                session.get.return_value = _mock_response(json_data=[])
+
+                from commands.install import install_command
+
+                install_command(["mypkg"], "release", archive_name="team-archive")
+
+        self.assertEqual(mock_dl.call_args.kwargs["archive_name"], "team-archive")
+
+    def test_install_cli_accepts_archive_name_option(self):
+        from commands.install import install_cli_command
+
+        runner = CliRunner()
+        with patch("commands.install.install_command") as mock_install:
+            result = runner.invoke(
+                install_cli_command,
+                ["mypkg", "--archive-name", "team-archive"],
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(mock_install.call_args[0][3], "team-archive")
 
 
 # ============================================================================

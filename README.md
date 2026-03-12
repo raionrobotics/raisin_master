@@ -134,6 +134,9 @@ raisin install package1 package2 package3
 # Install from a specific archive version
 raisin install --archive-version v2024.01
 
+# Install from a specific archive name
+raisin install --archive-name team-robot
+
 # Install packages at a specific timestamp (time-travel)
 raisin install --at 2024-01-15
 raisin install --at 2024-01-15T10:00:00Z
@@ -142,10 +145,10 @@ raisin install --at 2024-01-15T10:00:00Z
 raisin install --from-github
 
 # Combine options
-raisin install raisin_network --type debug --archive-version v2024.01
+raisin install raisin_network --type debug --archive-name team-robot --archive-version v2024.01
 ```
 
-> **Note:** Packages are downloaded from the OTA server by default. Use `--from-github` to bypass OTA and download directly from GitHub releases (useful for debugging or when OTA is unavailable).
+> **Note:** Packages are downloaded from the OTA server by default. Use `--archive-name` to override `RAISIN_ARCHIVE_NAME` for a single install command. For debug installs, `-debug` is added only when the provided archive name does not already end with `-debug`. Use `--from-github` to bypass OTA and download directly from GitHub releases (useful for debugging or when OTA is unavailable).
 
 ### 6. Install Package Dependencies
 
