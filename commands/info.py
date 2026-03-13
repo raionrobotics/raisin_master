@@ -45,23 +45,34 @@ def info_command():
     Examples:
         raisin info
     """
-    # TODO: Implement the diagnostic output here.
-    #
-    # Available data:
-    #   platform.machine()           -> e.g. "x86_64", "aarch64"
-    #   g.os_type                    -> e.g. "ubuntu"
-    #   g.os_version                 -> e.g. "24.04"
-    #   g.architecture               -> normalized arch from utils
-    #   is_qemu_emulated()           -> True if under QEMU user-mode emulation
-    #   get_build_jobs()             -> resolved parallel job count
-    #   get_default_portable_march() -> e.g. "x86-64-v3" or "armv8.2-a+..."
-    #   SUPPORTED_ARCHITECTURES      -> tuple of supported arch strings
-    #   RAISIN_MAX_JOBS env var      -> user override for job count
-    #   RAISIN_MARCH env var         -> user override for march
-    #   RAISIN_QEMU_RETRY env var    -> manual QEMU retry override
-    #   _detect_compiler_version()   -> gcc/g++ version strings
-    #
-    # Consider: what format is most scannable when pasted into a bug report?
-    # Consider: should unsupported arch show a warning here (non-fatal) vs
-    #           the hard exit in build/setup?
-    pass
+    machine = platform.machine()
+    qemu = is_qemu_emulated()
+    march_override = os.environ.get("RAISIN_MARCH")
+    jobs_override = os.environ.get("RAISIN_MAX_JOBS")
+    retry_override = os.environ.get("RAISIN_QEMU_RETRY")
+
+    fields = [
+        ("architecture", machine),
+        ("os", f"{g.os_type} {g.os_version}"),
+        ("qemu_emulated", str(qemu).lower()),
+        ("qemu_retry", retry_override or "(auto)"),
+        (
+            "build_jobs",
+            f"{get_build_jobs()}{f' (RAISIN_MAX_JOBS={jobs_override})' if jobs_override else ''}",
+        ),
+        ("portable_march", get_default_portable_march()),
+        ("march_override", march_override or "(none)"),
+        ("gcc", _detect_compiler_version("gcc")),
+        ("g++", _detect_compiler_version("g++")),
+    ]
+
+    width = max(len(k) for k, _ in fields)
+    for key, value in fields:
+        print(f"{key + ':':<{width + 2}}{value}")
+
+    if machine not in SUPPORTED_ARCHITECTURES:
+        print(f"\n⚠️  WARNING: '{machine}' is not a supported architecture.")
+        print(f"   Supported: {', '.join(sorted(set(SUPPORTED_ARCHITECTURES)))}")
+        print(
+            f"   'raisin build' and 'raisin setup' will refuse to run on this platform."
+        )
