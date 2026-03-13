@@ -14,35 +14,12 @@ from pathlib import Path
 
 # Import globals and utilities
 from commands import globals as g
-from commands.utils import delete_directory
-
-
-def _is_qemu_emulated():
-    """Detect if running under QEMU user-mode emulation (e.g., buildx cross-arch)."""
-    try:
-        with open("/proc/cpuinfo", "r") as f:
-            cpuinfo = f.read()
-        # Native ARM reports "CPU implementer", QEMU doesn't
-        if platform.machine() in ("aarch64", "arm64"):
-            return "CPU implementer" not in cpuinfo
-    except OSError:
-        pass
-    return False
-
-
-def _get_build_jobs():
-    """Determine number of parallel build jobs.
-
-    Priority:
-    1. RAISIN_MAX_JOBS env var (user override)
-    2. Auto-detect: 4 under QEMU, cpu_count/2 otherwise
-    """
-    env_jobs = os.environ.get("RAISIN_MAX_JOBS")
-    if env_jobs:
-        return int(env_jobs)
-    if _is_qemu_emulated():
-        return 4
-    return int((os.cpu_count() or 1) / 2) or 4
+from commands.utils import (
+    delete_directory,
+    check_supported_architecture,
+    is_qemu_emulated,
+    get_build_jobs,
+)
 
 
 def build_command(build_types, to_install=False):
@@ -53,6 +30,7 @@ def build_command(build_types, to_install=False):
         build_types (list): List of build types ('debug', 'release')
         to_install (bool): Whether to run install target after build
     """
+    check_supported_architecture()
     script_directory = g.script_directory
     developer_env = g.developer_env
     ninja_path = g.ninja_path
@@ -91,7 +69,9 @@ def build_command(build_types, to_install=False):
                 ]
                 # Under QEMU, use compiler wrappers that retry on segfault
                 cmake_env = None
-                use_retry = _is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
+                use_retry = (
+                    is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
+                )
                 if use_retry:
                     scripts_dir = Path(script_directory) / "scripts"
                     cmake_env = {
@@ -114,8 +94,8 @@ def build_command(build_types, to_install=False):
 
             print("✅ CMake configuration successful.")
             print("🛠️  Building with Ninja...")
-            core_count = _get_build_jobs()
-            if _is_qemu_emulated():
+            core_count = get_build_jobs()
+            if is_qemu_emulated():
                 print(f"🔩 QEMU detected — limiting to {core_count} parallel jobs.")
             else:
                 print(f"🔩 Using {core_count} cores for the build.")
@@ -125,14 +105,16 @@ def build_command(build_types, to_install=False):
                 build_command = ["ninja", "install", f"-j{core_count}"]
             else:
                 build_command = ["ninja", f"-j{core_count}"]
-            max_attempts = 3 if _is_qemu_emulated() else 1
+            max_attempts = 3 if is_qemu_emulated() else 1
             for attempt in range(1, max_attempts + 1):
                 try:
                     subprocess.run(build_command, cwd=build_dir, check=True, text=True)
                     break
                 except subprocess.CalledProcessError:
                     if attempt < max_attempts:
-                        print(f"⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)...")
+                        print(
+                            f"⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)..."
+                        )
                     else:
                         raise
 
@@ -191,7 +173,9 @@ def stash_pure_cmake_build_dir(script_directory, build_dir, build_type):
     if not pure_cmake_dir.is_dir():
         return
 
-    stash_dir = Path(script_directory) / ".cache" / "pure_cmake_build_stash" / build_type
+    stash_dir = (
+        Path(script_directory) / ".cache" / "pure_cmake_build_stash" / build_type
+    )
     stash_dir.parent.mkdir(parents=True, exist_ok=True)
     if stash_dir.exists():
         shutil.rmtree(stash_dir)

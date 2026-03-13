@@ -30,32 +30,10 @@ from commands.utils import (
     load_configuration,
     delete_directory,
     get_repo_name_from_path,
+    check_supported_architecture,
+    is_qemu_emulated,
+    get_build_jobs,
 )
-
-
-def _is_qemu_emulated():
-    """Detect if running under QEMU user-mode emulation (e.g., buildx cross-arch)."""
-    try:
-        with open("/proc/cpuinfo", "r") as f:
-            cpuinfo = f.read()
-        if platform.machine() in ("aarch64", "arm64"):
-            return "CPU implementer" not in cpuinfo
-    except OSError:
-        pass
-    return False
-
-
-def _get_build_jobs():
-    """Determine number of parallel build jobs.
-
-    Priority: RAISIN_MAX_JOBS env var > auto-detect (4 under QEMU, cpu/2 otherwise).
-    """
-    env_jobs = os.environ.get("RAISIN_MAX_JOBS")
-    if env_jobs:
-        return int(env_jobs)
-    if _is_qemu_emulated():
-        return 4
-    return max(1, (os.cpu_count() or 2) // 2)
 
 
 def _resolve_vcpkg_cache_dir(env_var_name, default_path):
@@ -152,8 +130,8 @@ def _build_single_cmake_project(
 
     # Limit vcpkg concurrency (vcpkg installs during configure phase)
     # Under QEMU, use -j1 for vcpkg to avoid random segfaults in emulated compilation
-    core_count = _get_build_jobs()
-    vcpkg_jobs = 1 if _is_qemu_emulated() else core_count
+    core_count = get_build_jobs()
+    vcpkg_jobs = 1 if is_qemu_emulated() else core_count
     env = {**os.environ, "VCPKG_MAX_CONCURRENCY": str(vcpkg_jobs)}
 
     if is_windows:
@@ -169,7 +147,7 @@ def _build_single_cmake_project(
         cmake_args.extend(["-G", "Ninja"])
 
     # Under QEMU, retry on failure since random segfaults are expected
-    max_attempts = 3 if _is_qemu_emulated() else 1
+    max_attempts = 3 if is_qemu_emulated() else 1
 
     # Configure (vcpkg port builds happen here)
     for attempt in range(1, max_attempts + 1):
@@ -178,7 +156,9 @@ def _build_single_cmake_project(
             break
         except subprocess.CalledProcessError:
             if attempt < max_attempts:
-                print(f"  ⚠️  Configure failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)...")
+                print(
+                    f"  ⚠️  Configure failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)..."
+                )
             else:
                 raise
 
@@ -195,7 +175,9 @@ def _build_single_cmake_project(
                 break
             except subprocess.CalledProcessError:
                 if attempt < max_attempts:
-                    print(f"  ⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)...")
+                    print(
+                        f"  ⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)..."
+                    )
                 else:
                     raise
         return  # Unix already installed via --target install
@@ -1497,7 +1479,12 @@ def _discover_pure_cmake_projects(
                 project = entry
                 cmake_args = []
 
-            if not project or project in packages_to_ignore or os.path.isabs(project) or ".." in Path(project).parts:
+            if (
+                not project
+                or project in packages_to_ignore
+                or os.path.isabs(project)
+                or ".." in Path(project).parts
+            ):
                 continue
 
             project_dir = repo_dir / project
@@ -2194,6 +2181,8 @@ def setup(
         build_dir: Build directory path
         build_test_enabled: Whether to build tests
     """
+
+    check_supported_architecture()
 
     if package_name == "":
         src_dir = "src"

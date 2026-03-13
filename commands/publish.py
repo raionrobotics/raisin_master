@@ -18,8 +18,7 @@ import click
 import yaml
 
 from commands import globals as g
-from commands.utils import load_configuration
-from commands.build import _is_qemu_emulated, _get_build_jobs
+from commands.utils import load_configuration, is_qemu_emulated, get_build_jobs
 from commands.setup import (
     setup,
     get_commit_hash,
@@ -116,7 +115,7 @@ def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
 
     # Under QEMU, use compiler wrappers that retry on segfault
     cmake_env = None
-    use_retry = _is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
+    use_retry = is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
     if use_retry:
         scripts_dir = Path(g.script_directory) / "scripts"
         cmake_env = {
@@ -130,13 +129,13 @@ def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
     print("✅ CMake configuration successful.")
 
     print("🛠️  Building with Ninja...")
-    core_count = _get_build_jobs()
-    if _is_qemu_emulated():
+    core_count = get_build_jobs()
+    if is_qemu_emulated():
         print(f"🔩 QEMU detected — limiting to {core_count} parallel jobs.")
     else:
         print(f"🔩 Using {core_count} cores for the build.")
 
-    max_attempts = 3 if _is_qemu_emulated() else 1
+    max_attempts = 3 if is_qemu_emulated() else 1
     ninja_cmd = ["ninja", "install", f"-j{core_count}"]
     for attempt in range(1, max_attempts + 1):
         try:
@@ -144,7 +143,9 @@ def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
             break
         except subprocess.CalledProcessError:
             if attempt < max_attempts:
-                print(f"⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)...")
+                print(
+                    f"⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)..."
+                )
             else:
                 raise
 
