@@ -161,6 +161,67 @@ def is_root():
     return os.geteuid() == 0
 
 
+# ============================================================================
+# Cross-architecture build helpers
+# ============================================================================
+
+SUPPORTED_ARCHITECTURES = ("x86_64", "amd64", "aarch64", "arm64")
+
+
+def check_supported_architecture():
+    """Exit with an error if the current architecture is unsupported.
+
+    Supported: x86_64, aarch64/arm64.
+    Unsupported (e.g., RISC-V, ppc64le): prints a warning and exits.
+    """
+    machine = platform.machine()
+    if machine not in SUPPORTED_ARCHITECTURES:
+        print(f"❌ Unsupported architecture: {machine}")
+        print(f"   RAISIN build tooling supports: x86_64, aarch64/arm64.")
+        print(f"   Cross-compilation to {machine} is not yet supported.")
+        sys.exit(1)
+
+
+def is_qemu_emulated():
+    """Detect if running under QEMU user-mode emulation (e.g., buildx cross-arch).
+
+    Native ARM hardware reports 'CPU implementer' in /proc/cpuinfo; QEMU doesn't.
+    Returns False on non-ARM architectures and on native ARM hardware.
+    """
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            cpuinfo = f.read()
+        if platform.machine() in ("aarch64", "arm64"):
+            return "CPU implementer" not in cpuinfo
+    except OSError:
+        pass
+    return False
+
+
+def get_build_jobs():
+    """Determine number of parallel build jobs.
+
+    Priority:
+    1. RAISIN_MAX_JOBS env var (user override)
+    2. Auto-detect: 4 under QEMU, cpu_count/2 otherwise (min 1)
+    """
+    env_jobs = os.environ.get("RAISIN_MAX_JOBS")
+    if env_jobs:
+        return int(env_jobs)
+    if is_qemu_emulated():
+        return 4
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
+def get_default_portable_march() -> str:
+    """Default portable CPU target for distributable/installable Linux builds."""
+    return (
+        "armv8.2-a+crypto+fp16+dotprod"
+        if platform.machine() in ("aarch64", "arm64")
+        else "x86-64-v3"
+    )
+
+
 def _read_os_release() -> Dict[str, str]:
     """
     Best-effort reader for Linux /etc/os-release. Uses platform.freedesktop_os_release()

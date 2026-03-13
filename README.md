@@ -216,6 +216,45 @@ raisin publish raisin_network --dry-run
 
 > **Note:** Use `--upload-ota` to upload to the OTA server instead of GitHub. This requires `RAISIN_OTA_ENDPOINT` to be set.
 
+#### Cross-Architecture Build Support
+
+RAISIN uses portable CPU architecture flags by default on Linux so generated and published binaries work across different machines within the same architecture family.
+
+**Default targets:**
+| Architecture | Default `-march` | Compatible Targets |
+|---|---|---|
+| x86_64 | `x86-64-v3` | Intel (Haswell+), AMD (Zen 2+), Steam Deck |
+| ARM64 | `armv8.2-a+crypto+fp16+dotprod` | Raspberry Pi 5, Jetson Orin AGX/NX |
+
+**Override the default with the `RAISIN_MARCH` environment variable:**
+```bash
+# Use a specific architecture
+RAISIN_MARCH=znver2 raisin build -t release
+RAISIN_MARCH=znver2 raisin publish my_package -t release
+
+# Use native for machine-specific local builds
+RAISIN_MARCH=native raisin setup
+RAISIN_MARCH=native raisin build -t release
+RAISIN_MARCH=native raisin publish my_package -t release
+```
+
+This default applies to `raisin setup`, `raisin build`, `raisin build --install`, and `raisin publish` unless `RAISIN_MARCH` is set explicitly.
+
+> **Warning:** Do not mix packages published with different `-march` flags on the same target machine. While the ABI is compatible, individual binaries may contain instructions unsupported by the target CPU, causing "Illegal instruction" crashes at runtime.
+
+#### Architecture-Conditional CMake Args (release.yaml)
+
+Third-party packages that need different CMake arguments per architecture can use the `cmake_args` field in `release.yaml`:
+
+```yaml
+pure_cmake:
+  - name: depthai-core
+    cmake_args:
+      aarch64: [-DDEPTHAI_BOOTSTRAP_VCPKG=OFF]
+```
+
+Keys under `cmake_args` are matched against `platform.machine()` (e.g., `x86_64`, `aarch64`). Omitted architectures receive no extra flags.
+
 #### List Packages
 View available packages:
 ```bash

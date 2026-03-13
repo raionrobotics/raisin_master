@@ -14,17 +14,25 @@ from pathlib import Path
 
 # Import globals and utilities
 from commands import globals as g
-from commands.utils import delete_directory
+from commands.utils import (
+    delete_directory,
+    check_supported_architecture,
+    is_qemu_emulated,
+    get_build_jobs,
+    get_default_portable_march,
+)
 
 
-def build_command(build_types, to_install=False):
+def build_command(build_types, to_install=False, raisin_march=None):
     """
     Build the project with CMake and Ninja.
 
     Args:
         build_types (list): List of build types ('debug', 'release')
         to_install (bool): Whether to run install target after build
+        raisin_march (str): Optional CPU target override passed to CMake
     """
+    check_supported_architecture()
     script_directory = g.script_directory
     developer_env = g.developer_env
     ninja_path = g.ninja_path
@@ -61,7 +69,22 @@ def build_command(build_types, to_install=False):
                     str(build_dir),
                     f"-DCMAKE_BUILD_TYPE={build_type_capitalized}",
                 ]
-                subprocess.run(cmake_command, check=True, text=True)
+                if raisin_march:
+                    cmake_command.append(f"-DRAISIN_MARCH={raisin_march}")
+                # Under QEMU, use compiler wrappers that retry on segfault
+                cmake_env = None
+                use_retry = (
+                    is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
+                )
+                if use_retry:
+                    scripts_dir = Path(script_directory) / "scripts"
+                    cmake_env = {
+                        **os.environ,
+                        "CC": str(scripts_dir / "gcc-retry.sh"),
+                        "CXX": str(scripts_dir / "g++-retry.sh"),
+                    }
+                    print(f"🔄 QEMU retry wrapper enabled via CC/CXX")
+                subprocess.run(cmake_command, check=True, text=True, env=cmake_env)
             except subprocess.CalledProcessError as e:
                 # If the command fails, print its output to help with debugging
                 print("--- CMake Command Failed ---", file=sys.stderr)
@@ -75,15 +98,29 @@ def build_command(build_types, to_install=False):
 
             print("✅ CMake configuration successful.")
             print("🛠️  Building with Ninja...")
-            core_count = int(os.cpu_count() / 2) or 4
-            print(f"🔩 Using {core_count} cores for the build.")
+            core_count = get_build_jobs()
+            if is_qemu_emulated():
+                print(f"🔩 QEMU detected — limiting to {core_count} parallel jobs.")
+            else:
+                print(f"🔩 Using {core_count} cores for the build.")
 
-            # Build with Ninja
+            # Build with Ninja (retry under QEMU for random segfaults)
             if to_install:
                 build_command = ["ninja", "install", f"-j{core_count}"]
             else:
                 build_command = ["ninja", f"-j{core_count}"]
-            subprocess.run(build_command, cwd=build_dir, check=True, text=True)
+            max_attempts = 3 if is_qemu_emulated() else 1
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    subprocess.run(build_command, cwd=build_dir, check=True, text=True)
+                    break
+                except subprocess.CalledProcessError:
+                    if attempt < max_attempts:
+                        print(
+                            f"⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)..."
+                        )
+                    else:
+                        raise
 
         else:  # Windows
             try:
@@ -140,7 +177,9 @@ def stash_pure_cmake_build_dir(script_directory, build_dir, build_type):
     if not pure_cmake_dir.is_dir():
         return
 
-    stash_dir = Path(script_directory) / ".cache" / "pure_cmake_build_stash" / build_type
+    stash_dir = (
+        Path(script_directory) / ".cache" / "pure_cmake_build_stash" / build_type
+    )
     stash_dir.parent.mkdir(parents=True, exist_ok=True)
     if stash_dir.exists():
         shutil.rmtree(stash_dir)
@@ -210,7 +249,9 @@ def build_cli_command(build_types, install, targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup()
+    raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
+
+    setup(raisin_march=raisin_march)
 
     # Then build
     build_types = list(build_types) if build_types else []
@@ -220,4 +261,4 @@ def build_cli_command(build_types, install, targets):
         click.echo("   Example: raisin build --type release")
         sys.exit(1)
 
-    build_command(build_types, to_install=install)
+    build_command(build_types, to_install=install, raisin_march=raisin_march)

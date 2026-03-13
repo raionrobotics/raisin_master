@@ -18,7 +18,12 @@ import click
 import yaml
 
 from commands import globals as g
-from commands.utils import load_configuration
+from commands.utils import (
+    load_configuration,
+    is_qemu_emulated,
+    get_build_jobs,
+    get_default_portable_march,
+)
 from commands.setup import (
     setup,
     get_commit_hash,
@@ -91,7 +96,17 @@ def _validate_target(target_dir: Path) -> Optional[dict]:
 # ============================================================================
 
 
-def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
+def _get_publish_march() -> str:
+    """Resolve the CPU target used for portable publish builds."""
+    return os.environ.get("RAISIN_MARCH", get_default_portable_march())
+
+
+def _build_linux(
+    build_dir: Path,
+    install_dir: Path,
+    build_type: str,
+    raisin_march: str,
+):
     """Run CMake + Ninja build on Linux."""
     cmake_cmd = [
         "cmake",
@@ -104,19 +119,44 @@ def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
         f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         f"-DCMAKE_BUILD_TYPE={build_type}",
         "-DRAISIN_RELEASE_BUILD=ON",
+        f"-DRAISIN_MARCH={raisin_march}",
     ]
-    subprocess.run(cmake_cmd, check=True, text=True)
+
+    # Under QEMU, use compiler wrappers that retry on segfault
+    cmake_env = None
+    use_retry = is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
+    if use_retry:
+        scripts_dir = Path(g.script_directory) / "scripts"
+        cmake_env = {
+            **os.environ,
+            "CC": str(scripts_dir / "gcc-retry.sh"),
+            "CXX": str(scripts_dir / "g++-retry.sh"),
+        }
+        print("🔄 QEMU retry wrapper enabled via CC/CXX")
+
+    subprocess.run(cmake_cmd, check=True, text=True, env=cmake_env)
     print("✅ CMake configuration successful.")
 
     print("🛠️  Building with Ninja...")
-    core_count = max(os.cpu_count() // 2, 1)
-    print(f"🔩 Using {core_count} cores for the build.")
-    subprocess.run(
-        ["ninja", "install", f"-j{core_count}"],
-        cwd=build_dir,
-        check=True,
-        text=True,
-    )
+    core_count = get_build_jobs()
+    if is_qemu_emulated():
+        print(f"🔩 QEMU detected — limiting to {core_count} parallel jobs.")
+    else:
+        print(f"🔩 Using {core_count} cores for the build.")
+
+    max_attempts = 3 if is_qemu_emulated() else 1
+    ninja_cmd = ["ninja", "install", f"-j{core_count}"]
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(ninja_cmd, cwd=build_dir, check=True, text=True)
+            break
+        except subprocess.CalledProcessError:
+            if attempt < max_attempts:
+                print(
+                    f"⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)..."
+                )
+            else:
+                raise
 
 
 def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
@@ -166,18 +206,20 @@ def _build_package(
     build_dir = paths["build_dir"]
     install_dir = paths["install_dir"]
     target_dir = paths["target_dir"]
+    raisin_march = _get_publish_march()
 
     print(f"\n--- Setting up build for '{target}' ---")
     setup(
         package_name=target,
         build_type=build_type,
         build_dir=str(build_dir),
+        raisin_march=raisin_march,
     )
     build_dir.mkdir(parents=True, exist_ok=True)
 
     print("⚙️  Running CMake...")
     if platform.system().lower() == "linux":
-        _build_linux(build_dir, install_dir, build_type)
+        _build_linux(build_dir, install_dir, build_type, raisin_march)
     else:
         _build_windows(build_dir, install_dir, build_type)
 

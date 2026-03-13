@@ -16,6 +16,7 @@ from commands.install import install_cli_command
 from commands.index import index_group
 from commands.git_commands import git_group
 from commands.test import test_command
+from commands.info import info_command
 
 try:
     from packaging.requirements import Requirement
@@ -64,6 +65,7 @@ cli.add_command(index_group, name="index")
 cli.add_command(git_group, name="git")
 cli.add_command(test_command, name="test")
 cli.add_command(help_command, name="help")
+cli.add_command(info_command, name="info")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,10 @@ from commands.utils import (
     load_configuration,
     delete_directory,
     get_repo_name_from_path,
+    check_supported_architecture,
+    is_qemu_emulated,
+    get_build_jobs,
+    get_default_portable_march,
 )
 
 
@@ -99,9 +103,12 @@ def _build_single_cmake_project(
     install_prefix: Path,
     vcpkg_parent: Path,
     vcpkg_installed: Path,
+    extra_cmake_args: list = None,
+    raisin_march: Optional[str] = None,
 ) -> None:
     """Build a single CMake project - unified Windows/Unix implementation."""
     build_dir.mkdir(parents=True, exist_ok=True)
+    normalized_extra_cmake_args = [str(arg) for arg in (extra_cmake_args or [])]
 
     # Common CMake arguments
     cmake_args = [
@@ -117,14 +124,27 @@ def _build_single_cmake_project(
         "-DBUILD_SHARED_LIBS=ON",
     ]
 
-    env = None
+    if raisin_march:
+        cmake_args.append(f"-DRAISIN_MARCH={raisin_march}")
+
+    if normalized_extra_cmake_args:
+        cmake_args.extend(normalized_extra_cmake_args)
+
+    print(f"  [cmake] {' '.join(str(a) for a in cmake_args)}")
+
     is_windows = platform.system().lower() == "windows"
+
+    # Limit vcpkg concurrency (vcpkg installs during configure phase)
+    # Under QEMU, use -j1 for vcpkg to avoid random segfaults in emulated compilation
+    core_count = get_build_jobs()
+    vcpkg_jobs = 1 if is_qemu_emulated() else core_count
+    env = {**os.environ, "VCPKG_MAX_CONCURRENCY": str(vcpkg_jobs)}
 
     if is_windows:
         cmake_args.append(
             f"-DCMAKE_TOOLCHAIN_FILE={Path(g.script_directory) / 'vcpkg/scripts/buildsystems/vcpkg.cmake'}"
         )
-        env = g.developer_env
+        env.update(g.developer_env or {})
         if g.ninja_path:
             cmake_args.extend(["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}"])
         elif shutil.which("ninja"):
@@ -132,8 +152,21 @@ def _build_single_cmake_project(
     else:
         cmake_args.extend(["-G", "Ninja"])
 
-    # Configure
-    subprocess.run(cmake_args, check=True, text=True, env=env)
+    # Under QEMU, retry on failure since random segfaults are expected
+    max_attempts = 3 if is_qemu_emulated() else 1
+
+    # Configure (vcpkg port builds happen here)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(cmake_args, check=True, text=True, env=env)
+            break
+        except subprocess.CalledProcessError:
+            if attempt < max_attempts:
+                print(
+                    f"  ⚠️  Configure failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)..."
+                )
+            else:
+                raise
 
     # Build
     build_cmd = ["cmake", "--build", str(build_dir), "--config", cmake_build_type]
@@ -141,9 +174,18 @@ def _build_single_cmake_project(
         build_cmd.append("--parallel")
         subprocess.run(build_cmd, check=True, text=True, env=env)
     else:
-        core_count = max(1, (os.cpu_count() or 2) // 2)
         build_cmd.extend(["--target", "install", "--", f"-j{core_count}"])
-        subprocess.run(build_cmd, check=True, text=True, env=env)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                subprocess.run(build_cmd, check=True, text=True, env=env)
+                break
+            except subprocess.CalledProcessError:
+                if attempt < max_attempts:
+                    print(
+                        f"  ⚠️  Build failed (attempt {attempt}/{max_attempts}), retrying (QEMU segfault likely)..."
+                    )
+                else:
+                    raise
         return  # Unix already installed via --target install
 
     # Install (Windows only - Unix uses --target install above)
@@ -648,9 +690,7 @@ def _ensure_scripts_executable(install_dir):
         if script_path.is_file():
             try:
                 mode = script_path.stat().st_mode
-                script_path.chmod(
-                    mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-                )
+                script_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             except OSError:
                 print(f"⚠️  Failed to set executable: {script_path}")
 
@@ -1431,8 +1471,26 @@ def _discover_pure_cmake_projects(
             )
             continue
 
-        for project in pure_cmake_entries:
-            if not project or project in packages_to_ignore:
+        for entry in pure_cmake_entries:
+            if isinstance(entry, dict):
+                project = entry.get("name", "")
+                raw_args = entry.get("cmake_args", [])
+                # cmake_args can be a list (applies to all) or a dict keyed by architecture
+                if isinstance(raw_args, dict):
+                    arch = platform.machine()  # e.g. "x86_64", "aarch64"
+                    cmake_args = raw_args.get(arch, [])
+                else:
+                    cmake_args = raw_args
+            else:
+                project = entry
+                cmake_args = []
+
+            if (
+                not project
+                or project in packages_to_ignore
+                or os.path.isabs(project)
+                or ".." in Path(project).parts
+            ):
                 continue
 
             project_dir = repo_dir / project
@@ -1442,7 +1500,7 @@ def _discover_pure_cmake_projects(
                 )
                 continue
 
-            projects.append((repo_name, project, project_dir))
+            projects.append((repo_name, project, project_dir, cmake_args))
 
     return projects
 
@@ -1454,6 +1512,7 @@ def build_pure_cmake_projects(
     packages_to_ignore=None,
     repos_to_ignore=None,
     force_rebuild=False,
+    raisin_march: Optional[str] = None,
 ):
     """
     Build pure CMake projects in both debug and release dirs and install them to install_dir.
@@ -1493,15 +1552,18 @@ def build_pure_cmake_projects(
             Path(g.script_directory) / f"cmake-build-{build_type_token}" / "pure_cmake"
         )
 
-        for repo_name, project_name, source_dir in projects:
+        for repo_name, project_name, source_dir, cmake_args in projects:
             cache_key = f"{project_name}_{build_type_token}"
             source_hash = _compute_source_hash(source_dir)
+            normalized_cmake_args = [str(arg) for arg in (cmake_args or [])]
 
             # Check cache - skip if unchanged
             cached = cache.get(cache_key, {})
             if (
                 cached.get("hash") == source_hash
                 and cached.get("prefix") == str(install_prefix)
+                and cached.get("cmake_args", []) == normalized_cmake_args
+                and cached.get("raisin_march") == (raisin_march or "")
                 and _has_project_cmake_config(install_prefix, project_name)
             ):
                 print(f"  -> {project_name} [{cmake_build_type}] (unchanged, skipping)")
@@ -1521,8 +1583,15 @@ def build_pure_cmake_projects(
                     install_prefix,
                     vcpkg_parent,
                     vcpkg_installed,
+                    extra_cmake_args=cmake_args,
+                    raisin_march=raisin_march,
                 )
-                cache[cache_key] = {"hash": source_hash, "prefix": str(install_prefix)}
+                cache[cache_key] = {
+                    "hash": source_hash,
+                    "prefix": str(install_prefix),
+                    "cmake_args": normalized_cmake_args,
+                    "raisin_march": raisin_march or "",
+                }
                 built.add(project_name)
             except subprocess.CalledProcessError as e:
                 raise SystemExit(
@@ -2118,6 +2187,7 @@ def setup(
     build_type="",
     build_dir="",
     build_test_enabled=None,
+    raisin_march: Optional[str] = None,
 ):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
@@ -2127,7 +2197,12 @@ def setup(
         build_type: Build type (Debug/Release)
         build_dir: Build directory path
         build_test_enabled: Whether to build tests
+        raisin_march: Optional CPU target override for pure-CMake dependencies
     """
+
+    check_supported_architecture()
+    if raisin_march is None:
+        raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
 
     if package_name == "":
         src_dir = "src"
@@ -2158,6 +2233,7 @@ def setup(
         package_name,
         packages_to_ignore,
         repos_to_ignore,
+        raisin_march=raisin_march,
     )
     if pure_cmake_built:
         packages_to_ignore = list(
