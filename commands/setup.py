@@ -33,6 +33,7 @@ from commands.utils import (
     check_supported_architecture,
     is_qemu_emulated,
     get_build_jobs,
+    get_default_portable_march,
 )
 
 
@@ -103,9 +104,11 @@ def _build_single_cmake_project(
     vcpkg_parent: Path,
     vcpkg_installed: Path,
     extra_cmake_args: list = None,
+    raisin_march: Optional[str] = None,
 ) -> None:
     """Build a single CMake project - unified Windows/Unix implementation."""
     build_dir.mkdir(parents=True, exist_ok=True)
+    normalized_extra_cmake_args = [str(arg) for arg in (extra_cmake_args or [])]
 
     # Common CMake arguments
     cmake_args = [
@@ -121,8 +124,11 @@ def _build_single_cmake_project(
         "-DBUILD_SHARED_LIBS=ON",
     ]
 
-    if extra_cmake_args:
-        cmake_args.extend(extra_cmake_args)
+    if raisin_march:
+        cmake_args.append(f"-DRAISIN_MARCH={raisin_march}")
+
+    if normalized_extra_cmake_args:
+        cmake_args.extend(normalized_extra_cmake_args)
 
     print(f"  [cmake] {' '.join(str(a) for a in cmake_args)}")
 
@@ -1506,6 +1512,7 @@ def build_pure_cmake_projects(
     packages_to_ignore=None,
     repos_to_ignore=None,
     force_rebuild=False,
+    raisin_march: Optional[str] = None,
 ):
     """
     Build pure CMake projects in both debug and release dirs and install them to install_dir.
@@ -1548,12 +1555,15 @@ def build_pure_cmake_projects(
         for repo_name, project_name, source_dir, cmake_args in projects:
             cache_key = f"{project_name}_{build_type_token}"
             source_hash = _compute_source_hash(source_dir)
+            normalized_cmake_args = [str(arg) for arg in (cmake_args or [])]
 
             # Check cache - skip if unchanged
             cached = cache.get(cache_key, {})
             if (
                 cached.get("hash") == source_hash
                 and cached.get("prefix") == str(install_prefix)
+                and cached.get("cmake_args", []) == normalized_cmake_args
+                and cached.get("raisin_march") == (raisin_march or "")
                 and _has_project_cmake_config(install_prefix, project_name)
             ):
                 print(f"  -> {project_name} [{cmake_build_type}] (unchanged, skipping)")
@@ -1574,8 +1584,14 @@ def build_pure_cmake_projects(
                     vcpkg_parent,
                     vcpkg_installed,
                     extra_cmake_args=cmake_args,
+                    raisin_march=raisin_march,
                 )
-                cache[cache_key] = {"hash": source_hash, "prefix": str(install_prefix)}
+                cache[cache_key] = {
+                    "hash": source_hash,
+                    "prefix": str(install_prefix),
+                    "cmake_args": normalized_cmake_args,
+                    "raisin_march": raisin_march or "",
+                }
                 built.add(project_name)
             except subprocess.CalledProcessError as e:
                 raise SystemExit(
@@ -2171,6 +2187,7 @@ def setup(
     build_type="",
     build_dir="",
     build_test_enabled=None,
+    raisin_march: Optional[str] = None,
 ):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
@@ -2180,9 +2197,12 @@ def setup(
         build_type: Build type (Debug/Release)
         build_dir: Build directory path
         build_test_enabled: Whether to build tests
+        raisin_march: Optional CPU target override for pure-CMake dependencies
     """
 
     check_supported_architecture()
+    if raisin_march is None:
+        raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
 
     if package_name == "":
         src_dir = "src"
@@ -2213,6 +2233,7 @@ def setup(
         package_name,
         packages_to_ignore,
         repos_to_ignore,
+        raisin_march=raisin_march,
     )
     if pure_cmake_built:
         packages_to_ignore = list(

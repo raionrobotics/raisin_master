@@ -213,6 +213,15 @@ def get_build_jobs():
     return max(1, (os.cpu_count() or 2) // 2)
 
 
+def get_default_portable_march() -> str:
+    """Default portable CPU target for distributable/installable Linux builds."""
+    return (
+        "armv8.2-a+crypto+fp16+dotprod"
+        if platform.machine() in ("aarch64", "arm64")
+        else "x86-64-v3"
+    )
+
+
 def _read_os_release() -> Dict[str, str]:
     """
     Best-effort reader for Linux /etc/os-release. Uses platform.freedesktop_os_release()

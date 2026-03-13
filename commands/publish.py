@@ -18,7 +18,12 @@ import click
 import yaml
 
 from commands import globals as g
-from commands.utils import load_configuration, is_qemu_emulated, get_build_jobs
+from commands.utils import (
+    load_configuration,
+    is_qemu_emulated,
+    get_build_jobs,
+    get_default_portable_march,
+)
 from commands.setup import (
     setup,
     get_commit_hash,
@@ -91,14 +96,18 @@ def _validate_target(target_dir: Path) -> Optional[dict]:
 # ============================================================================
 
 
-def _build_linux(build_dir: Path, install_dir: Path, build_type: str):
+def _get_publish_march() -> str:
+    """Resolve the CPU target used for portable publish builds."""
+    return os.environ.get("RAISIN_MARCH", get_default_portable_march())
+
+
+def _build_linux(
+    build_dir: Path,
+    install_dir: Path,
+    build_type: str,
+    raisin_march: str,
+):
     """Run CMake + Ninja build on Linux."""
-    default_march = (
-        "armv8.2-a+crypto+fp16+dotprod"
-        if platform.machine() in ("aarch64", "arm64")
-        else "x86-64-v3"
-    )
-    raisin_march = os.environ.get("RAISIN_MARCH", default_march)
     cmake_cmd = [
         "cmake",
         "-S",
@@ -197,18 +206,20 @@ def _build_package(
     build_dir = paths["build_dir"]
     install_dir = paths["install_dir"]
     target_dir = paths["target_dir"]
+    raisin_march = _get_publish_march()
 
     print(f"\n--- Setting up build for '{target}' ---")
     setup(
         package_name=target,
         build_type=build_type,
         build_dir=str(build_dir),
+        raisin_march=raisin_march,
     )
     build_dir.mkdir(parents=True, exist_ok=True)
 
     print("⚙️  Running CMake...")
     if platform.system().lower() == "linux":
-        _build_linux(build_dir, install_dir, build_type)
+        _build_linux(build_dir, install_dir, build_type, raisin_march)
     else:
         _build_windows(build_dir, install_dir, build_type)
 

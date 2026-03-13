@@ -27,7 +27,12 @@ set(RAISIN_MASTER_INCLUDE @@SCRIPT_DIR@@/generated/include CACHE STRING "include
 set(CMAKE_DEBUG_POSTFIX "_debug_build" CACHE STRING "Debug Postfix for lib, samples and tools")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-set(RAISIN_MARCH "native" CACHE STRING "Target CPU architecture (-march=). Use 'native' for local builds, 'x86-64-v3' for portable x86_64, or a specific arch like 'znver2'.")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    set(RAISIN_DEFAULT_MARCH "armv8.2-a+crypto+fp16+dotprod")
+else()
+    set(RAISIN_DEFAULT_MARCH "x86-64-v3")
+endif()
+set(RAISIN_MARCH "${RAISIN_DEFAULT_MARCH}" CACHE STRING "Target CPU architecture (-march=). Defaults to a portable baseline for the current architecture. Override with values like 'native' or 'znver2' when needed.")
 
 if (NOT WIN32)
     include(CheckCCompilerFlag)

@@ -215,9 +215,9 @@ raisin publish raisin_network --dry-run
 
 #### Cross-Architecture Build Support
 
-When publishing packages, RAISIN uses portable CPU architecture flags instead of `-march=native` to ensure binaries work across different machines within the same architecture family.
+RAISIN uses portable CPU architecture flags by default on Linux so generated and published binaries work across different machines within the same architecture family.
 
-**Default targets for published builds:**
+**Default targets:**
 | Architecture | Default `-march` | Compatible Targets |
 |---|---|---|
 | x86_64 | `x86-64-v3` | Intel (Haswell+), AMD (Zen 2+), Steam Deck |
@@ -225,14 +225,17 @@ When publishing packages, RAISIN uses portable CPU architecture flags instead of
 
 **Override the default with the `RAISIN_MARCH` environment variable:**
 ```bash
-# Use a specific architecture for publishing
+# Use a specific architecture
+RAISIN_MARCH=znver2 raisin build -t release
 RAISIN_MARCH=znver2 raisin publish my_package -t release
 
-# Use native (fastest, but not portable — local dev only)
+# Use native for machine-specific local builds
+RAISIN_MARCH=native raisin setup
+RAISIN_MARCH=native raisin build -t release
 RAISIN_MARCH=native raisin publish my_package -t release
 ```
 
-For local development builds (`raisin build`), `-march=native` is still the default for maximum performance. The portable defaults only apply to `raisin publish`.
+This default applies to `raisin setup`, `raisin build`, `raisin build --install`, and `raisin publish` unless `RAISIN_MARCH` is set explicitly.
 
 > **Warning:** Do not mix packages published with different `-march` flags on the same target machine. While the ABI is compatible, individual binaries may contain instructions unsupported by the target CPU, causing "Illegal instruction" crashes at runtime.
 

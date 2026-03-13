@@ -19,16 +19,18 @@ from commands.utils import (
     check_supported_architecture,
     is_qemu_emulated,
     get_build_jobs,
+    get_default_portable_march,
 )
 
 
-def build_command(build_types, to_install=False):
+def build_command(build_types, to_install=False, raisin_march=None):
     """
     Build the project with CMake and Ninja.
 
     Args:
         build_types (list): List of build types ('debug', 'release')
         to_install (bool): Whether to run install target after build
+        raisin_march (str): Optional CPU target override passed to CMake
     """
     check_supported_architecture()
     script_directory = g.script_directory
@@ -67,6 +69,8 @@ def build_command(build_types, to_install=False):
                     str(build_dir),
                     f"-DCMAKE_BUILD_TYPE={build_type_capitalized}",
                 ]
+                if raisin_march:
+                    cmake_command.append(f"-DRAISIN_MARCH={raisin_march}")
                 # Under QEMU, use compiler wrappers that retry on segfault
                 cmake_env = None
                 use_retry = (
@@ -245,7 +249,9 @@ def build_cli_command(build_types, install, targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup()
+    raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
+
+    setup(raisin_march=raisin_march)
 
     # Then build
     build_types = list(build_types) if build_types else []
@@ -255,4 +261,4 @@ def build_cli_command(build_types, install, targets):
         click.echo("   Example: raisin build --type release")
         sys.exit(1)
 
-    build_command(build_types, to_install=install)
+    build_command(build_types, to_install=install, raisin_march=raisin_march)
