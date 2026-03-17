@@ -329,6 +329,7 @@ struct SerializedMessage
   int64_t timestamp;
   std::vector<unsigned char> msg;
   int32_t id;
+  uint8_t msgType = 0;  // NetworkMessageType (0=PUBLISHER, 1=SUBSCRIBER, 2=SERVICE, 3=CLIENT)
 };
 
 static inline void setBuffer(std::vector<unsigned char> & buffer, const SerializedMessage & val)
