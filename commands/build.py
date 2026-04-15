@@ -190,7 +190,28 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
                     env=developer_env,
                 )
 
+    if to_install and python_executable:
+        _install_pth_file(python_executable, script_directory)
+
     print("🎉🎉🎉 Building process finished successfully.")
+
+
+def _install_pth_file(python_executable, script_directory):
+    """Write raisin.pth into the target Python's site-packages so that
+    raisin Python packages are importable without setting PYTHONPATH."""
+    result = subprocess.run(
+        [python_executable, "-c",
+         "import site; print(site.getsitepackages()[0])"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        print(f"⚠️  Could not determine site-packages for {python_executable}, skipping .pth install")
+        return
+    site_dir = Path(result.stdout.strip())
+    raisin_py_site = Path(script_directory) / "install" / "lib" / "python" / "site-packages"
+    pth_file = site_dir / "raisin.pth"
+    pth_file.write_text(str(raisin_py_site))
+    print(f"📦 Installed {pth_file} → {raisin_py_site}")
 
 
 def stash_pure_cmake_build_dir(script_directory, build_dir, build_type):
@@ -243,7 +264,7 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     help="Install artifacts to install/ directory after building",
 )
 @click.option(
-    "--python",
+    "--raisin-py-exec",
     "python_executable",
     default=None,
     help="Python interpreter for raisin Python packages (default: raisin venv Python)",
