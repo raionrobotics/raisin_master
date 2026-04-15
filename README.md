@@ -193,6 +193,26 @@ raisin build -t release raisin_network
 
 Alternatively, advanced users can use standard CMake commands in the `cmake-build-debug/` or `cmake-build-release/` directories.
 
+#### Using raisin Python Packages (e.g. `raisin_network_py`)
+
+Pass `--raisin-py-exec` to target a specific Python interpreter when building Python extension modules:
+
+```bash
+# Build and install — uses the raisin venv Python by default (~/.venvs/raisin_master/bin/python3)
+raisin build -t release --install
+
+# Target a specific Python interpreter (e.g. your own virtualenv)
+raisin build -t release --install --raisin-py-exec /path/to/myvenv/bin/python3
+```
+
+When `--install` is used, a `raisin.pth` file is automatically written to the target Python's `site-packages` directory. This makes raisin Python packages (such as `raisin_network_py`) importable without setting `PYTHONPATH`:
+
+```python
+import raisin_network_py as rnp
+```
+
+> **Note:** The `.pth` file points to `install/lib/python/site-packages/` inside the raisin_master directory. If you move or rename that directory, re-run `raisin build --install` to refresh the path.
+
 ### 9. Additional Commands
 
 #### Publish a Release
