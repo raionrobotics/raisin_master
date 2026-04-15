@@ -30,7 +30,7 @@ def _resolve_default_python(script_directory):
     env_name = "raisin_master"
     if raisin_script.is_file():
         for line in raisin_script.read_text().splitlines():
-            m = re.match(r'^DEFAULT_ENV_NAME="([^"]+)"', line)
+            m = re.search(r'DEFAULT_ENV_NAME=["\']([^"\']+)["\']', line)
             if m:
                 env_name = m.group(1)
                 break
@@ -157,6 +157,8 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
                     f"-DCMAKE_TOOLCHAIN_FILE={script_directory}/vcpkg/scripts/buildsystems/vcpkg.cmake",
                     "-DRAISIN_RELEASE_BUILD=ON",
                 ]
+                if python_executable:
+                    cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
                 subprocess.run(cmake_command, check=True, text=True, env=developer_env)
 
             except subprocess.CalledProcessError as e:
@@ -201,7 +203,7 @@ def _install_pth_file(python_executable, script_directory):
     raisin Python packages are importable without setting PYTHONPATH."""
     result = subprocess.run(
         [python_executable, "-c",
-         "import site; print(site.getsitepackages()[0])"],
+         "import sysconfig; print(sysconfig.get_path('purelib'))"],
         capture_output=True, text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
@@ -210,8 +212,11 @@ def _install_pth_file(python_executable, script_directory):
     site_dir = Path(result.stdout.strip())
     raisin_py_site = Path(script_directory) / "install" / "lib" / "python" / "site-packages"
     pth_file = site_dir / "raisin.pth"
-    pth_file.write_text(str(raisin_py_site))
-    print(f"📦 Installed {pth_file} → {raisin_py_site}")
+    try:
+        pth_file.write_text(str(raisin_py_site))
+        print(f"📦 Installed {pth_file} → {raisin_py_site}")
+    except (PermissionError, OSError) as e:
+        print(f"⚠️  Could not write .pth file to {site_dir}: {e}")
 
 
 def stash_pure_cmake_build_dir(script_directory, build_dir, build_type):
