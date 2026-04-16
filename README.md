@@ -207,12 +207,6 @@ raisin build -t release --install --raisin-py-exec /path/to/myvenv/bin/python3
 
 When `--install` is used, a `raisin.pth` file is automatically written to the target Python's `site-packages` directory. This makes raisin Python packages (such as `raisin_network_py`) importable without setting `PYTHONPATH`:
 
-```python
-import raisin_network_py as rnp
-```
-
-> **Note:** The `.pth` file points to `install/lib/python/site-packages/` inside the raisin_master directory. If you move or rename that directory, re-run `raisin build --install` to refresh the path.
-
 ### 9. Additional Commands
 
 #### Publish a Release
