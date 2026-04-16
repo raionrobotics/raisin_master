@@ -23,7 +23,22 @@ from commands.utils import (
 )
 
 
-def build_command(build_types, to_install=False, raisin_march=None):
+def _resolve_default_python(script_directory):
+    """Return the raisin venv python3 path, or None if not present."""
+    import re
+    raisin_script = Path(script_directory) / "raisin"
+    env_name = "raisin_master"
+    if raisin_script.is_file():
+        for line in raisin_script.read_text().splitlines():
+            m = re.search(r'DEFAULT_ENV_NAME=["\']([^"\']+)["\']', line)
+            if m:
+                env_name = m.group(1)
+                break
+    candidate = Path.home() / ".venvs" / env_name / "bin" / "python3"
+    return str(candidate) if candidate.is_file() else None
+
+
+def build_command(build_types, to_install=False, raisin_march=None, python_executable=None):
     """
     Build the project with CMake and Ninja.
 
@@ -31,11 +46,15 @@ def build_command(build_types, to_install=False, raisin_march=None):
         build_types (list): List of build types ('debug', 'release')
         to_install (bool): Whether to run install target after build
         raisin_march (str): Optional CPU target override passed to CMake
+        python_executable (str): Python interpreter for raisin Python packages
     """
     check_supported_architecture()
     script_directory = g.script_directory
     developer_env = g.developer_env
     ninja_path = g.ninja_path
+
+    if python_executable is None:
+        python_executable = _resolve_default_python(script_directory)
 
     # Default to debug if no build type specified
     if not build_types or (not "debug" in build_types and not "release" in build_types):
@@ -71,6 +90,8 @@ def build_command(build_types, to_install=False, raisin_march=None):
                 ]
                 if raisin_march:
                     cmake_command.append(f"-DRAISIN_MARCH={raisin_march}")
+                if python_executable:
+                    cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
                 # Under QEMU, use compiler wrappers that retry on segfault
                 cmake_env = None
                 use_retry = (
@@ -136,6 +157,8 @@ def build_command(build_types, to_install=False, raisin_march=None):
                     f"-DCMAKE_TOOLCHAIN_FILE={script_directory}/vcpkg/scripts/buildsystems/vcpkg.cmake",
                     "-DRAISIN_RELEASE_BUILD=ON",
                 ]
+                if python_executable:
+                    cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
                 subprocess.run(cmake_command, check=True, text=True, env=developer_env)
 
             except subprocess.CalledProcessError as e:
@@ -169,7 +192,31 @@ def build_command(build_types, to_install=False, raisin_march=None):
                     env=developer_env,
                 )
 
+    if to_install and python_executable:
+        _install_pth_file(python_executable, script_directory)
+
     print("🎉🎉🎉 Building process finished successfully.")
+
+
+def _install_pth_file(python_executable, script_directory):
+    """Write raisin.pth into the target Python's site-packages so that
+    raisin Python packages are importable without setting PYTHONPATH."""
+    result = subprocess.run(
+        [python_executable, "-c",
+         "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        print(f"⚠️  Could not determine site-packages for {python_executable}, skipping .pth install")
+        return
+    site_dir = Path(result.stdout.strip())
+    raisin_py_site = Path(script_directory) / "install" / "lib" / "python" / "site-packages"
+    pth_file = site_dir / "raisin.pth"
+    try:
+        pth_file.write_text(str(raisin_py_site))
+        print(f"📦 Installed {pth_file} → {raisin_py_site}")
+    except (PermissionError, OSError) as e:
+        print(f"⚠️  Could not write .pth file to {site_dir}: {e}")
 
 
 def stash_pure_cmake_build_dir(script_directory, build_dir, build_type):
@@ -221,8 +268,14 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     is_flag=True,
     help="Install artifacts to install/ directory after building",
 )
+@click.option(
+    "--raisin-py-exec",
+    "python_executable",
+    default=None,
+    help="Python interpreter for raisin Python packages (default: raisin venv Python)",
+)
 @click.argument("targets", nargs=-1)
-def build_cli_command(build_types, install, targets):
+def build_cli_command(build_types, install, python_executable, targets):
     """
     Compile the project using CMake and Ninja.
 
@@ -261,4 +314,4 @@ def build_cli_command(build_types, install, targets):
         click.echo("   Example: raisin build --type release")
         sys.exit(1)
 
-    build_command(build_types, to_install=install, raisin_march=raisin_march)
+    build_command(build_types, to_install=install, raisin_march=raisin_march, python_executable=python_executable)
