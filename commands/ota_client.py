@@ -1068,7 +1068,7 @@ def download_package_at_timestamp(
             "packageName": package_name,
             "packageId": package_id,
             "packageVersion": version,
-            "packageTag": f"v{version.lstrip('v')}",
+            "packageTag": f"v{version}",
             "manifestHash": manifest.get("manifestHash"),
             "blobHash": blob_hash,
             "manifestId": manifest.get("id"),
