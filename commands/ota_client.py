@@ -684,7 +684,9 @@ def _write_install_metadata(install_dir: Path, metadata: Optional[dict]) -> None
         )
         print(f"📝 Recorded OTA metadata: {metadata_path}")
     except OSError as e:
-        print(f"⚠️ Failed to write OTA metadata for '{install_dir.name}': {e}")
+        print(
+            f"⚠️ Failed to write OTA metadata for '{install_dir.absolute().as_posix()}': {e}"
+        )
 
 
 def _extract_and_read_deps(
