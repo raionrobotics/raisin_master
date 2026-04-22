@@ -726,6 +726,41 @@ def _extract_and_read_deps(
     return {"version": version, "dependencies": dependencies}
 
 
+def _build_archive_install_metadata(
+    package_name: str,
+    package_id: str,
+    package_tag: str,
+    version: str,
+    build_type: str,
+    platform_str: str,
+    archive_name: str,
+    archive_id: str,
+    actual_version: Optional[str],
+    requested_archive_version: Optional[str],
+    manifest_hash: Optional[str],
+    blob_hash: Optional[str],
+) -> dict:
+    """Build install metadata for archive-based OTA downloads."""
+    return {
+        "schemaVersion": 1,
+        "source": "archive",
+        "installedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "otaEndpoint": get_ota_endpoint(),
+        "platform": platform_str,
+        "buildType": build_type,
+        "archiveName": archive_name,
+        "archiveId": archive_id,
+        "archiveVersion": actual_version,
+        "requestedArchiveVersion": requested_archive_version,
+        "packageName": package_name,
+        "packageId": package_id,
+        "packageVersion": version,
+        "packageTag": package_tag or f"v{version}",
+        "manifestHash": manifest_hash,
+        "blobHash": blob_hash,
+    }
+
+
 def download_package(
     package_name: str,
     spec_str: str,
@@ -816,24 +851,20 @@ def download_package(
     if not _download_package_blob(archive_id, pkg_id, package_name, download_file):
         return None
 
-    install_metadata = {
-        "schemaVersion": 1,
-        "source": "archive",
-        "installedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "otaEndpoint": get_ota_endpoint(),
-        "platform": platform_str,
-        "buildType": build_type,
-        "archiveName": archive_name,
-        "archiveId": archive_id,
-        "archiveVersion": actual_version,
-        "requestedArchiveVersion": archive_version,
-        "packageName": package_name,
-        "packageId": pkg_id,
-        "packageVersion": version,
-        "packageTag": tag or f"v{version}",
-        "manifestHash": best_pkg.get("manifestHash"),
-        "blobHash": best_pkg.get("blobHash"),
-    }
+    install_metadata = _build_archive_install_metadata(
+        package_name=package_name,
+        package_id=pkg_id,
+        package_tag=tag,
+        version=version,
+        build_type=build_type,
+        platform_str=platform_str,
+        archive_name=archive_name,
+        archive_id=archive_id,
+        actual_version=actual_version,
+        requested_archive_version=archive_version,
+        manifest_hash=best_pkg.get("manifestHash"),
+        blob_hash=best_pkg.get("blobHash"),
+    )
 
     return _extract_and_read_deps(
         download_file,
@@ -913,24 +944,20 @@ def download_all_from_archive(
         if not _download_package_blob(archive_id, pkg_id, name, download_file):
             continue
 
-        install_metadata = {
-            "schemaVersion": 1,
-            "source": "archive",
-            "installedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "otaEndpoint": get_ota_endpoint(),
-            "platform": platform_str,
-            "buildType": build_type,
-            "archiveName": archive_name,
-            "archiveId": archive_id,
-            "archiveVersion": actual_version,
-            "requestedArchiveVersion": archive_version,
-            "packageName": name,
-            "packageId": pkg_id,
-            "packageVersion": version,
-            "packageTag": tag or f"v{version}",
-            "manifestHash": pkg.get("manifestHash"),
-            "blobHash": pkg.get("blobHash"),
-        }
+        install_metadata = _build_archive_install_metadata(
+            package_name=name,
+            package_id=pkg_id,
+            package_tag=tag,
+            version=version,
+            build_type=build_type,
+            platform_str=platform_str,
+            archive_name=archive_name,
+            archive_id=archive_id,
+            actual_version=actual_version,
+            requested_archive_version=archive_version,
+            manifest_hash=pkg.get("manifestHash"),
+            blob_hash=pkg.get("blobHash"),
+        )
 
         result = _extract_and_read_deps(
             download_file,
