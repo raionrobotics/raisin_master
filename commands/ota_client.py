@@ -51,6 +51,9 @@ DEFAULT_OTA_ENDPOINT = "https://raisin-ota-api.raionrobotics.com/api"
 # Persistent token cache file name (stored in script_directory)
 _TOKEN_CACHE_FILE = ".ota_token_cache.json"
 
+# Per-install metadata file written after OTA extraction
+_INSTALL_METADATA_FILE = "ota-install.json"
+
 
 # ============================================================================
 # Configuration
@@ -665,11 +668,33 @@ def _download_package_blob(
     return _stream_download(url, download_path, package_name)
 
 
+def _write_install_metadata(install_dir: Path, metadata: Optional[dict]) -> None:
+    """Persist OTA install metadata next to the extracted package.
+
+    This is written after extraction, so it does not affect the archive blob hash.
+    """
+    if not metadata:
+        return
+
+    metadata_path = install_dir / _INSTALL_METADATA_FILE
+    try:
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(f"📝 Recorded OTA metadata: {metadata_path}")
+    except OSError as e:
+        print(
+            f"⚠️ Failed to write OTA metadata for '{install_dir.absolute().as_posix()}': {e}"
+        )
+
+
 def _extract_and_read_deps(
     download_file: Path,
     install_dir: Path,
     package_name: str,
     version: str,
+    install_metadata: Optional[dict] = None,
 ) -> Optional[dict]:
     """Extract downloaded package and read dependencies.
 
@@ -690,6 +715,7 @@ def _extract_and_read_deps(
         return None
 
     print(f"✅ Successfully installed '{package_name}=={version}' from OTA server.")
+    _write_install_metadata(install_dir, install_metadata)
 
     # Read dependencies from release.yaml
     dependencies = []
@@ -700,6 +726,41 @@ def _extract_and_read_deps(
             dependencies = release_info.get("dependencies", [])
 
     return {"version": version, "dependencies": dependencies}
+
+
+def _build_archive_install_metadata(
+    package_name: str,
+    package_id: str,
+    package_tag: str,
+    version: str,
+    build_type: str,
+    platform_str: str,
+    archive_name: str,
+    archive_id: str,
+    actual_version: Optional[str],
+    requested_archive_version: Optional[str],
+    manifest_hash: Optional[str],
+    blob_hash: Optional[str],
+) -> dict:
+    """Build install metadata for archive-based OTA downloads."""
+    return {
+        "schemaVersion": 1,
+        "source": "archive",
+        "installedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "otaEndpoint": get_ota_endpoint(),
+        "platform": platform_str,
+        "buildType": build_type,
+        "archiveName": archive_name,
+        "archiveId": archive_id,
+        "archiveVersion": actual_version,
+        "requestedArchiveVersion": requested_archive_version,
+        "packageName": package_name,
+        "packageId": package_id,
+        "packageVersion": version,
+        "packageTag": package_tag or f"v{version}",
+        "manifestHash": manifest_hash,
+        "blobHash": blob_hash,
+    }
 
 
 def download_package(
@@ -792,7 +853,28 @@ def download_package(
     if not _download_package_blob(archive_id, pkg_id, package_name, download_file):
         return None
 
-    return _extract_and_read_deps(download_file, install_dir, package_name, version)
+    install_metadata = _build_archive_install_metadata(
+        package_name=package_name,
+        package_id=pkg_id,
+        package_tag=tag,
+        version=version,
+        build_type=build_type,
+        platform_str=platform_str,
+        archive_name=archive_name,
+        archive_id=archive_id,
+        actual_version=actual_version,
+        requested_archive_version=archive_version,
+        manifest_hash=best_pkg.get("manifestHash"),
+        blob_hash=best_pkg.get("blobHash"),
+    )
+
+    return _extract_and_read_deps(
+        download_file,
+        install_dir,
+        package_name,
+        version,
+        install_metadata=install_metadata,
+    )
 
 
 def download_all_from_archive(
@@ -864,7 +946,28 @@ def download_all_from_archive(
         if not _download_package_blob(archive_id, pkg_id, name, download_file):
             continue
 
-        result = _extract_and_read_deps(download_file, install_dir, name, version)
+        install_metadata = _build_archive_install_metadata(
+            package_name=name,
+            package_id=pkg_id,
+            package_tag=tag,
+            version=version,
+            build_type=build_type,
+            platform_str=platform_str,
+            archive_name=archive_name,
+            archive_id=archive_id,
+            actual_version=actual_version,
+            requested_archive_version=archive_version,
+            manifest_hash=pkg.get("manifestHash"),
+            blob_hash=pkg.get("blobHash"),
+        )
+
+        result = _extract_and_read_deps(
+            download_file,
+            install_dir,
+            name,
+            version,
+            install_metadata=install_metadata,
+        )
         if result:
             results[name] = result
 
@@ -959,7 +1062,8 @@ def download_package_at_timestamp(
             return None
 
         blob_hash = manifest.get("blobHash")
-        version = manifest.get("version", "0.0.0")
+        raw_version = manifest.get("version", "0.0.0")
+        version = raw_version.lstrip("v") if raw_version else "0.0.0"
 
         if not blob_hash:
             print(f"⚠️ Manifest for '{package_name}' has no blob hash")
@@ -982,7 +1086,31 @@ def download_package_at_timestamp(
         if not _download_blob_by_hash(blob_hash, download_file):
             return None
 
-        return _extract_and_read_deps(download_file, install_dir, package_name, version)
+        install_metadata = {
+            "schemaVersion": 1,
+            "source": "timestamp",
+            "installedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "otaEndpoint": get_ota_endpoint(),
+            "platform": platform_str,
+            "buildType": build_type,
+            "requestedTimestamp": timestamp,
+            "packageName": package_name,
+            "packageId": package_id,
+            "packageVersion": version,
+            "packageTag": f"v{version}",
+            "manifestHash": manifest.get("manifestHash"),
+            "blobHash": blob_hash,
+            "manifestId": manifest.get("id"),
+            "manifestCreatedAt": manifest.get("createdAt"),
+        }
+
+        return _extract_and_read_deps(
+            download_file,
+            install_dir,
+            package_name,
+            version,
+            install_metadata=install_metadata,
+        )
 
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:

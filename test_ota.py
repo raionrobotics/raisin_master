@@ -726,9 +726,30 @@ class TestDownload(unittest.TestCase):
 
             result = ota.download_package("mypkg", "", "release", install_base)
 
+            metadata_path = (
+                install_base
+                / "mypkg"
+                / "linux"
+                / "22.04"
+                / "x86_64"
+                / "release"
+                / ota._INSTALL_METADATA_FILE
+            )
+            self.assertTrue(metadata_path.is_file())
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
         self.assertIsNotNone(result)
         self.assertEqual(result["version"], "1.2.0")
         self.assertIn("depA", result["dependencies"])
+        self.assertEqual(metadata["source"], "archive")
+        self.assertEqual(metadata["archiveId"], "arch-1")
+        self.assertEqual(metadata["archiveVersion"], "v2024.01")
+        self.assertEqual(metadata["packageId"], "p1")
+        self.assertEqual(metadata["packageVersion"], "1.2.0")
+        self.assertEqual(metadata["packageTag"], "v1.2.0")
+        self.assertEqual(metadata["manifestHash"], "a" * 64)
+        self.assertEqual(metadata["requestedArchiveVersion"], None)
+        self.assertIn("installedAt", metadata)
 
     @patch("commands.ota_client._download_package_blob", return_value=True)
     @patch("commands.ota_client._fetch_archive_manifest")
@@ -903,17 +924,46 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
                 "mypkg", "2024-01-15T10:00:00Z", "release", install_base
             )
 
+            metadata_path = (
+                install_base
+                / "mypkg"
+                / "linux"
+                / "22.04"
+                / "x86_64"
+                / "release"
+                / ota._INSTALL_METADATA_FILE
+            )
+            self.assertTrue(metadata_path.is_file())
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
         self.assertIsNotNone(result)
         self.assertEqual(result["version"], "1.5.0")
         self.assertIn("depB", result["dependencies"])
+        self.assertEqual(metadata["source"], "timestamp")
+        self.assertEqual(metadata["otaEndpoint"], "https://ota.example.com")
+        self.assertEqual(metadata["requestedTimestamp"], "2024-01-15T10:00:00Z")
+        self.assertEqual(metadata["packageId"], "pkg-uuid")
+        self.assertEqual(metadata["packageVersion"], "1.5.0")
+        self.assertEqual(metadata["blobHash"], "abc123" * 10 + "abcd")
+        self.assertIn("installedAt", metadata)
 
     @patch("commands.ota_client._download_package_blob", return_value=True)
     @patch("commands.ota_client._fetch_archive_manifest")
     def test_download_all_from_archive(self, mock_manifest, mock_blob):
         """Download all packages from an archive."""
         packages = [
-            {"packageName": "pkg1", "tagName": "v1.0.0", "packageId": "p1"},
-            {"packageName": "pkg2", "tagName": "v2.0.0", "packageId": "p2"},
+            {
+                "packageName": "pkg1",
+                "tagName": "v1.0.0",
+                "packageId": "p1",
+                "manifestHash": "a" * 64,
+            },
+            {
+                "packageName": "pkg2",
+                "tagName": "v2.0.0",
+                "packageId": "p2",
+                "manifestHash": "b" * 64,
+            },
         ]
         mock_manifest.return_value = (packages, "arch-1", "v2024.01")
 
@@ -931,11 +981,27 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
 
             result = ota.download_all_from_archive("release", install_base)
 
+            metadata_path = (
+                install_base
+                / "pkg1"
+                / "linux"
+                / "22.04"
+                / "x86_64"
+                / "release"
+                / ota._INSTALL_METADATA_FILE
+            )
+            self.assertTrue(metadata_path.is_file())
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
         self.assertEqual(len(result), 2)
         self.assertIn("pkg1", result)
         self.assertIn("pkg2", result)
         self.assertEqual(result["pkg1"]["version"], "1.0.0")
         self.assertEqual(result["pkg2"]["version"], "2.0.0")
+        self.assertEqual(metadata["source"], "archive")
+        self.assertEqual(metadata["archiveVersion"], "v2024.01")
+        self.assertEqual(metadata["packageId"], "p1")
+        self.assertEqual(metadata["manifestHash"], "a" * 64)
 
     @patch(
         "commands.ota_client._fetch_archive_manifest",
