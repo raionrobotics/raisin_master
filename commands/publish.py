@@ -91,6 +91,59 @@ def _validate_target(target_dir: Path) -> Optional[dict]:
         return None
 
 
+def _parse_dependency_name(dependency_spec: str) -> Optional[str]:
+    """Extract the package name from a release.yaml dependency spec."""
+    match = re.match(r"^\s*([a-zA-Z0-9_.-]+)", str(dependency_spec))
+    return match.group(1) if match else None
+
+
+def _get_release_install_prefix(package_name: str, build_type: str) -> Path:
+    """Return the expected release/install prefix for one package."""
+    return (
+        Path(g.script_directory)
+        / "release"
+        / "install"
+        / package_name
+        / g.os_type
+        / g.os_version
+        / g.architecture
+        / build_type
+    )
+
+
+def _get_missing_publish_dependencies(
+    details: dict, build_type: str
+) -> list[tuple[str, Path]]:
+    """Return declared dependencies that are not installed as release artifacts."""
+    missing = []
+    for dependency_spec in details.get("dependencies") or []:
+        package_name = _parse_dependency_name(dependency_spec)
+        if not package_name:
+            continue
+
+        prefix = _get_release_install_prefix(package_name, build_type)
+        if not prefix.is_dir() or not (prefix / "release.yaml").is_file():
+            missing.append((str(dependency_spec), prefix))
+
+    return missing
+
+
+def _validate_publish_dependencies(details: dict, build_type: str) -> bool:
+    """Ensure publish builds use installed release artifacts for dependencies."""
+    missing = _get_missing_publish_dependencies(details, build_type)
+    if not missing:
+        return True
+
+    print("❌ Error: Publish dependencies are not installed as release artifacts.")
+    print(
+        "   Run `raisin install` for the dependencies in release.yaml before "
+        "publishing, so the build does not depend on mutable src checkouts."
+    )
+    for dependency_spec, prefix in missing:
+        print(f"   - {dependency_spec}: missing {prefix / 'release.yaml'}")
+    return False
+
+
 # ============================================================================
 # Build
 # ============================================================================
@@ -101,11 +154,41 @@ def _get_publish_march() -> str:
     return os.environ.get("RAISIN_MARCH", get_default_portable_march())
 
 
+def _get_release_install_prefixes(target: str, build_type: str) -> list[Path]:
+    """Return installed release package prefixes available to a publish build."""
+    release_install_root = Path(g.script_directory) / "release" / "install"
+    if not release_install_root.is_dir():
+        return []
+
+    prefixes = []
+    for child in sorted(release_install_root.iterdir()):
+        if child.name == target:
+            continue
+
+        prefix = _get_release_install_prefix(child.name, build_type)
+        if prefix.is_dir():
+            prefixes.append(prefix)
+
+    return prefixes
+
+
+def _get_publish_cmake_prefix_path(
+    target: str,
+    build_type: str,
+    install_dir: Path,
+) -> str:
+    """Build the CMAKE_PREFIX_PATH used while publishing one package."""
+    prefixes = [Path(g.script_directory) / "install", install_dir]
+    prefixes.extend(_get_release_install_prefixes(target, build_type))
+    return ";".join(str(prefix) for prefix in prefixes)
+
+
 def _build_linux(
     build_dir: Path,
     install_dir: Path,
     build_type: str,
     raisin_march: str,
+    cmake_prefix_path: str,
 ):
     """Run CMake + Ninja build on Linux."""
     cmake_cmd = [
@@ -117,6 +200,7 @@ def _build_linux(
         "-B",
         str(build_dir),
         f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+        f"-DCMAKE_PREFIX_PATH={cmake_prefix_path}",
         f"-DCMAKE_BUILD_TYPE={build_type}",
         "-DRAISIN_RELEASE_BUILD=ON",
         f"-DRAISIN_MARCH={raisin_march}",
@@ -159,7 +243,12 @@ def _build_linux(
                 raise
 
 
-def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
+def _build_windows(
+    build_dir: Path,
+    install_dir: Path,
+    build_type: str,
+    cmake_prefix_path: str,
+):
     """Run CMake + build on Windows."""
     cmake_cmd = [
         "cmake",
@@ -171,6 +260,7 @@ def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
         str(build_dir),
         f"-DCMAKE_TOOLCHAIN_FILE={g.script_directory}/vcpkg/scripts/buildsystems/vcpkg.cmake",
         f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+        f"-DCMAKE_PREFIX_PATH={cmake_prefix_path}",
         "-DRAISIN_RELEASE_BUILD=ON",
     ]
     if g.ninja_path:
@@ -194,6 +284,95 @@ def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
     )
 
 
+def _discover_target_package_names(target_dir: Path) -> set[str]:
+    """Return CMake/interface package names owned by a source repo."""
+    package_names: set[str] = set()
+
+    for root, dirs, files in os.walk(target_dir):
+        root_path = Path(root)
+        dirs[:] = [
+            d
+            for d in dirs
+            if d
+            not in {
+                ".git",
+                "build",
+                "cmake-build-debug",
+                "cmake-build-release",
+                "generated",
+                "install",
+                "release",
+                "temp",
+                "__pycache__",
+            }
+        ]
+
+        if "CMakeLists.txt" in files:
+            package_names.add(root_path.name)
+            is_release_repo_root = root_path == target_dir or (
+                root_path.parent == target_dir
+                and (root_path / "release.yaml").is_file()
+            )
+            if not is_release_repo_root:
+                dirs.clear()
+            continue
+
+        if root_path.name in {"msg", "srv", "action"}:
+            expected_suffix = f".{root_path.name}"
+            if any(name.endswith(expected_suffix) for name in files):
+                package_names.add(root_path.parent.name)
+            dirs.clear()
+
+    return package_names
+
+
+def _prune_non_target_publish_artifacts(target_dir: Path, install_dir: Path) -> None:
+    """Remove installed artifacts that are known to belong to other source repos."""
+    package_names = _discover_target_package_names(target_dir)
+    if not package_names:
+        return
+
+    source_package_names = _discover_target_package_names(target_dir.parent)
+    non_target_source_package_names = source_package_names - package_names
+
+    pruned = []
+    generated_packages_to_prune = set()
+    for rel_root in ("messages", "generated/include"):
+        root = install_dir / rel_root
+        if not root.is_dir():
+            continue
+
+        for child in root.iterdir():
+            if not child.is_dir() or child.name in package_names:
+                continue
+
+            generated_packages_to_prune.add(child.name)
+            shutil.rmtree(child)
+            pruned.append(child.relative_to(install_dir).as_posix())
+
+    include_root = install_dir / "include"
+    if include_root.is_dir():
+        include_packages_to_prune = (
+            generated_packages_to_prune | non_target_source_package_names
+        )
+        for child in include_root.iterdir():
+            if (
+                not child.is_dir()
+                or child.name in package_names
+                or child.name not in include_packages_to_prune
+            ):
+                continue
+
+            shutil.rmtree(child)
+            pruned.append(child.relative_to(install_dir).as_posix())
+
+    if pruned:
+        print(
+            f"🧹 Pruned {len(pruned)} non-target publish artifact directories from "
+            f"'{install_dir}'."
+        )
+
+
 def _build_package(
     target: str,
     build_type: str,
@@ -207,6 +386,11 @@ def _build_package(
     install_dir = paths["install_dir"]
     target_dir = paths["target_dir"]
     raisin_march = _get_publish_march()
+    cmake_prefix_path = _get_publish_cmake_prefix_path(
+        target,
+        build_type,
+        install_dir,
+    )
 
     print(f"\n--- Setting up build for '{target}' ---")
     setup(
@@ -219,11 +403,18 @@ def _build_package(
 
     print("⚙️  Running CMake...")
     if platform.system().lower() == "linux":
-        _build_linux(build_dir, install_dir, build_type, raisin_march)
+        _build_linux(
+            build_dir,
+            install_dir,
+            build_type,
+            raisin_march,
+            cmake_prefix_path,
+        )
     else:
-        _build_windows(build_dir, install_dir, build_type)
+        _build_windows(build_dir, install_dir, build_type, cmake_prefix_path)
 
     print(f"✅ Build for '{target}' complete!")
+    _prune_non_target_publish_artifacts(target_dir, install_dir)
 
     # Copy release.yaml and install_dependencies.sh to install dir
     install_dir.mkdir(parents=True, exist_ok=True)
@@ -534,6 +725,8 @@ def publish(
 
     print(f"✅ Found release file for '{target}'.")
     version = details.get("version", "0.0.0")
+    if not _validate_publish_dependencies(details, build_type):
+        return
 
     # Check user type
     _, _, user_type, _, _ = load_configuration()
