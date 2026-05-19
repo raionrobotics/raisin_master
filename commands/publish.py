@@ -208,6 +208,11 @@ def _build_package(
     target_dir = paths["target_dir"]
     raisin_march = _get_publish_march()
 
+    # Clean stale build directory to prevent cached cmake paths from
+    # interfering (e.g., system zstd vs install/ zstd).
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+
     print(f"\n--- Setting up build for '{target}' ---")
     setup(
         package_name=target,
