@@ -194,6 +194,90 @@ def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
     )
 
 
+def _discover_target_package_names(target_dir: Path) -> set[str]:
+    """Return CMake/interface package names owned by a source repo."""
+    package_names: set[str] = set()
+
+    for root, dirs, files in os.walk(target_dir):
+        root_path = Path(root)
+        dirs[:] = [
+            d
+            for d in dirs
+            if d
+            not in {
+                ".git",
+                "build",
+                "cmake-build-debug",
+                "cmake-build-release",
+                "generated",
+                "install",
+                "release",
+                "temp",
+                "__pycache__",
+            }
+        ]
+
+        if "CMakeLists.txt" in files:
+            package_names.add(root_path.name)
+            dirs.clear()
+            continue
+
+        if root_path.name in {"msg", "srv", "action"}:
+            expected_suffix = f".{root_path.name}"
+            if any(name.endswith(expected_suffix) for name in files):
+                package_names.add(root_path.parent.name)
+            dirs.clear()
+
+    return package_names
+
+
+def _prune_non_target_publish_artifacts(target_dir: Path, install_dir: Path) -> None:
+    """Remove installed artifacts that are known to belong to other source repos."""
+    package_names = _discover_target_package_names(target_dir)
+    if not package_names:
+        return
+
+    source_package_names = _discover_target_package_names(target_dir.parent)
+    non_target_source_package_names = source_package_names - package_names
+
+    pruned = []
+    generated_packages_to_prune = set()
+    for rel_root in ("messages", "generated/include"):
+        root = install_dir / rel_root
+        if not root.is_dir():
+            continue
+
+        for child in root.iterdir():
+            if not child.is_dir() or child.name in package_names:
+                continue
+
+            generated_packages_to_prune.add(child.name)
+            shutil.rmtree(child)
+            pruned.append(child.relative_to(install_dir).as_posix())
+
+    include_root = install_dir / "include"
+    if include_root.is_dir():
+        include_packages_to_prune = (
+            generated_packages_to_prune | non_target_source_package_names
+        )
+        for child in include_root.iterdir():
+            if (
+                not child.is_dir()
+                or child.name in package_names
+                or child.name not in include_packages_to_prune
+            ):
+                continue
+
+            shutil.rmtree(child)
+            pruned.append(child.relative_to(install_dir).as_posix())
+
+    if pruned:
+        print(
+            f"🧹 Pruned {len(pruned)} non-target publish artifact directories from "
+            f"'{install_dir}'."
+        )
+
+
 def _build_package(
     target: str,
     build_type: str,
@@ -224,6 +308,7 @@ def _build_package(
         _build_windows(build_dir, install_dir, build_type)
 
     print(f"✅ Build for '{target}' complete!")
+    _prune_non_target_publish_artifacts(target_dir, install_dir)
 
     # Copy release.yaml and install_dependencies.sh to install dir
     install_dir.mkdir(parents=True, exist_ok=True)
