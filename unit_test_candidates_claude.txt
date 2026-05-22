@@ -1,0 +1,870 @@
+================================================================================
+ RAISIN 패키지 단위 테스트 / 통합 테스트 후보 정리 (개정판)
+ 작성일: 2026-05-22
+ 비고: 소스코드 실측 기반으로 원본 대비 수정·삭제·추가함.
+       주요 변경 사유는 각 항목 옆에 [수정], [삭제→이유], [신규] 표기.
+================================================================================
+
+패키지 목록:
+  [플러그인] autonomy, charging, d430/d435/d455, fast_lio, grid_mapping,
+             iekf, livox_lidar, ouster, ublox, voxel_mapping
+  [네비게이션] raisin_navigation_plugin
+  [GUI]        raisin_gui_map1_window
+  [TF]         raisin_tf
+
+================================================================================
+ 1. raisin_autonomy_plugin
+================================================================================
+주요 소스:
+  - autonomy_plugin.cpp
+  - map_graph.hpp (헤더 온리: A*, 그래프 탐색 유틸 전체 포함)
+  - localPlanner.cpp / pathFollower.cpp / terrainAnalysis.cpp
+
+---------- 단위 테스트 후보 ----------
+
+[1-U-1] A* 알고리즘 정확성 (map_graph::AStar / AStarWithAdjacency)
+  - 시작 == 목표 → 길이 1 경로 (자기 자신만)
+  - 알려진 그래프에서 최단 경로 검증
+  - 목표에 도달 불가 → 빈 경로 반환
+  - 비대칭 가중치 그래프에서 방향성 준수 확인
+
+[1-U-2] 그래프 투영 (map_graph::findNearestPointOnGraph /
+                     map_graph::projectPointOnSegment)
+  - 세그먼트 위의 점 → 투영 거리 ≈ 0
+  - 세그먼트 밖의 점 → 가장 가까운 끝점 반환
+  - 퇴화된 엣지(길이 = 0) 처리
+  - T_MIN(0.01) / T_MAX(0.99) 클리핑 확인:
+      세그먼트 끝점 바로 옆 점 → t가 클리핑되어 끝점 반환
+  - GRAPH_DISTANCE_THRESHOLD(5.0m) 밖의 점 → 검색 제외 확인
+
+[1-U-3] 핵심 경로 정제 (map_graph::refineWaypointsWithAStar)  [신규]
+  - 단순 2-waypoint 세트 → A* 경로 포함 확인
+  - 임시 투영 노드가 최종 결과에 남지 않음
+  - 연속 세그먼트 이음부 중복 노드 스킵 확인
+  - waypoint 수 MAX_WAYPOINTS(1000) 초과 입력 → 안전 처리
+
+[1-U-4] 파일 경로 검증 (isValidFileName)  [수정: 원본 1-U-5를 함수 단위로 재정의]
+  - 경로 탐색 공격 방지 ("../../../etc/passwd", "./sub/../..")
+  - 정상 파일명 통과 확인
+  - 빈 문자열 처리
+
+---------- 통합 테스트 후보 ----------
+
+[1-I-1] Waypoint 추적 상태 머신
+  - IDLE → MOVING → REACHED → 다음 waypoint 전환 흐름
+  - laps 카운터 감소 및 순환 주행
+  - infiniteLoop_ = true 시 마지막 waypoint 후 index 0 복귀
+
+[1-I-2] GPS/로컬 혼합 좌표 프레임 다중 waypoint 이동  [수정]
+  - 전제: odomLLAReceived_ AND yawOffsetReceived_ 모두 true 상태 필요
+  - GPS 프레임 waypoint와 로컬 프레임 waypoint 혼합 세트 처리
+  - 두 플래그 중 하나만 true인 상태에서의 폴백 동작 확인
+
+[1-I-3] 지형 포인트 클라우드 처리 파이프라인
+  - 센서 입력 → terrainAnalysis → 경로 수정 흐름
+
+[1-I-4] 파일 영속성 (저장/로드 사이클)
+  - saveWaypointsFile → 프로세스 재시작 → loadWaypointsFile → 동일 결과
+
+
+================================================================================
+ 2. raisin_charging_plugin
+================================================================================
+주요 소스:
+  - charging_plugin.cpp
+  - ChargingState enum: RAISING_HEIGHT, MOVING_TO_TARGET1/2/3,
+                         LOWERING_HEIGHT, DONE
+
+---------- 단위 테스트 후보 ----------
+
+[2-U-1] 좌표계 변환 검증 (getRobotPose 내 OpenCV→RaiSim 변환)  [수정]
+  - 원본의 "FOV→카메라 행렬"은 실제 코드에 존재하지 않음.
+    실제 테스트 대상: raisim_x=opencv_z, raisim_y=-opencv_x, raisim_z=-opencv_y
+    매핑의 수학적 정확성 (알려진 회전/변환 벡터 → Isometry3d 비교)
+  - yaw 추출: atan2(R(0,0), -R(2,0)) 공식이 로봇 컨벤션과 일치하는지 검증
+
+[2-U-2] ArUco 마커 포즈 추출
+  - 주어진 회전/변환 벡터 → Isometry3d 변환 정확도
+  - 마커 미감지(detectMarkers 빈 결과) → false 반환
+
+[2-U-3] 임계값 비교 로직
+  - 위치 오차 < 임계값 → 상태 전환 카운터 증가
+  - 방향 오차 < 임계값 → 상태 전환 카운터 증가
+  - 두 조건 모두 만족해야 카운터 증가함을 확인
+  - 조건 불만족 시 카운터 리셋 확인  [신규]
+
+[2-U-4] 각도 정규화 (yaw 오차 래핑)  [수정: 원본 2-U-3 재정의]
+  - 실제 구현: atan2(sin(yawError), cos(yawError)) 인라인 처리
+  - 비고: 독립 함수가 없으므로 래핑 로직을 별도 헬퍼로 추출 후 테스트 권장
+  - [-π, π] 범위 래핑: ±π, 0, 2π 경계값 확인
+
+[2-U-5] PID 유사 속도 명령 계산
+  - gainX * xErrorLocal → clamp(-maxLinVel, maxLinVel) 확인
+  - 오차 = 0 → 속도 = 0
+  - 로컬 프레임 변환: xErrorLocal = dx*cos(yaw) + dy*sin(yaw) 수학 검증  [신규]
+
+---------- 통합 테스트 후보 ----------
+
+[2-I-1] 도킹 상태 머신 전체 흐름
+  - RAISING_HEIGHT → TARGET1 → TARGET2 → TARGET3 → LOWERING_HEIGHT → DONE
+
+[2-I-2] 마커 소실 복구
+  - ArUco 마커가 일시적으로 사라질 때 insideThresholdCounter_ 리셋 확인
+  - 카운터 리셋 → 상태 전환 지연 → 마커 재감지 → 카운터 재누적
+
+[2-I-3] 높이 컨트롤러 통합
+  - loadHeightController() → lowerHeight() 호출 시 물리적으로 일관된 명령 전송
+  - lowerHeight()에서 body_height가 minimum 이하로 내려가지 않는지 확인  [신규]
+
+[2-I-4] 속도 명령 발행 타이밍
+  - 각 상태에서 제어 루프 주기에 맞는 명령 발행 확인
+
+
+================================================================================
+ 3. raisin_d430_plugin / raisin_d435_plugin / raisin_d455_plugin
+================================================================================
+주요 소스 (각 모델 동일 구조):
+  - d4XX_process_plugin.cpp / d4XX_process_runner.cpp
+  - DepthCameraSimulation (시뮬레이션 렌더링)
+
+---------- 단위 테스트 후보 ----------
+
+[3-U-1] 프로세스 라이프사이클 상태 검증
+  - init() 후 프로세스 실행 중 확인
+  - shouldTerminate() 신호 처리 후 종료
+
+[3-U-2] FFMPEG 압축 이미지 재발행 로직
+  - 이미지 수신 → 인코딩 → 재발행 경로 단위 검증
+
+---------- 통합 테스트 후보 ----------
+
+[3-I-1] 실/시뮬 모드 전환
+  - 시뮬레이션 모드에서 합성 깊이 프레임 생성 확인
+  - 실 하드웨어 모드에서 드라이버 초기화 및 스트림 수신
+
+[3-I-2] 프로세스 간 통신 (IPC)
+  - 플러그인 ↔ 드라이버 프로세스 간 이미지 토픽 흐름
+
+[3-I-3] 프레임 레이트 일관성
+  - 설정된 FPS와 실제 발행 주기 비교
+
+[3-I-4] 비정상 종료 복구
+  - 드라이버 프로세스 크래시 → 플러그인 재시작 여부
+
+
+================================================================================
+ 4. raisin_fast_lio_plugin
+================================================================================
+주요 소스:
+  - fast_lio_plugin.cpp
+  - ikd_Tree.cpp (증분식 KD-tree)
+  - IKFoM_toolkit/ (ESEKF 매니폴드 툴킷)
+  - IMU_Processing.hpp, preprocess.cpp
+  - global_localization.cpp, gps_align.cpp, transform_fusion.cpp
+  - test/test_map_services.cpp (기존 테스트: 10M 포인트 I/O, 다운샘플링,
+                                멀티스레드 동시 접근 커버됨)
+
+---------- 단위 테스트 후보 ----------
+
+[4-U-1] 포인트 좌표 변환 (pointBodyToWorld_ikfom)
+  - 알려진 state에서 body → world 좌표 변환 수학 검증
+  - extrinsic 오프셋 적용 정확도
+
+[4-U-2] ESEKF 매니폴드 상태 갱신  [수정: 픽스처 구성 주의사항 추가]
+  - 전제: state_ikfom / input_ikfom 타입 초기화 필요 (IKFoM_toolkit/ 헤더 포함)
+  - 상태 전파 f(x, u) 수치적 정확도
+  - 공분산 전파 양정치(PD) 유지 확인
+  - 측정 갱신 후 공분산 감소 확인
+  - Correct() Joseph 폼 갱신 후 P 대칭성 유지  [신규]
+
+[4-U-3] IKD-tree 연산
+  - 삽입 후 최근접 이웃 검색 정확도
+  - 삭제 후 검색 결과 갱신
+  - 대규모 포인트 삽입 시 트리 균형 유지
+
+[4-U-4] GPS-LIO 정렬 SVD 계산 (GpsAlign::align3DPoints)  [수정: 원본 4-U-6 강화]
+  - 알려진 GPS/LIO 쌍으로 SVD 기반 강체 변환 계산 검증
+  - 점이 3개 미만일 때 처리 확인
+  - 무작위 회전/이동 적용 후 복원 정확도 (왕복 검증)
+
+[4-U-5] TransformFusion 합성 (TransformFusion::advance)  [신규]
+  - T_map_base = T_map_odom * T_odom_base 행렬 합성 수학 검증
+  - 단위행렬 입력 → 단위행렬 출력
+
+[4-U-6] 지도 파일 I/O 및 경계 조건  [수정: 원본 4-U-5 재정의]
+  - 비고: test_map_services.cpp가 기본 저장/재로드를 이미 커버함.
+    추가 테스트 대상:
+    - MAP_MAX_POINTS(50M) 경계에서 자동 다운샘플링 분기 확인
+    - MAP_RESERVE_POINTS(5M) 경계에서 get_map 다운샘플링 트리거 확인
+    - 경로 탐색 공격 방지 (isValidFileName)
+
+[4-U-7] 복셀 다운샘플링  [삭제: PCL VoxelGrid는 서드파티. test_map_services.cpp
+                           가 이미 커버. 별도 단위 테스트 불필요]
+
+---------- 통합 테스트 후보 ----------
+
+[4-I-1] LiDAR-IMU 융합 파이프라인
+  - 시뮬 LiDAR + IMU 데이터 → 오도메트리 추정 → 드리프트 허용 범위 내 확인
+
+[4-I-2] 전역 재지역화 (FastLioLocalization::globalLocalization)
+  - 저장된 지도 로드 → 초기 위치 오차 있는 상태에서 ICP 수렴 확인
+  - ICP 비수렴 케이스 (맵과 전혀 다른 환경) → 실패 감지
+
+[4-I-3] 그래프 파일 저장/로드 영속성
+  - save_graph_file → 재시작 → load_graph_file → 동일 지도 복원
+
+[4-I-4] 지도 서비스 (기존 test_map_services.cpp 확장)
+  - start_mapping → 이동 → stop_mapping → save_map → get_map 순서 검증
+
+[4-I-5] 장기 매핑 메모리 관리
+  - 수백m 이동 후 메모리 사용량 허용 범위 내 유지
+
+
+================================================================================
+ 5. raisin_grid_mapping_plugin
+================================================================================
+주요 소스:
+  - grid_map.cpp / grid_mapping.cpp
+  - GridMap: setGeometry, add, move, rayCasting, rayCastingOcclusion,
+             holeFilling
+  - convertToHeightVec / convertToHeightVecInpainted
+
+---------- 단위 테스트 후보 ----------
+
+[5-U-1] 격자 좌표 변환 (GridMap::getIndex / getPosition)  [수정: 함수명 명시]
+  - getIndex(): 월드 XY → 격자 인덱스, 해상도 스케일링 검증
+  - getPosition(): 격자 인덱스 → 월드 XY 중심점 역변환
+  - isInside(): 경계 외 좌표 → false 반환
+  - 왕복 변환 (getIndex → getPosition) 오차 < resolution/2
+
+[5-U-2] 격자 이동 (GridMap::move)  [신규: 원본 누락]
+  - 1셀 이동 → 원형 버퍼 롤링 후 기존 데이터 보존 확인
+  - 연속 방향 이동 후 원점 복귀 → 데이터 일관성
+  - 맵 크기 이상 이동 → 전체 셀 초기화
+
+[5-U-3] GridMap 레이어 관리  [신규: 원본 누락]
+  - setBasicLayers() 후 NaN 셀 → isValid() = false
+  - 정상 값 셀 → isValid() = true
+  - 존재하지 않는 레이어 접근 → std::out_of_range
+
+[5-U-4] 레이 캐스팅 수학 (rayCasting / rayCastingOcclusion)
+  - 알려진 카메라 포즈와 포인트로 가리짐(occlusion) 판정 검증
+  - 광선이 격자를 통과하는 셀 순서 확인
+
+[5-U-5] 홀 채우기 (holeFilling)
+  - 단일 빈 셀 → holeFillingKernelSize_ 내에서 채워짐 확인
+  - 커널 크기 이상의 빈 영역 → 채워지지 않음
+
+[5-U-6] 높이 벡터 변환 (convertToHeightVec)
+  - 균일한 높이 격자 → 상수 벡터
+  - NaN/빈 셀 처리 방식 (기본값 사용)
+
+[5-U-7] 아웃라이어 필터링
+  - heightThresholdMinimum_ / heightThresholdProportional_ 초과 포인트 제거
+  - outlierHeightUpperBound_ / outlierHeightLowerBound_ 하드 한계 확인  [신규]
+
+---------- 통합 테스트 후보 ----------
+
+[5-I-1] 타임스탬프 기반 포즈 보간  [신규: 원본 누락, 레이캐스팅 정확도 전제조건]
+  - 오도메트리 히스토리 축적 → 깊이 메시지 타임스탬프로 포즈 조회 정확도
+
+[5-I-2] 다중 카메라 깊이 데이터 융합
+  - 두 카메라가 동일 영역을 관찰할 때 충돌 없이 병합
+
+[5-I-3] 카메라 → 월드 좌표 변환 파이프라인
+  - TF 변환 통합 후 격자에 올바른 위치로 투영
+
+[5-I-4] 인페인팅 서비스 (getInpaintmap)
+  - 비고: 내부적으로 별도 raisim::World(포트 6000) 사용. 테스트 환경에
+    RaiSim 라이선스 및 포트 가용성 필요.
+  - 서비스 요청 → 인페인팅 완료 → 높이 응답 수렴 확인
+
+[5-I-5] 지도 업데이트 스레드 동기화
+  - 다중 카메라 동시 업데이트 시 경쟁 조건(race condition) 없음
+
+
+================================================================================
+ 6. raisin_iekf_plugin
+================================================================================
+주요 소스:
+  - iekf_state_estimator.cpp / IEKF.cpp
+  - LieGroup.cpp (SE_K(3) 연산)
+  - RobotModel.cpp / RobotState.cpp
+  - contactEstimator.hpp / BasicFunctions_Estimator.hpp
+
+---------- 단위 테스트 후보 ----------
+
+[6-U-1] Lie 군 연산 (LieGroup.cpp)
+  - Exp_SO3: 영 벡터(‖w‖ < TOLERANCE=1e-10) → 단위행렬
+  - Exp_SO3: 알려진 회전 벡터 → 회전행렬 수학 검증
+  - Exp_SEK3: K=2일 때 블록 구조 정확도
+  - skew(): 반대칭 행렬 성질 (A = -A^T) 확인
+
+[6-U-2] 상태 전파 (IEKF::Propagate — SE_K(3) 스트랩다운 적분)  [수정]
+  - R_pred = R * Exp_SO3(ω*dt) 수학 검증
+  - v_pred = v + (R*a + g)*dt 검증 (중력 [0,0,-9.8] 포함)
+  - p_pred = p + v*dt + 0.5*(R*a+g)*dt² 검증
+  - 바이어스 보상 전/후 적분 차이 확인
+  - 공분산 전파 후 P 양정치(PD) 유지 확인
+
+[6-U-3] 측정 갱신 (IEKF::Correct)  [신규: 원본 누락]
+  - 갱신 후 P 공분산 감소 확인
+  - Joseph 폼 갱신 후 P 대칭성 유지
+  - Y.rows() == 0 (빈 관측) → 상태 변화 없음
+
+[6-U-4] 접촉 상태 추정 (contactEstimator)  [수정: 원본 6-U-3]
+  - 비고: raisim::ArticulatedSystem* 및 raisim::World& 필수 의존성으로
+    인해 단위 테스트 불가. 시뮬레이터 환경의 통합 테스트로 이전.
+    → [6-I-3] 참조.
+
+[6-U-5] 영속도 갱신 (ZUPT)
+  - isRobotStationary() 판정 기준 검증
+  - ZUPT 적용 후 속도 추정치 수렴 확인
+
+[6-U-6] GRU 신경망 추론 (computeNNLinVel)
+  - 비고: 모델 가중치 파일 경로가 전제조건. 테스트 픽스처에 파일 로딩 포함 필요.
+  - 주어진 관절 상태 입력 → 출력 범위 타당성 확인
+  - 시간 순서에 따른 출력 일관성
+
+[6-U-7] 로봇 운동학 (RobotModel)
+  - 순기구학(Forward_Kinematics_Leg): 알려진 관절각 → 발 위치 검증
+  - Jacobian_Leg: 수치 미분과 해석적 Jacobian 비교
+  - raibo1 / raibo2 모델 문자열 정확히 소문자로만 인식 확인  [신규]
+  - IMU2BD 오프셋 적용 전후 차이 확인  [신규]
+
+---------- 통합 테스트 후보 ----------
+
+[6-I-1] IMU + 인코더 융합 추정
+  - 시뮬 IMU + 관절각 → 위치/방향 추정 드리프트 허용 범위 내
+
+[6-I-2] FastLIO 오도메트리 루프 클로저 통합
+  - LIO 측정이 들어올 때 IEKF 보정 적용 확인
+  - FastLIO 타임아웃 시 관성 추정으로 폴백
+
+[6-I-3] 접촉 상태 추정 통합 (contactEstimator)  [수정: 원본 6-U-3을 이전]
+  - 시뮬레이터 환경 필요 (raisim::ArticulatedSystem*)
+  - 발 힘 > 임계값 AND 발 속도 < 임계값 → 접촉 판정
+  - 4발 모두 접촉 시 ZUPT 발동 조건
+  - getSlipRejection(): GRF 있어도 발 속도 높으면 슬립 판정
+
+[6-I-4] 접촉 전환 처리
+  - 빠른 보행 중 접촉 전환 → 필터 발산 없음
+
+[6-I-5] 바이어스 수렴
+  - 정지 상태 초기화 → 자이로/가속도계 바이어스 수렴 시간 측정
+
+
+================================================================================
+ 7. raisin_livox_lidar_plugin
+================================================================================
+주요 소스:
+  - livox_lidar_plugin.cpp / lds_lidar.cpp / lddc.cpp
+  - comm/ (UART, UDP, 스레딩)
+  - call_back/ (데이터 콜백)
+  - parse_cfg_file/ (YAML 설정)
+  - third_party/Livox-SDK2/
+
+---------- 단위 테스트 후보 ----------
+
+[7-U-1] Fletcher 체크섬 계산  [수정: "CRC" → "Fletcher" 용어 정정]
+  - 알고리즘: ck_a += data[i]; ck_b += ck_a (이중 누적합)
+  - 알려진 UBX-스타일 메시지의 체크섬 값 검증
+  - 빈 페이로드 처리
+  - 1바이트 변조 → 체크섬 불일치 확인
+
+[7-U-2] YAML 설정 파일 파싱 (LivoxLidarConfigParser)  [수정: 원본 7-U-4 순서 변경]
+  - 올바른 설정 → LidarCfg 구조체 필드 매핑 확인
+  - 잘못된 IP/포트 형식 → 오류 발생  [수정: 원본보다 중요도 높음]
+  - 누락된 필드 기본값 처리
+  - 파일 없음 → 예외 또는 false 반환
+
+[7-U-3] 패킷 파싱 로직
+  - 올바른 프레임 → 포인트 클라우드 파싱 성공
+  - 헤더 불일치 → 파싱 실패 및 오류 처리
+  - 부분 패킷 처리
+
+[7-U-4] Lddc publish_period_ns_ 계산  [신규]
+  - kNsPerSecond / publish_frq_ 계산 검증
+  - publish_frq_ = 0 입력 → 0 나눗셈 방지 확인
+
+---------- 통합 테스트 후보 ----------
+
+[7-I-1] 장치 발견 및 초기화
+  - LiDAR 장치 연결 → 자동 발견 → 스트리밍 시작
+
+[7-I-2] 패킷 재조립 및 ROS 토픽 발행
+  - UDP 패킷 수신 → 포인트 클라우드 조립 → 발행 검증
+
+[7-I-3] 연결 손실 복구
+  - 네트워크 중단 → 재연결 후 스트리밍 재개
+
+[7-I-4] 다중 스레드 I/O 안정성
+  - 수신/파싱/발행 스레드 장시간 실행 시 데드락 없음
+
+
+================================================================================
+ 8. raisin_ouster_plugin
+================================================================================
+주요 소스:
+  - ouster_plugin.cpp / ouster_driver_node.cpp
+  - third_party/ouster-sdk/ (Ouster SDK3 공식 라이브러리)
+
+비고: [8-U-1] UDP 패킷 파싱, [8-U-2] 직교 좌표 변환(CartesianProf),
+      [8-U-3] 메타데이터 직렬화, [8-U-4] OSF 파일 I/O는 모두 SDK3 내부
+      기능이며, third_party/ouster-sdk/tests/에 SDK 자체 테스트가 존재함.
+      프로젝트 코드 단위 테스트 대상이 아니므로 삭제.
+
+---------- 단위 테스트 후보 ----------
+
+[8-U-1] 리다 모드 문자열 파싱 (OusterDriverNode::init)  [수정: 신규 대체]
+  - "512x10", "512x20", "1024x10", "1024x20", "2048x10" → 올바른 enum 매핑
+  - 알 수 없는 모드 문자열 → 기본값(MODE_1024x10) 또는 오류 처리
+  - 빈 문자열 입력 처리
+
+[8-U-2] 패킷 버퍼 경계 처리  [수정: 원본 8-U-5 재정의]
+  - lidar 고정 버퍼(65536 bytes) 초과 패킷 → 안전 처리
+  - IMU 고정 버퍼(256 bytes) 초과 처리
+
+---------- 통합 테스트 후보 ----------
+
+[8-I-1] 실시간 센서 통신
+  - Ouster 장치 연결 → UDP 스트림 수신 → ROS 토픽 발행
+
+[8-I-2] 초기화 실패 처리  [신규]
+  - init_client() 타임아웃(30초) → 플러그인 안전 종료
+  - 잘못된 IP → 연결 거부 예외 처리 확인
+
+[8-I-3] 센서 타임아웃 처리
+  - 네트워크 차단 → 타임아웃 감지 → 플러그인 정상 종료
+
+[8-I-4] 스레드 종료 (OusterDriverNode::stop)  [신규]
+  - running_=false → lidar_thread_ / imu_thread_ join 완료 확인
+  - in-flight 패킷 처리 중 stop() 호출 시 데드락 없음
+
+
+================================================================================
+ 9. raisin_ublox_plugin
+================================================================================
+주요 소스:
+  - ublox_plugin.cpp / gps.cpp
+  - ublox_serialization/ (UBX 프로토콜 직렬화, Fletcher 체크섬)
+  - ublox_msg_converter.hpp
+  - async_worker.hpp / callback.hpp
+  - test/test_ublox_gps_init.cpp (기존 테스트: 시리얼 초기화 실패,
+                                  isInitialized() 반환값 커버됨)
+
+---------- 단위 테스트 후보 ----------
+
+[9-U-1] Fletcher 체크섬 계산 (calculateChecksum)
+  - 알려진 UBX 메시지 체크섬 값 검증
+  - 빈 페이로드 처리
+  - 1바이트 변조 → 체크섬 불일치
+
+[9-U-2] UBX 메시지 직렬화/역직렬화 (Reader / Writer)  [수정: 원본 9-U-5를 앞으로]
+  - Writer::write() → Reader::read() 왕복 정확도
+  - NAV-PVT 메시지 왕복 변환
+  - RXM-RTCM 패킷 파싱
+  - Reader::found(): 헤더 불일치(sync byte 오류) → false
+
+[9-U-3] NavPVT 메시지 변환 (convertNavPvtToNavSatAndTwist)  [신규: 원본 누락]
+  - 좌표 스케일: lat/lon(1e-7 deg→deg), height(1e-3 m→m) 검증
+  - fix_quality 분기:
+      carrier_phase_fixed → STATUS_GBAS_FIX
+      2D 이상 fix → STATUS_FIX
+      no fix → STATUS_NO_FIX
+  - 음수 nanosecond(m.nano < 0) 처리 시 ROS stamp 오버플로우 없음
+  - 속도 ENU 변환: vel_e/vel_n/-vel_d (1e-3 m/s) 검증
+
+[9-U-4] GGA 문자열 변환 (convertNavPvtToGGA)  [신규: 원본 누락]
+  - $GPGGA 문자열 형식 검증 (필드 수, 구분자)
+  - 체크섬 일치 확인
+
+[9-U-5] Yaw 오프셋 계산 (calculateYawOffset)  [수정: 원본 9-U-3]
+  - 북쪽 이동 → yaw ≈ 0
+  - 동쪽 이동 → yaw ≈ π/2
+  - 이동 윈도우(크기 10) 안정성 확인
+
+[9-U-6] NTRIP 스테이션 정렬 (sortStations)
+  - 현재 위치와 가장 가까운 스테이션이 첫 번째
+  - 동일 거리 스테이션 처리
+
+[9-U-7] 측지 좌표 래퍼 검증  [수정: 원본 9-U-2 재정의]
+  - 비고: GeographicLib 자체 수학 테스트는 서드파티 코드 검증이므로 제외.
+    실제 테스트 대상: 플러그인 내 getEastNorth() 래퍼 함수의
+    스케일·부호 변환 정확성
+  - 왕복 변환 (GPS→ENU→GPS) 오차 < 0.01m
+
+---------- 통합 테스트 후보 ----------
+
+[9-I-1] 시리얼 통신 및 초기화 (기존 test_ublox_gps_init.cpp 확장)
+  - 기존 커버: initializeSerial 실패 예외, isInitialized() 상태
+  - 추가 테스트: u-Blox 장치 연결 → 설정 전송 → NAV-PVT 수신
+  - ACK/NACK 핸들링: waitForAcknowledge() 타임아웃 동작  [신규]
+
+[9-I-2] NTRIP 스트림 연결
+  - NTRIP 캐스터 인증 → RTCM 수신 → RTK 수렴 시간 측정
+
+[9-I-3] 시뮬레이션 모드 GPS 생성
+  - 로봇 오도메트리 → 합성 GPS 데이터 생성 → 좌표 일관성
+
+[9-I-4] GNSS 신호 손실 복구
+  - GPS 신호 손실 → 마지막 유효값 유지 → 복구 후 재수신
+
+
+================================================================================
+ 10. raisin_voxel_mapping_plugin
+================================================================================
+주요 소스:
+  - voxel_mapping.cpp / voxel_map.cpp
+  - VoxelMap: setGeometry, move, updateOccupancy, getHeight, getIndex,
+              removeOldVoxels
+
+---------- 단위 테스트 후보 ----------
+
+[10-U-1] 복셀 좌표 인덱싱 (VoxelMap::getIndex / getPosition)  [수정: 함수명 명시]
+  - getIndex(): 월드 XYZ → 복셀 인덱스, XY/Z 해상도 분리 검증
+  - getPosition(): 복셀 인덱스 → 월드 중심점 역변환
+  - isInside(): 경계 외 좌표 → false 반환
+  - 왕복 변환 오차 < resolution/2
+
+[10-U-2] 격자 이동 (VoxelMap::move)
+  - 1셀 이동 → 기존 점유 데이터 시프트 확인
+  - 여러 방향 연속 이동 후 원점 복귀 일관성
+  - 맵 크기 이상 이동 → 전체 초기화
+
+[10-U-3] 점유 갱신 (VoxelMap::updateOccupancy)  [신규: 원본 누락]
+  - hit=true → 점유 마킹 + count 증가 + sumZ 누적
+  - hit=false → 자유 공간 마킹
+  - 동일 셀 반복 갱신 → count 정상 누적
+
+[10-U-4] 높이 쿼리 (VoxelMap::getHeight)  [신규: 원본 누락, 컨트롤러 핵심 의존]
+  - 포인트 삽입 후 해당 (x, y)의 최고 점유 복셀 z 반환
+  - max_z 이하 조건 필터링 정확도
+  - 비어 있는 열(column) → NaN 반환
+  - getMeanZ() 평균 계산 정확도 (sumZ / count)
+
+[10-U-5] 레이 캐스팅 (rayCasting)
+  - 카메라 → 포인트 사이 복셀 점유 마킹 확인
+  - 빈 장면에서 광선이 통과하는 셀 순서
+
+[10-U-6] 타임스탬프 기반 에이징 (VoxelMap::removeOldVoxels)
+  - 오래된 복셀 → timestampLimit 초과 시 제거
+  - 새 복셀 → 제거 안 됨
+  - 타임스탬프 래핑(wrap-around) 처리
+
+---------- 통합 테스트 후보 ----------
+
+[10-I-1] 다중 카메라 깊이 융합
+  - 두 카메라가 겹치는 영역을 동시에 갱신할 때 뮤텍스 충돌 없음
+
+[10-I-2] 로봇 이동에 따른 지도 이동
+  - 로봇이 격자 크기 이상 이동 → 격자 자동 이동 → 높이 데이터 보존
+
+[10-I-3] 경로 계획과 높이 쿼리 연동
+  - 지도 갱신 중 동시 높이 쿼리 → 경쟁 조건 없음
+
+[10-I-4] 장기 동작 메모리
+  - 장시간 실행 후 메모리 사용량 안정적 유지
+
+
+================================================================================
+ 11. raisin_navigation_plugin
+================================================================================
+주요 소스:
+  - navigation_plugin.cpp (~101줄, 프로세스 스포너)
+  - navigation_main.cpp (~369줄, 핵심 로직 전체 포함)
+    (third-party: nav2 SMAC lattice planner, MPPI controller, nav2 costmap)
+
+★ 구조적 주의사항:
+  NavigationPlugin 클래스 자체는 프로세스를 spawning하는 래퍼이고
+  (advance()는 no-op), 모든 실제 로직은 별도 실행파일
+  navigation_main.cpp에 있음.
+  따라서 아래 [11-U-*] 항목들은 navigation_main의 로직을 대상으로 하며,
+  독립 함수로 추출하지 않는 한 프로세스 경계 때문에 통합 테스트에
+  가까운 수준임. 리팩터링(로직을 라이브러리로 분리) 권장.
+
+---------- 단위 테스트 후보 ----------
+
+[11-U-1] Waypoint 인덱스 진행 및 Lap 카운터  [수정: 독립 함수 추출 전제]
+  - 단일 waypoint 도달 → 목표 완료
+  - 다중 waypoint 순서대로 진행
+  - 마지막 waypoint 도달 + laps > 1 → waypoint[0]으로 복귀 + laps 감소
+  - 마지막 waypoint 도달 + laps == 1 → hasGoal=false
+
+[11-U-2] 경로 유효성 검사 (isPathValid 람다)  [수정: 람다 추출 전제]
+  - 비고: 현재 navigation_main.cpp 내 로컬 람다로 정의됨.
+    단위 테스트를 위해 별도 함수로 추출 필요.
+  - 빈 경로 → false
+  - 장애물 없는 경로 → true
+
+[11-U-3] Costmap 원점 계산 수학  [수정: nav2 의존 제거]
+  - 로봇 포즈 → costmap 중심 재조정 수학 검증
+  - 해상도(0.1m) 기반 좌표 스케일링
+
+[11-U-4] 목표 도달 판정  [수정: SimpleGoalChecker는 nav2 서드파티]
+  - 비고: nav2::SimpleGoalChecker 자체 테스트는 서드파티.
+    프로젝트의 파라미터(xy_goal_tolerance, yaw_goal_tolerance)가
+    올바르게 설정되는지만 확인.
+  - 거리 임계값 이하 → 도달 판정
+
+[11-U-5] 계획 실패 예외 처리
+  - planner 예외 발생 → hasPlan=false → 다음 루프에서 재계획 시도
+  - max_replanning_attempts 초과 → 목표 취소
+
+---------- 통합 테스트 후보 ----------
+
+[11-I-1] 플러그인 라이프사이클
+  - 플러그인 로드 → 자식 프로세스 생성 → 서비스 이용 가능 → 종료 시 정리
+
+[11-I-2] SMAC Lattice Planner 경로 계획
+  - 알려진 시작/목표 위치로 경로 요청 → 유효한 경로 반환
+
+[11-I-3] MPPI 컨트롤러 + 11개 비평가 함수 통합
+  - 비고: nav2 전체 스택(costmap, TF, 오도메트리) 필요. 자동화 난이도 높음.
+  - 모든 critic 활성화 상태에서 속도 명령 생성 확인
+
+[11-I-4] 실시간 루프 타이밍
+  - 1Hz 계획, 20Hz 제어, 5Hz 지역 costmap 주기 준수 확인
+
+[11-I-5] 오도메트리 중단 복구
+  - 오도메트리 손실 → 마지막 값 유지 → 복구 후 정상 동작
+
+
+================================================================================
+ 12. raisin_gui_map1_window
+================================================================================
+주요 소스:
+  - raisin_gui_map1_window.cpp (핵심 update/sync)
+  - raisin_gui_map1_window_draw.cpp (~899줄, 주 렌더링)
+  - raisin_gui_map1_window_visualization.cpp (포인트 클라우드 렌더링)
+  - raisin_gui_map1_window_panel.cpp
+  - raisin_gui_map1_window_popups.cpp
+
+주요 상태 머신:
+  - Map1ToolMode: MOVE / SELECT / MEASURE
+  - PoseEstimateState: IDLE / WAITING_POSITION / WAITING_YAW
+  - LoadMapStep: SELECT_ROBOT / SELECT_FILE
+  - MeasureState: IDLE / WAITING_P2 / DONE
+
+★ 렌더링 테스트 불가 주의:
+  ImGui 기반이므로 [12-I-1] ~ [12-I-6]의 렌더링 관련 항목은 CI 자동화
+  불가. 수동 QA 체크리스트로 분류. 상태 머신([12-U-2], [12-U-3])도
+  현재 ImGui 이벤트에 묶여 있으므로, 테스트를 위해서는 로직을 별도
+  클래스/함수로 추출하는 리팩터링이 선행되어야 함.
+
+---------- 단위 테스트 후보 ----------
+
+[12-U-1] 좌표 변환 (worldToScreen / screenToWorld)
+  - 비고: draw loop 외부에 독립 함수로 추출된 경우에만 단위 테스트 가능.
+  - 중심점 → 변환 후 캔버스 중심
+  - 줌 1x / 10x / 100x 스케일링 검증
+  - 패닝(pan) 오프셋 적용 검증
+  - Y축 반전 처리
+
+[12-U-2] 롱프레스 타이밍 로직  [수정: 추출 전제 명시]
+  - 비고: LongPressDetector 등 별도 클래스로 추출 후 테스트 권장.
+  - 0.3초 미만 → waypoint 미생성
+  - 0.3초 이상 + 5px 미만 이동 → waypoint 생성
+  - 누르는 중 5px 이상 이동 → 비활성화
+
+[12-U-3] 거리 측정 도구 상태 머신  [수정: 추출 전제 명시]
+  - 비고: 상태 전환 함수를 ImGui 이벤트 처리에서 분리해야 테스트 가능.
+  - IDLE → 클릭 → WAITING_P2
+  - WAITING_P2 → 클릭 → DONE + 거리 계산
+  - DONE → 클릭 → WAITING_P2 (재측정)
+  - Escape → IDLE (어떤 상태에서든)
+
+[12-U-4] 편대(Formation) 정렬
+  - 팔로워들을 리더와의 거리 기준 정렬 확인
+  - 동점(같은 거리) 처리 일관성
+
+[12-U-5] 선택 해제 지연(Deferred Deselect) 로직
+  - 이미 선택된 로봇 클릭 → pendingDeselectId_ 설정
+  - 롱프레스 → deferred 취소
+  - 릴리즈 (롱프레스 없음) → 선택 해제 실행
+
+[12-U-6] 줌 경계값 검증
+  - 최대 줌(10000x) 이상 → 클램핑
+  - 최소 줌(1x) 이하 → 클램핑
+  - 마우스 휠 1.2x 스텝 스케일링
+
+[12-U-7] 매핑 클라우드 키프레임 로직  [신규]
+  - lastKeyframePos_로부터 1.0m 미만 이동 → 클라우드 미누적
+  - 1.0m 이상 이동 → 클라우드 누적 + lastKeyframePos_ 갱신
+
+[12-U-8] PointCloud2 파싱 (cloudCallback)  [신규]
+  - 필드 이름(x, y, z, intensity) 조회 및 포인트 추출 정확도
+  - 잘못된 필드 이름 → 빈 클라우드 또는 예외 처리
+
+[12-U-9] 5M 포인트 초과 다운샘플링 트리거  [신규]
+  - mappingCloud 포인트 수 5M 초과 → VoxelGrid(0.2m) 적용 후 크기 감소
+  - 5M 이하 → 다운샘플링 없음
+
+---------- 통합 테스트 후보 ----------
+  (이하 항목은 ImGui 컨텍스트 + ROS2 네트워크 필요. 자동화 불가하므로
+   수동 QA 체크리스트로 관리 권장)
+
+[12-I-1] 다중 로봇 렌더링 (수동 QA)
+  - 5개 이상 로봇, 각각 고유 ID, 발자국 + 좌표축 렌더링 확인
+
+[12-I-2] 라이브 포인트 클라우드 변환 + 렌더링 (수동 QA)
+  - LiDAR 포인트 (로봇 프레임) → fixedFrame_ TF 변환 → 올바른 위치에 렌더링
+
+[12-I-3] 매핑 클라우드 누적 (수동 QA)
+  - 매핑 시작 → 포인트 클라우드 수신 → 1m 키프레임 기준 누적
+  - 5M 포인트 초과 시 복셀 필터(0.2m) 적용 후 크기 감소
+
+[12-I-4] Waypoint 동기화 (GetWaypoints 서비스)
+  - 로봇 선택 → 비동기 GetWaypoints → 콜백으로 panelWaypoints_ 갱신
+
+[12-I-5] 편대 그룹 생성 흐름
+  - 3개 이상 로봇 선택 → 그룹화 → 리더 지정 → 팔로워에 waypoint 전송
+
+[12-I-6] 스레드 안전성 검증
+  - 네트워크 콜백(vizMutex_)과 GUI 스레드의 liveScan 동시 접근 → 충돌 없음
+
+
+================================================================================
+ 13. raisin_tf
+================================================================================
+주요 소스:
+  - transform.hpp / transform.cpp (~233줄)
+  - third-party: buffer_core.cpp (nav2/tf2 기반)
+
+핵심 자료구조:
+  - transforms_: child → (parent, T_parent←child)
+  - static_transforms_: 정적 TF 서브셋
+  - 뮤텍스: 단일 mtx_로 모든 맵 보호
+
+---------- 단위 테스트 후보 ----------
+
+[13-U-1] 프레임 트리 탐색 (canTransform)
+  - 단순 체인 A→B→C: canTransform(A, C) = true
+  - 공통 루트: A→X←B: canTransform(A, B) = true
+  - 분리된 프레임: canTransform(A, D) = false (연결 없음)
+  - 동일 프레임: canTransform(A, A) = true
+  - 사이클 감지 (frame == parent 조건): A→B→A → false 반환 + 무한 루프 없음
+
+[13-U-2] 변환 합성 (getTransform)
+  - 체인 5개 프레임: 최종 변환 수학 검증
+  - 단위행렬 합성: T * I = T
+  - 역변환: getTransform(B, A) ≈ getTransform(A, B)^{-1}
+  - 분기 병합: 공통 루트 경유 합성
+  - 루트가 다른 두 프레임: Identity 반환 + 경고 로그 발생  [신규]
+
+[13-U-3] 정적 변환 체인 처리 (setTransform + is_static=true)
+  - 정적 체인 A_s→B_s→C에 대해 동적 TF 설정 → static root(A_s)에 저장 확인
+  - T_child_to_root 보정 인수 적용 수학 검증
+
+[13-U-4] geometry_msgs 변환 (toIsometry)
+  - 단위 사원수 → 단위행렬
+  - 90° 회전 사원수 → 회전행렬 수학 검증
+  - 비정규화 사원수 처리  [수정: 실제 코드에 정규화 없음 → 동작 정의 필요]
+    비고: 현재 구현은 Quaternion(w,x,y,z).toRotationMatrix() 직접 호출로
+    정규화 검사 없음. "비정규화 입력 시 예상 동작"을 먼저 스펙으로
+    정의해야 테스트 작성 가능.
+
+[13-U-5] 다중 로봇 프레임 공존
+  - 두 로봇의 프레임이 별도 닉네임으로 분리되어 공존
+  - 각 로봇의 프레임 간 변환은 공통 월드 루트를 통해 가능
+
+[13-U-6] setTransform 덮어쓰기 동작  [신규]
+  - 이미 존재하는 child frame에 다른 parent로 재설정 → 덮어쓰기 또는 오류
+  - 빈 문자열 frame ID 처리
+
+---------- 통합 테스트 후보 ----------
+
+[13-I-1] 다중 로봇 TF 융합
+  - 로봇A와 로봇B가 각각 TF 발행 → 중앙 노드에서 getTransform(A_frame, B_frame) 성공
+
+[13-I-2] 정적 TF 영속성
+  - 정적 TF 발행 → 발행 중단 → 이후에도 조회 성공
+
+[13-I-3] 네트워크 재연결 후 TF 갱신
+  - 로봇 연결 해제 → TF 동결 → 재연결 후 새 TF 반영
+
+[13-I-4] 대규모 프레임 트리 성능
+  - 100개 이상 프레임 → canTransform / getTransform 지연 < 1ms
+
+[13-I-5] 수치 안정성
+  - getTransform 1000회 연속 호출 → 누적 수치 드리프트 허용 범위 내
+
+[13-I-6] TOCTOU 경쟁 조건  [신규]
+  - canTransform(A,C)=true 확인 직후 TF 삭제 → getTransform(A,C) 동작 정의
+  - 단일 mtx_ 설계 한계 문서화 또는 테스트
+
+
+================================================================================
+ 우선순위 권고 (테스트 ROI 기준)
+================================================================================
+
+ ★★★ 높음 (수학 연산, 알고리즘, 데이터 변환 - 버그 영향 크고 테스트 용이)
+  - raisin_tf: 변환 합성, 트리 탐색, 루트 불일치 동작, 사이클 감지
+    [13-U-1~6]
+  - raisin_iekf: Lie 군 연산, Propagate 스트랩다운, Correct PD 유지
+    [6-U-1~3, 6-U-7]
+  - raisin_fast_lio: ESEKF 갱신, IKD-tree, pointBodyToWorld,
+                     align3DPoints SVD, TransformFusion [4-U-1~5]
+  - raisin_ublox: Fletcher 체크섬, Reader/Writer 왕복,
+                  convertNavPvtToNavSatAndTwist [9-U-1~4]
+  - raisin_autonomy: A*, refineWaypointsWithAStar, projectPointOnSegment
+    [1-U-1~3]
+
+ ★★ 중간 (상태 머신, 프로토콜 파싱 - 논리 오류 발생 빈도 높음)
+  - raisin_voxel_mapping: getHeight (컨트롤러 핵심 의존), updateOccupancy,
+                          좌표 인덱싱 [10-U-1~4]
+  - raisin_grid_mapping: GridMap::move, rayCasting, holeFilling,
+                         outlier filtering [5-U-1~7]
+  - raisin_charging: 좌표계 변환, 임계값 로직, 속도 계산 [2-U-1~5]
+  - raisin_navigation: waypoint 인덱스 진행, costmap 계산 [11-U-1~5]
+    (리팩터링 선행 필요)
+  - raisin_gui_map1_window: keyframe 로직, cloudCallback 파싱,
+                            다운샘플 트리거 [12-U-7~9]
+    (상태 머신 [12-U-2~3]은 ImGui 로직 추출 선행 필요)
+  - raisin_livox: Fletcher 체크섬, YAML 파싱 [7-U-1~2]
+  - raisin_ouster: 모드 문자열 파싱, 버퍼 경계 [8-U-1~2]
+
+ ★ 낮음 (하드웨어 의존, 환경 구성 필요)
+  - 실 하드웨어 센서 통신 테스트 (D430/D435/D455, Livox, Ouster, u-Blox)
+  - GUI 렌더링 시각 검증 (raisin_gui_map1_window, 수동 QA)
+  - 장시간 매핑 메모리 테스트 (fast_lio, voxel_mapping)
+  - contactEstimator 통합 테스트 (raisim 시뮬레이터 필요)
+
+================================================================================
+ 주요 변경 요약 (원본 대비)
+================================================================================
+
+ [삭제] 서드파티 코드 테스트 (테스트 대상이 프로젝트 코드가 아님)
+  - [1-U-3] GeographicLib 수학 직접 검증
+  - [4-U-4] PCL VoxelGrid 다운샘플링 (test_map_services.cpp 이미 커버)
+  - [8-U-1~4] Ouster SDK3 내부 기능 (SDK 자체 테스트 존재)
+  - [9-U-2] GeographicLib WGS84→ENU 수학 직접 검증
+
+ [이전: 단위→통합] 분리 불가 인라인 로직 또는 외부 의존성
+  - [6-U-3] contactEstimator (raisim::ArticulatedSystem* 필수) → [6-I-3]
+  - [11-U-1~5] navigation_main.cpp 인라인 로직 (프로세스 경계 문제)
+               → 리팩터링 없이는 통합 테스트 수준
+
+ [수정] 실제 구현과 다른 설명
+  - [2-U-1] "FOV→카메라 행렬" → "OpenCV→RaiSim 좌표계 변환"
+  - [7-U-1] "CRC" → "Fletcher 체크섬"
+  - [13-U-4] "비정규화 사원수 처리" → 스펙 정의 선행 필요 명시
+
+ [신규 추가] 핵심 알고리즘 누락
+  - [1-U-3] refineWaypointsWithAStar (autonomy 핵심 알고리즘)
+  - [4-U-4] GpsAlign::align3DPoints SVD 계산
+  - [4-U-5] TransformFusion::advance 행렬 합성
+  - [4-U-6] MAP_MAX_POINTS/MAP_RESERVE_POINTS 경계 다운샘플 분기
+  - [9-U-3] convertNavPvtToNavSatAndTwist (좌표 스케일, fix quality, nanosecond 처리)
+  - [9-U-4] convertNavPvtToGGA 문자열 형식
+  - [10-U-3] VoxelMap::updateOccupancy
+  - [10-U-4] VoxelMap::getHeight (컨트롤러 핵심 의존)
+  - [12-U-7~9] keyframe 로직, cloudCallback 파싱, 다운샘플 트리거
+  - [13-U-2] roots differ → Identity 반환 케이스
+  - [13-U-6] setTransform 덮어쓰기 동작
+  - [5-U-2] GridMap::move 롤링 윈도우
+  - [5-U-3] GridMap::isValid + basic layers
+
+================================================================================
+ END OF DOCUMENT
+================================================================================
