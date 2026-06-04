@@ -965,6 +965,7 @@ def download_all_from_archive(
     archive_version: Optional[str] = None,
     package_filter: Optional[list] = None,
     archive_name: Optional[str] = None,
+    tag: Optional[str] = "stable",
 ) -> dict:
     """Download all packages from an archive.
 
@@ -972,11 +973,15 @@ def download_all_from_archive(
         build_type: "debug" or "release".
         install_base_path: Path to release/install/ directory.
         archive_version: Optional specific archive version (e.g., 'v2024.01').
-            If None, uses the latest available archive.
+            When set, takes precedence over `tag`.
         package_filter: Optional list of package names to download. If None,
             downloads all packages in the archive.
         archive_name: Optional archive base name override. If set, this takes
             precedence over RAISIN_ARCHIVE_NAME.
+        tag: Tag name to resolve (default 'stable'). When set and
+            `archive_version` is None, the archive is fetched via the tag
+            and a missing tag aborts the install with a SystemExit.
+            Pass None to fall back to legacy latest-by-time selection.
 
     Returns:
         dict mapping package_name to {'version': str, 'dependencies': list}
@@ -985,7 +990,24 @@ def download_all_from_archive(
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
     archive_name = get_archive_name(build_type, archive_name)
 
-    manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
+    # Selection priority: archive_version > tag > legacy latest.
+    if archive_version:
+        manifest = _fetch_archive_manifest(
+            archive_name, platform_str, archive_version
+        )
+    elif tag:
+        manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
+        if manifest is None:
+            print(
+                f"❌ No archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}'. "
+                f"Promote an archive to '{tag}' or pass --tag <other> / "
+                f"--archive-version <v>."
+            )
+            raise SystemExit(1)
+    else:
+        manifest = _fetch_archive_manifest(archive_name, platform_str, None)
+
     if manifest is None:
         print(f"⚠️ No archive found for '{archive_name}' on {platform_str}")
         return {}

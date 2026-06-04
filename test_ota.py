@@ -776,6 +776,58 @@ class TestDownload(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    @patch("commands.ota_client._fetch_archive_by_tag")
+    @patch("commands.ota_client._download_package_blob")
+    def test_download_all_uses_tag_when_provided(
+        self, mock_dl, mock_fetch_by_tag
+    ):
+        mock_fetch_by_tag.return_value = (
+            [{"packageName": "raisin", "manifestHash": "abc", "packageId": "p1"}],
+            "arch-tagged",
+            "v1.0.97",
+        )
+        mock_dl.return_value = True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ota.download_all_from_archive(
+                "release", Path(tmpdir), tag="stable"
+            )
+
+        mock_fetch_by_tag.assert_called_once()
+        args = mock_fetch_by_tag.call_args.args
+        self.assertEqual(args[2], "stable")  # tag is third positional
+
+    @patch("commands.ota_client._fetch_archive_by_tag")
+    def test_download_all_raises_systemexit_when_tag_unresolvable(
+        self, mock_fetch_by_tag
+    ):
+        mock_fetch_by_tag.return_value = None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(SystemExit):
+                ota.download_all_from_archive(
+                    "release", Path(tmpdir), tag="stable"
+                )
+
+    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("commands.ota_client._fetch_archive_by_tag")
+    @patch("commands.ota_client._download_package_blob")
+    def test_archive_version_takes_precedence_over_tag(
+        self, mock_dl, mock_by_tag, mock_by_version
+    ):
+        mock_by_version.return_value = ([], "arch-v", "v1.0.97")
+        mock_dl.return_value = True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ota.download_all_from_archive(
+                "release",
+                Path(tmpdir),
+                archive_version="v1.0.97",
+                tag="stable",
+            )
+
+        mock_by_version.assert_called_once()
+        mock_by_tag.assert_not_called()
+
     @patch("commands.ota_client._download_package_blob")
     @patch("commands.ota_client._fetch_archive_manifest")
     def test_download_package_happy_path(self, mock_manifest, mock_blob):
@@ -1065,7 +1117,12 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
                 with zipfile.ZipFile(download_file, "w") as zf:
                     zf.writestr("release.yaml", f"version: {ver}\n")
 
-            result = ota.download_all_from_archive("release", install_base)
+            # tag=None opts into the legacy latest-by-time selection that
+            # mock_manifest is faking; without it the default tag='stable'
+            # would route through _fetch_archive_by_tag instead.
+            result = ota.download_all_from_archive(
+                "release", install_base, tag=None
+            )
 
             metadata_path = (
                 install_base
@@ -1127,6 +1184,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
                 "debug",
                 install_base,
                 archive_name="custom-archive",
+                tag=None,
             )
 
         mock_manifest.assert_called_once_with(
@@ -1151,6 +1209,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
                 "debug",
                 install_base,
                 archive_name="raisin-robot-debug",
+                tag=None,
             )
 
         mock_manifest.assert_called_once_with(
