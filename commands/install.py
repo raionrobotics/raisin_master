@@ -142,15 +142,37 @@ def install_command(
                 "the latest archive."
             )
 
-        download_all_from_archive(
+        ota_results = download_all_from_archive(
             build_type,
             script_dir_path / "release" / "install",
             archive_version=archive_version,
             archive_name=archive_name,
             tag=resolved_tag,
         )
-        print("🎉🎉🎉 Installation process finished successfully.")
-        return
+
+        if ota_results:
+            print("🎉🎉🎉 Installation process finished successfully.")
+            return
+
+        # OTA returned nothing (tag missing, server unreachable, etc.).
+        # Mirror the per-package path: fall back to GitHub releases for each
+        # repo declared in configuration_setting.yaml. download_all_from_archive
+        # has already printed a clear warning explaining why we're here.
+        print(
+            "ℹ️  Falling back to GitHub releases for every configured "
+            "repository (filtered by repos_to_ignore)."
+        )
+        for repo_name in all_repositories.keys():
+            if repo_name in repo_ignore_set:
+                continue
+            install_queue.append(repo_name)
+
+        if not install_queue:
+            print(
+                "❌ Error: No fallback targets — every repository is in "
+                "repos_to_ignore. Nothing to install."
+            )
+            return
 
     while install_queue:
         target_spec = install_queue.pop(0)
@@ -468,8 +490,10 @@ def install_command(
     help=(
         "Install from the archive marked with this tag. When omitted, the tag "
         "defaults based on configuration_setting.yaml user_type: 'devel' → "
-        "'latest', anything else → 'stable'. Pass 'none' to fall back to legacy "
-        "latest-by-time selection."
+        "'latest', anything else → 'stable'. If the tag is missing on the OTA "
+        "server, the install falls back to GitHub releases for each repo "
+        "(with a warning). Pass 'none' to skip the tag and use legacy "
+        "latest-by-time selection on OTA."
     ),
 )
 def install_cli_command(

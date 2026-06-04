@@ -905,18 +905,19 @@ def download_package(
     elif tag:
         manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
         if manifest is None:
-            # Explicit tag resolution failed (missing tag, server unreachable,
-            # auth, etc.) — abort the install rather than silently falling
-            # back to GitHub. This matches download_all_from_archive's policy:
-            # if the user asked for a specific tag, we don't pretend it's OK
-            # to install something else. SystemExit propagates past
-            # install.py's `except Exception` handler.
+            # Tag resolution failed (missing tag, server unreachable, auth
+            # error, etc.). Surface a clear warning and return None so the
+            # caller (install.py) falls back to its GitHub release path.
+            # We deliberately don't abort: operational resilience matters
+            # more than loud failure here, and the per-package GitHub
+            # fallback is the historical safety net.
             print(
-                f"❌ No archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}'. Promote an archive to '{tag}' or pass "
-                f"--tag <other> / --archive-version <v>."
+                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}' — falling back to GitHub releases. "
+                f"Promote an archive to '{tag}' or pass --tag <other> / "
+                f"--archive-version <v> to use OTA."
             )
-            raise SystemExit(1)
+            return None
     else:
         manifest = _fetch_archive_manifest(archive_name, platform_str, None)
 
@@ -1041,13 +1042,17 @@ def download_all_from_archive(
     elif tag:
         manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
         if manifest is None:
+            # Tag resolution failed. Don't abort — print a clear warning
+            # and return an empty result so install.py can fall back to
+            # GitHub releases for each configured repo. Matches the
+            # per-package path's resilience policy.
             print(
-                f"❌ No archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}'. "
-                f"Promote an archive to '{tag}' or pass --tag <other> / "
-                f"--archive-version <v>."
+                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}' — falling back to GitHub releases for each "
+                f"package. Promote an archive to '{tag}' or pass --tag <other> "
+                f"/ --archive-version <v> to use OTA."
             )
-            raise SystemExit(1)
+            return {}
     else:
         manifest = _fetch_archive_manifest(archive_name, platform_str, None)
 

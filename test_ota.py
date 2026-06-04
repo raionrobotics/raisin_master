@@ -798,15 +798,18 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(args[2], "stable")  # tag is third positional
 
     @patch("commands.ota_client._fetch_archive_by_tag")
-    def test_download_all_raises_systemexit_when_tag_unresolvable(
+    def test_download_all_returns_empty_when_tag_unresolvable(
         self, mock_fetch_by_tag
     ):
+        # When the requested tag can't be resolved, the function should
+        # surface an empty result (and a warning) rather than aborting,
+        # so install.py can fall back to GitHub releases for each repo.
         mock_fetch_by_tag.return_value = None
         with tempfile.TemporaryDirectory() as tmpdir:
-            with self.assertRaises(SystemExit):
-                ota.download_all_from_archive(
-                    "release", Path(tmpdir), tag="stable"
-                )
+            result = ota.download_all_from_archive(
+                "release", Path(tmpdir), tag="stable"
+            )
+        self.assertEqual(result, {})
 
     @patch("commands.ota_client._fetch_archive_manifest")
     @patch("commands.ota_client._fetch_archive_by_tag")
@@ -966,19 +969,18 @@ class TestDownload(unittest.TestCase):
         self.assertIsNone(result)
 
     @patch("commands.ota_client._fetch_archive_by_tag", return_value=None)
-    def test_download_package_raises_systemexit_when_tag_unresolvable(
+    def test_download_package_returns_none_when_tag_unresolvable(
         self, _by_tag
     ):
-        # Mirror download_all_from_archive: per-package install must also
-        # abort hard when an explicit tag can't be resolved, otherwise
-        # install.py's `except Exception` catches a None return and silently
-        # falls back to GitHub, hiding misconfigured tags.
+        # Per-package install returns None when the tag can't be resolved
+        # so install.py's per-target loop falls back to GitHub releases.
+        # The function prints a warning before returning.
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
-            with self.assertRaises(SystemExit):
-                ota.download_package(
-                    "mypkg", "", "release", Path(tmpdir), tag="stable"
-                )
+            result = ota.download_package(
+                "mypkg", "", "release", Path(tmpdir), tag="stable"
+            )
+        self.assertIsNone(result)
 
 
 class TestArchiveNameAndTimestamp(unittest.TestCase):
