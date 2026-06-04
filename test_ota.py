@@ -801,14 +801,46 @@ class TestDownload(unittest.TestCase):
     def test_download_all_returns_empty_when_tag_unresolvable(
         self, mock_fetch_by_tag
     ):
-        # When the requested tag can't be resolved, the function should
-        # surface an empty result (and a warning) rather than aborting,
-        # so install.py can fall back to GitHub releases for each repo.
+        # When the requested tag can't be resolved (and tag IS 'stable' so
+        # no further fallback), the function should surface an empty result
+        # (and a warning) rather than aborting, so install.py can fall back
+        # to GitHub releases for each repo.
         mock_fetch_by_tag.return_value = None
         with tempfile.TemporaryDirectory() as tmpdir:
             result = ota.download_all_from_archive(
                 "release", Path(tmpdir), tag="stable"
             )
+        self.assertEqual(result, {})
+
+    @patch("commands.ota_client._download_package_blob", return_value=True)
+    @patch("commands.ota_client._fetch_archive_by_tag")
+    def test_download_all_falls_back_to_stable_when_requested_tag_missing(
+        self, mock_fetch_by_tag, _mock_dl
+    ):
+        # Requested 'latest' returns None on the first call, then 'stable'
+        # returns a valid manifest. The function should silently succeed
+        # using the stable archive.
+        latest_manifest = None
+        stable_manifest = ([], "arch-stable", "1.0.97")
+
+        def side_effect(_name, _platform, tag, **_kw):
+            return stable_manifest if tag == "stable" else latest_manifest
+
+        mock_fetch_by_tag.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = ota.download_all_from_archive(
+                "release", Path(tmpdir), tag="latest"
+            )
+
+        # Both tags were queried; the function returned the stable
+        # manifest's result dict (empty in this case because the manifest
+        # had no packages, but it's a dict not the falsy {} sentinel).
+        called_tags = [call.args[2] for call in mock_fetch_by_tag.call_args_list]
+        self.assertIn("latest", called_tags)
+        self.assertIn("stable", called_tags)
+        # Empty manifest means no packages downloaded, but the function
+        # ran the success path.
         self.assertEqual(result, {})
 
     @patch("commands.ota_client._fetch_archive_manifest")
@@ -973,14 +1005,38 @@ class TestDownload(unittest.TestCase):
         self, _by_tag
     ):
         # Per-package install returns None when the tag can't be resolved
-        # so install.py's per-target loop falls back to GitHub releases.
-        # The function prints a warning before returning.
+        # (and tag is 'stable' so no further fallback). install.py's
+        # per-target loop will then fall back to GitHub releases.
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
             result = ota.download_package(
                 "mypkg", "", "release", Path(tmpdir), tag="stable"
             )
         self.assertIsNone(result)
+
+    @patch("commands.ota_client._fetch_archive_by_tag")
+    def test_download_package_falls_back_to_stable_when_requested_tag_missing(
+        self, mock_fetch_by_tag
+    ):
+        # latest → None; stable → valid manifest. Expect both tags queried
+        # before the package lookup runs against the stable manifest.
+        stable_manifest = (
+            [{"packageName": "mypkg", "packageId": "p1", "tagName": "1.0.0"}],
+            "arch-stable",
+            "1.0.97",
+        )
+
+        def side_effect(_name, _platform, tag, **_kw):
+            return stable_manifest if tag == "stable" else None
+
+        mock_fetch_by_tag.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            ota.download_package("mypkg", "", "release", Path(tmpdir), tag="latest")
+
+        called_tags = [call.args[2] for call in mock_fetch_by_tag.call_args_list]
+        self.assertEqual(called_tags, ["latest", "stable"])
 
 
 class TestArchiveNameAndTimestamp(unittest.TestCase):

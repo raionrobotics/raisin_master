@@ -490,9 +490,9 @@ def install_command(
     help=(
         "Install from the archive marked with this tag. When omitted, the tag "
         "defaults based on configuration_setting.yaml user_type: 'devel' → "
-        "'latest', anything else → 'stable'. If the tag is missing on the OTA "
-        "server, the install falls back to GitHub releases for each repo "
-        "(with a warning). Pass 'none' to skip the tag and use legacy "
+        "'latest', anything else → 'stable'. Fallback chain when the requested "
+        "tag is missing on OTA: tag → 'stable' → GitHub releases (each step "
+        "prints a clear warning). Pass 'none' to skip the tag and use legacy "
         "latest-by-time selection on OTA."
     ),
 )

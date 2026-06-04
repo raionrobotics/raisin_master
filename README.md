@@ -163,7 +163,12 @@ raisin install raisin_network --type debug --archive-name team-robot --archive-v
 > - `user_type: devel` → defaults to **`latest`** (newest archive available, including pre-releases)
 > - anything else (e.g. `user_type: user`) → defaults to **`stable`** (the promoted/blessed archive)
 >
-> If no archive is tagged with the resolved tag for your platform (or the OTA server is unreachable), the install prints a clear warning and falls back to GitHub releases for each configured repository — operations stay resilient even when the OTA tag is misconfigured. Pass `--tag <name>` to override (e.g. `beta`), or `--tag none` to skip the tag and use the legacy latest-by-time selection on OTA.
+> **Fallback chain** when the requested tag is missing on OTA (or the server is unreachable):
+> 1. Try the requested tag (e.g. `latest`).
+> 2. Fall back to **`stable`** on OTA — so a devel user lands on the blessed archive when `latest` hasn't been promoted yet, instead of skipping straight to GitHub.
+> 3. Fall back to GitHub releases for each configured repository.
+>
+> Each step prints a clear warning so operators can spot misconfigured tags in logs. Pass `--tag <name>` to override (e.g. `beta`), or `--tag none` to skip the tag and use the legacy latest-by-time selection on OTA.
 
 ### 6. Install Package Dependencies
 

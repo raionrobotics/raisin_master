@@ -724,6 +724,48 @@ def _fetch_archive_by_tag(
         return None
 
 
+_STABLE_FALLBACK_TAG = "stable"
+
+
+def _fetch_archive_with_stable_fallback(
+    archive_name: str,
+    platform_str: str,
+    tag: str,
+):
+    """Resolve ``tag`` against OTA, falling back to 'stable' before giving up.
+
+    Resolution order:
+      1. The requested ``tag`` (e.g. 'latest', 'beta', etc.).
+      2. 'stable' — skipped if ``tag`` is already 'stable'.
+      3. None  — callers should then fall back to GitHub releases.
+
+    This keeps tagged installs resilient: a devel user whose 'latest' tag
+    hasn't been promoted yet still lands on the OTA-blessed 'stable'
+    archive rather than skipping straight to GitHub, while explicit
+    `--tag X` requests still try X first.
+    """
+    manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
+    if manifest is not None:
+        return manifest
+
+    if tag != _STABLE_FALLBACK_TAG:
+        print(
+            f"↪️  Tag '{tag}' not found on OTA — trying "
+            f"'{_STABLE_FALLBACK_TAG}' as a fallback..."
+        )
+        manifest = _fetch_archive_by_tag(
+            archive_name, platform_str, _STABLE_FALLBACK_TAG
+        )
+        if manifest is not None:
+            print(
+                f"  ✓ Using '{_STABLE_FALLBACK_TAG}' archive for "
+                f"'{archive_name}' on {platform_str}."
+            )
+            return manifest
+
+    return None
+
+
 def _stream_download(url: str, download_path: Path, error_context: str = "") -> bool:
     """Stream download a file from a URL.
 
@@ -903,19 +945,15 @@ def download_package(
             archive_name, platform_str, archive_version
         )
     elif tag:
-        manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
+        manifest = _fetch_archive_with_stable_fallback(
+            archive_name, platform_str, tag
+        )
         if manifest is None:
-            # Tag resolution failed (missing tag, server unreachable, auth
-            # error, etc.). Surface a clear warning and return None so the
-            # caller (install.py) falls back to its GitHub release path.
-            # We deliberately don't abort: operational resilience matters
-            # more than loud failure here, and the per-package GitHub
-            # fallback is the historical safety net.
+            # Neither the requested tag nor 'stable' resolved on OTA.
+            # Return None so install.py falls back to GitHub releases.
             print(
                 f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' — falling back to GitHub releases. "
-                f"Promote an archive to '{tag}' or pass --tag <other> / "
-                f"--archive-version <v> to use OTA."
+                f"with tag '{tag}' or 'stable' — falling back to GitHub releases."
             )
             return None
     else:
@@ -1040,17 +1078,17 @@ def download_all_from_archive(
             archive_name, platform_str, archive_version
         )
     elif tag:
-        manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
+        manifest = _fetch_archive_with_stable_fallback(
+            archive_name, platform_str, tag
+        )
         if manifest is None:
-            # Tag resolution failed. Don't abort — print a clear warning
-            # and return an empty result so install.py can fall back to
-            # GitHub releases for each configured repo. Matches the
-            # per-package path's resilience policy.
+            # Neither the requested tag nor 'stable' resolved on OTA.
+            # Return empty so install.py falls back to GitHub releases
+            # for each repo declared in configuration_setting.yaml.
             print(
                 f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' — falling back to GitHub releases for each "
-                f"package. Promote an archive to '{tag}' or pass --tag <other> "
-                f"/ --archive-version <v> to use OTA."
+                f"with tag '{tag}' or 'stable' — falling back to GitHub "
+                f"releases for each package."
             )
             return {}
     else:
