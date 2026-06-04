@@ -226,6 +226,13 @@ def install_command(
                     # Archive-based download (default or specific version)
                     from commands.ota_client import download_package as ota_download
 
+                    # Normalize 'none' (case-insensitive) to None so the OTA
+                    # client falls back to legacy latest-by-time selection.
+                    resolved_tag = (
+                        None
+                        if (tag is None or str(tag).lower() == "none")
+                        else tag
+                    )
                     ota_result = ota_download(
                         package_name,
                         spec_str,
@@ -233,6 +240,7 @@ def install_command(
                         script_dir_path / "release" / "install",
                         archive_version=archive_version,
                         archive_name=archive_name,
+                        tag=resolved_tag,
                     )
                 if ota_result:
                     processed_packages[package_name] = ota_result["version"]

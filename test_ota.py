@@ -862,7 +862,7 @@ class TestDownload(unittest.TestCase):
 
             mock_blob.side_effect = fake_download
 
-            result = ota.download_package("mypkg", "", "release", install_base)
+            result = ota.download_package("mypkg", "", "release", install_base, tag=None)
 
             metadata_path = (
                 install_base
@@ -931,7 +931,7 @@ class TestDownload(unittest.TestCase):
 
             # Spec ">=1.0.0,<2.0.0" should pick 1.5.0 (highest matching)
             result = ota.download_package(
-                "mypkg", ">=1.0.0 <2.0.0", "release", install_base
+                "mypkg", ">=1.0.0 <2.0.0", "release", install_base, tag=None
             )
 
         self.assertIsNotNone(result)
@@ -954,7 +954,7 @@ class TestDownload(unittest.TestCase):
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
-            result = ota.download_package("mypkg", "", "release", install_base)
+            result = ota.download_package("mypkg", "", "release", install_base, tag=None)
 
         self.assertIsNone(result)
 
@@ -962,7 +962,7 @@ class TestDownload(unittest.TestCase):
     def test_download_package_manifest_unavailable(self, _manifest):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
-            result = ota.download_package("mypkg", "", "release", Path(tmpdir))
+            result = ota.download_package("mypkg", "", "release", Path(tmpdir), tag=None)
         self.assertIsNone(result)
 
 
@@ -1162,6 +1162,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
                 "release",
                 install_base,
                 archive_name="custom-archive",
+                tag=None,
             )
 
         mock_manifest.assert_called_once_with(

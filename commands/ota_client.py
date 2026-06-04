@@ -630,6 +630,7 @@ def _fetch_archive_by_tag(
     archive_name: str,
     platform_str: str,
     tag: str,
+    _retry: bool = True,
 ):
     """Fetch an archive resolved through a tag (e.g., 'stable').
 
@@ -642,6 +643,9 @@ def _fetch_archive_by_tag(
         archive_name: Archive base name (e.g., 'raisin-robot').
         platform_str: Platform (e.g., 'ubuntu-24.04-arm64').
         tag: Tag name to resolve (e.g., 'stable').
+        _retry: When True (default), a 401 response triggers a single
+            re-auth + retry. Set to False internally on the retry to
+            prevent infinite loops.
 
     Returns:
         Tuple of (packages_list, archive_id, archive_version) on success, None
@@ -701,6 +705,18 @@ def _fetch_archive_by_tag(
         status = getattr(getattr(e, "response", None), "status_code", None)
         if status == 404:
             return None
+        if status == 401 and _retry:
+            # Cached token likely expired — clear and retry once, matching
+            # the pattern used by upload_package. Without this, an expired
+            # token would surface as a misleading "tag not found" error.
+            _clear_cached_token()
+            if authenticate():
+                print(
+                    "🔄 Re-authenticated with OTA server, retrying tag lookup..."
+                )
+                return _fetch_archive_by_tag(
+                    archive_name, platform_str, tag, _retry=False
+                )
         print(f"⚠️ OTA server error fetching tag '{tag}': {e}")
         return None
     except requests.RequestException as e:
@@ -852,6 +868,7 @@ def download_package(
     install_base_path: Path,
     archive_version: Optional[str] = None,
     archive_name: Optional[str] = None,
+    tag: Optional[str] = "stable",
 ) -> Optional[dict]:
     """Download a single package from the OTA server's archive.
 
@@ -864,9 +881,12 @@ def download_package(
         build_type: "debug" or "release".
         install_base_path: Path to release/install/ directory.
         archive_version: Optional specific archive version (e.g., 'v2024.01').
-            If None, uses the latest available archive.
+            When set, takes precedence over `tag`.
         archive_name: Optional archive base name override. If set, this takes
             precedence over RAISIN_ARCHIVE_NAME.
+        tag: Tag name to resolve (default 'stable'). When set and
+            `archive_version` is None, the archive is fetched via the tag.
+            Pass None to fall back to legacy latest-by-time selection.
 
     Returns:
         dict with 'version' and 'dependencies' on success, None on failure.
@@ -876,7 +896,24 @@ def download_package(
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
     archive_name = get_archive_name(build_type, archive_name)
 
-    manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
+    # Selection priority mirrors download_all_from_archive:
+    # archive_version > tag > legacy latest-by-time.
+    if archive_version:
+        manifest = _fetch_archive_manifest(
+            archive_name, platform_str, archive_version
+        )
+    elif tag:
+        manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
+        if manifest is None:
+            print(
+                f"❌ No archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}'. Promote an archive to '{tag}' or pass "
+                f"--tag <other> / --archive-version <v>."
+            )
+            return None
+    else:
+        manifest = _fetch_archive_manifest(archive_name, platform_str, None)
+
     if manifest is None:
         return None
 
