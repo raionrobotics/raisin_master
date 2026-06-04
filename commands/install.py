@@ -35,6 +35,7 @@ def install_command(
     archive_name: Optional[str] = None,
     at_timestamp: Optional[str] = None,
     from_github: bool = False,
+    tag: Optional[str] = "stable",
 ):
     """
     Install packages and their dependencies.
@@ -46,6 +47,9 @@ def install_command(
         archive_name (str): Optional archive base name override (e.g., 'raisin-robot')
         at_timestamp (str): Optional timestamp for time-travel install (e.g., '2024-01-15')
         from_github (bool): If True, skip OTA and download directly from GitHub
+        tag (str): Archive tag to resolve (default 'stable'). Set to 'none' or
+            None to fall back to legacy latest-by-time selection. Ignored when
+            `archive_version` is provided.
     """
     print("🚀 Starting installation process...")
 
@@ -93,13 +97,32 @@ def install_command(
     is_successful = True
 
     if not install_queue:
-        print("ℹ️  No packages specified. Installing all packages from latest archive.")
+        # Normalize 'none' (case-insensitive) to None for legacy fallback.
+        resolved_tag = (
+            None if (tag is None or str(tag).lower() == "none") else tag
+        )
+        if archive_version:
+            print(
+                "ℹ️  No packages specified. Installing all packages from "
+                f"archive version {archive_version}."
+            )
+        elif resolved_tag:
+            print(
+                "ℹ️  No packages specified. Installing all packages from "
+                f"archive tagged '{resolved_tag}'."
+            )
+        else:
+            print(
+                "ℹ️  No packages specified. Installing all packages from "
+                "the latest archive."
+            )
 
         download_all_from_archive(
             build_type,
             script_dir_path / "release" / "install",
             archive_version=archive_version,
             archive_name=archive_name,
+            tag=resolved_tag,
         )
         print("🎉🎉🎉 Installation process finished successfully.")
         return
@@ -405,6 +428,16 @@ def install_command(
     is_flag=True,
     help="Skip OTA and download directly from GitHub releases",
 )
+@click.option(
+    "--tag",
+    "tag",
+    default="stable",
+    show_default=True,
+    help=(
+        "Install from the archive marked with this tag (default 'stable'). "
+        "Pass 'none' to fall back to legacy latest-by-time selection."
+    ),
+)
 def install_cli_command(
     packages,
     build_type,
@@ -413,6 +446,7 @@ def install_cli_command(
     archive_name,
     at_timestamp,
     from_github,
+    tag,
 ):
     """
     Download and install packages from OTA server or GitHub releases.
@@ -460,4 +494,5 @@ def install_cli_command(
             archive_name,
             at_timestamp,
             from_github,
+            tag=tag,
         )
