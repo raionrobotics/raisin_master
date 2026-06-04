@@ -109,7 +109,9 @@ git clone <your-package-repository>
 Run the `install` command to download packages from the OTA server (primary) or GitHub releases (fallback).
 
 ```bash
-# Install from latest archive (default)
+# Install from the tagged archive (default tag is derived from
+# configuration_setting.yaml's user_type: 'devel' → 'latest',
+# anything else → 'stable')
 raisin install
 
 # Install a specific package
@@ -131,8 +133,15 @@ raisin install package1 package2 package3
 #### Advanced Install Options
 
 ```bash
-# Install from a specific archive version
+# Install from a specific archive version (overrides --tag)
 raisin install --archive-version v2024.01
+
+# Install from the archive tagged with a different name
+raisin install --tag beta            # opt into a non-stable tag
+raisin install --tag rollback        # roll back to a previously-promoted archive
+
+# Fall back to the legacy latest-by-time selection (no tag required)
+raisin install --tag none
 
 # Install from a specific archive name
 raisin install --archive-name team-robot
@@ -149,6 +158,17 @@ raisin install raisin_network --type debug --archive-name team-robot --archive-v
 ```
 
 > **Note:** Packages are downloaded from the OTA server by default. Use `--archive-name` to override `RAISIN_ARCHIVE_NAME` for a single install command. For debug installs, `-debug` is added only when the provided archive name does not already end with `-debug`. Use `--from-github` to bypass OTA and download directly from GitHub releases (useful for debugging or when OTA is unavailable).
+>
+> **Tag selection:** By default `raisin install` resolves the archive through a tag derived from `configuration_setting.yaml`:
+> - `user_type: devel` → defaults to **`latest`** (newest archive available, including pre-releases)
+> - anything else (e.g. `user_type: user`) → defaults to **`stable`** (the promoted/blessed archive)
+>
+> **Fallback chain** when the requested tag is missing on OTA (or the server is unreachable):
+> 1. Try the requested tag (e.g. `latest`).
+> 2. Fall back to **`stable`** on OTA — so a devel user lands on the blessed archive when `latest` hasn't been promoted yet, instead of skipping straight to GitHub.
+> 3. Fall back to GitHub releases for each configured repository.
+>
+> Each step prints a clear warning so operators can spot misconfigured tags in logs. Pass `--tag <name>` to override (e.g. `beta`), or `--tag none` to skip the tag and use the legacy latest-by-time selection on OTA.
 
 ### 6. Install Package Dependencies
 

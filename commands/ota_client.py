@@ -626,6 +626,146 @@ def _fetch_archive_manifest(
         return None
 
 
+def _fetch_archive_by_tag(
+    archive_name: str,
+    platform_str: str,
+    tag: str,
+    _retry: bool = True,
+):
+    """Fetch an archive resolved through a tag (e.g., 'stable').
+
+    Two-step resolution:
+      1. GET /archive-tags/by-name?archiveName=&tagName= to find the archive id
+         for the requested platform.
+      2. GET /archives/{archive_id} to get the package manifest list.
+
+    Args:
+        archive_name: Archive base name (e.g., 'raisin-robot').
+        platform_str: Platform (e.g., 'ubuntu-24.04-arm64').
+        tag: Tag name to resolve (e.g., 'stable').
+        _retry: When True (default), a 401 response triggers a single
+            re-auth + retry. Set to False internally on the retry to
+            prevent infinite loops.
+
+    Returns:
+        Tuple of (packages_list, archive_id, archive_version) on success, None
+        if the tag doesn't exist for that platform or the server is unreachable.
+    """
+    cache_key = ("__by_tag__", archive_name, platform_str, tag)
+    if cache_key in _archive_cache:
+        return _archive_cache[cache_key]
+
+    ctx = _get_auth_context()
+    if not ctx:
+        return None
+    base, headers = ctx
+
+    try:
+        resp = requests.get(
+            f"{base}/archive-tags/by-name",
+            headers=headers,
+            params={"archiveName": archive_name, "tagName": tag},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        tag_data = _unwrap_response(resp.json())
+        if not isinstance(tag_data, dict):
+            return None
+        manifests = tag_data.get("manifests", []) or []
+        manifest = next(
+            (m for m in manifests if m.get("platform") == platform_str),
+            None,
+        )
+        if not manifest:
+            return None
+
+        archive_id = manifest.get("archiveId")
+        if not archive_id:
+            return None
+
+        resp2 = requests.get(
+            f"{base}/archives/{archive_id}",
+            headers=headers,
+            timeout=10,
+        )
+        resp2.raise_for_status()
+        archive = _unwrap_response(resp2.json())
+        if not isinstance(archive, dict):
+            return None
+
+        result = (
+            archive.get("packages", []),
+            archive.get("id"),
+            archive.get("version"),
+        )
+        _archive_cache[cache_key] = result
+        return result
+
+    except requests.HTTPError as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == 404:
+            return None
+        if status == 401 and _retry:
+            # Cached token likely expired — clear and retry once, matching
+            # the pattern used by upload_package. Without this, an expired
+            # token would surface as a misleading "tag not found" error.
+            _clear_cached_token()
+            if authenticate():
+                print(
+                    "🔄 Re-authenticated with OTA server, retrying tag lookup..."
+                )
+                return _fetch_archive_by_tag(
+                    archive_name, platform_str, tag, _retry=False
+                )
+        print(f"⚠️ OTA server error fetching tag '{tag}': {e}")
+        return None
+    except requests.RequestException as e:
+        print(f"⚠️ OTA server unreachable: {e}")
+        return None
+
+
+_STABLE_FALLBACK_TAG = "stable"
+
+
+def _fetch_archive_with_stable_fallback(
+    archive_name: str,
+    platform_str: str,
+    tag: str,
+):
+    """Resolve ``tag`` against OTA, falling back to 'stable' before giving up.
+
+    Resolution order:
+      1. The requested ``tag`` (e.g. 'latest', 'beta', etc.).
+      2. 'stable' — skipped if ``tag`` is already 'stable'.
+      3. None  — callers should then fall back to GitHub releases.
+
+    This keeps tagged installs resilient: a devel user whose 'latest' tag
+    hasn't been promoted yet still lands on the OTA-blessed 'stable'
+    archive rather than skipping straight to GitHub, while explicit
+    `--tag X` requests still try X first.
+    """
+    manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
+    if manifest is not None:
+        return manifest
+
+    if tag != _STABLE_FALLBACK_TAG:
+        print(
+            f"↪️  Tag '{tag}' not found on OTA — trying "
+            f"'{_STABLE_FALLBACK_TAG}' as a fallback..."
+        )
+        manifest = _fetch_archive_by_tag(
+            archive_name, platform_str, _STABLE_FALLBACK_TAG
+        )
+        if manifest is not None:
+            print(
+                f"  ✓ Using '{_STABLE_FALLBACK_TAG}' archive for "
+                f"'{archive_name}' on {platform_str}."
+            )
+            return manifest
+
+    return None
+
+
 def _stream_download(url: str, download_path: Path, error_context: str = "") -> bool:
     """Stream download a file from a URL.
 
@@ -770,6 +910,7 @@ def download_package(
     install_base_path: Path,
     archive_version: Optional[str] = None,
     archive_name: Optional[str] = None,
+    tag: Optional[str] = "stable",
 ) -> Optional[dict]:
     """Download a single package from the OTA server's archive.
 
@@ -782,9 +923,12 @@ def download_package(
         build_type: "debug" or "release".
         install_base_path: Path to release/install/ directory.
         archive_version: Optional specific archive version (e.g., 'v2024.01').
-            If None, uses the latest available archive.
+            When set, takes precedence over `tag`.
         archive_name: Optional archive base name override. If set, this takes
             precedence over RAISIN_ARCHIVE_NAME.
+        tag: Tag name to resolve (default 'stable'). When set and
+            `archive_version` is None, the archive is fetched via the tag.
+            Pass None to fall back to legacy latest-by-time selection.
 
     Returns:
         dict with 'version' and 'dependencies' on success, None on failure.
@@ -794,7 +938,27 @@ def download_package(
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
     archive_name = get_archive_name(build_type, archive_name)
 
-    manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
+    # Selection priority mirrors download_all_from_archive:
+    # archive_version > tag > legacy latest-by-time.
+    if archive_version:
+        manifest = _fetch_archive_manifest(
+            archive_name, platform_str, archive_version
+        )
+    elif tag:
+        manifest = _fetch_archive_with_stable_fallback(
+            archive_name, platform_str, tag
+        )
+        if manifest is None:
+            # Neither the requested tag nor 'stable' resolved on OTA.
+            # Return None so install.py falls back to GitHub releases.
+            print(
+                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}' or 'stable' — falling back to GitHub releases."
+            )
+            return None
+    else:
+        manifest = _fetch_archive_manifest(archive_name, platform_str, None)
+
     if manifest is None:
         return None
 
@@ -883,6 +1047,7 @@ def download_all_from_archive(
     archive_version: Optional[str] = None,
     package_filter: Optional[list] = None,
     archive_name: Optional[str] = None,
+    tag: Optional[str] = "stable",
 ) -> dict:
     """Download all packages from an archive.
 
@@ -890,11 +1055,15 @@ def download_all_from_archive(
         build_type: "debug" or "release".
         install_base_path: Path to release/install/ directory.
         archive_version: Optional specific archive version (e.g., 'v2024.01').
-            If None, uses the latest available archive.
+            When set, takes precedence over `tag`.
         package_filter: Optional list of package names to download. If None,
             downloads all packages in the archive.
         archive_name: Optional archive base name override. If set, this takes
             precedence over RAISIN_ARCHIVE_NAME.
+        tag: Tag name to resolve (default 'stable'). When set and
+            `archive_version` is None, the archive is fetched via the tag
+            and a missing tag aborts the install with a SystemExit.
+            Pass None to fall back to legacy latest-by-time selection.
 
     Returns:
         dict mapping package_name to {'version': str, 'dependencies': list}
@@ -903,7 +1072,28 @@ def download_all_from_archive(
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
     archive_name = get_archive_name(build_type, archive_name)
 
-    manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
+    # Selection priority: archive_version > tag > legacy latest.
+    if archive_version:
+        manifest = _fetch_archive_manifest(
+            archive_name, platform_str, archive_version
+        )
+    elif tag:
+        manifest = _fetch_archive_with_stable_fallback(
+            archive_name, platform_str, tag
+        )
+        if manifest is None:
+            # Neither the requested tag nor 'stable' resolved on OTA.
+            # Return empty so install.py falls back to GitHub releases
+            # for each repo declared in configuration_setting.yaml.
+            print(
+                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}' or 'stable' — falling back to GitHub "
+                f"releases for each package."
+            )
+            return {}
+    else:
+        manifest = _fetch_archive_manifest(archive_name, platform_str, None)
+
     if manifest is None:
         print(f"⚠️ No archive found for '{archive_name}' on {platform_str}")
         return {}

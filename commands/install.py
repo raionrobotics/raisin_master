@@ -28,6 +28,19 @@ from commands.utils import load_configuration, parse_version_specifier
 from commands.ota_client import download_package_at_timestamp, download_all_from_archive
 
 
+def _default_tag_for_user_type(user_type: Optional[str]) -> str:
+    """Map configuration_setting.yaml `user_type` to the default archive tag.
+
+    - "devel" (and anything that starts with "dev") → "latest"
+      — developers want the freshest build.
+    - everything else (including "user") → "stable"
+      — production-style installs default to the promoted/blessed archive.
+    """
+    if user_type and user_type.strip().lower().startswith("dev"):
+        return "latest"
+    return "stable"
+
+
 def install_command(
     targets,
     build_type,
@@ -35,6 +48,7 @@ def install_command(
     archive_name: Optional[str] = None,
     at_timestamp: Optional[str] = None,
     from_github: bool = False,
+    tag: Optional[str] = None,
 ):
     """
     Install packages and their dependencies.
@@ -46,6 +60,12 @@ def install_command(
         archive_name (str): Optional archive base name override (e.g., 'raisin-robot')
         at_timestamp (str): Optional timestamp for time-travel install (e.g., '2024-01-15')
         from_github (bool): If True, skip OTA and download directly from GitHub
+        tag (str): Archive tag to resolve. When None (default), the tag is
+            derived from configuration_setting.yaml: `user_type: devel` →
+            "latest", anything else → "stable". Pass an explicit tag string
+            (e.g. "beta") to override, or "none"/None at this layer to fall
+            back to legacy latest-by-time selection. Ignored when
+            `archive_version` is provided.
     """
     print("🚀 Starting installation process...")
 
@@ -73,6 +93,15 @@ def install_command(
             "⚠️ No GitHub tokens found. Packages not available via OTA will be skipped."
         )
 
+    # If the caller didn't pin a tag, derive it from the user_type.
+    # "devel" → bleeding-edge ("latest"), anything else → "stable".
+    if tag is None:
+        tag = _default_tag_for_user_type(user_type)
+        print(
+            f"ℹ️  No --tag provided; using '{tag}' "
+            f"(derived from configuration_setting.yaml user_type='{user_type}')."
+        )
+
     # Process installation queue
     install_queue = list(targets)
 
@@ -93,16 +122,57 @@ def install_command(
     is_successful = True
 
     if not install_queue:
-        print("ℹ️  No packages specified. Installing all packages from latest archive.")
+        # Normalize 'none' (case-insensitive) to None for legacy fallback.
+        resolved_tag = (
+            None if (tag is None or str(tag).lower() == "none") else tag
+        )
+        if archive_version:
+            print(
+                "ℹ️  No packages specified. Installing all packages from "
+                f"archive version {archive_version}."
+            )
+        elif resolved_tag:
+            print(
+                "ℹ️  No packages specified. Installing all packages from "
+                f"archive tagged '{resolved_tag}'."
+            )
+        else:
+            print(
+                "ℹ️  No packages specified. Installing all packages from "
+                "the latest archive."
+            )
 
-        download_all_from_archive(
+        ota_results = download_all_from_archive(
             build_type,
             script_dir_path / "release" / "install",
             archive_version=archive_version,
             archive_name=archive_name,
+            tag=resolved_tag,
         )
-        print("🎉🎉🎉 Installation process finished successfully.")
-        return
+
+        if ota_results:
+            print("🎉🎉🎉 Installation process finished successfully.")
+            return
+
+        # OTA returned nothing (tag missing, server unreachable, etc.).
+        # Mirror the per-package path: fall back to GitHub releases for each
+        # repo declared in configuration_setting.yaml. download_all_from_archive
+        # has already printed a clear warning explaining why we're here.
+        print(
+            "ℹ️  Falling back to GitHub releases for every configured "
+            "repository (filtered by repos_to_ignore)."
+        )
+        for repo_name in all_repositories.keys():
+            if repo_name in repo_ignore_set:
+                continue
+            install_queue.append(repo_name)
+
+        if not install_queue:
+            print(
+                "❌ Error: No fallback targets — every repository is in "
+                "repos_to_ignore. Nothing to install."
+            )
+            return
 
     while install_queue:
         target_spec = install_queue.pop(0)
@@ -203,6 +273,13 @@ def install_command(
                     # Archive-based download (default or specific version)
                     from commands.ota_client import download_package as ota_download
 
+                    # Normalize 'none' (case-insensitive) to None so the OTA
+                    # client falls back to legacy latest-by-time selection.
+                    resolved_tag = (
+                        None
+                        if (tag is None or str(tag).lower() == "none")
+                        else tag
+                    )
                     ota_result = ota_download(
                         package_name,
                         spec_str,
@@ -210,6 +287,7 @@ def install_command(
                         script_dir_path / "release" / "install",
                         archive_version=archive_version,
                         archive_name=archive_name,
+                        tag=resolved_tag,
                     )
                 if ota_result:
                     processed_packages[package_name] = ota_result["version"]
@@ -405,6 +483,19 @@ def install_command(
     is_flag=True,
     help="Skip OTA and download directly from GitHub releases",
 )
+@click.option(
+    "--tag",
+    "tag",
+    default=None,
+    help=(
+        "Install from the archive marked with this tag. When omitted, the tag "
+        "defaults based on configuration_setting.yaml user_type: 'devel' → "
+        "'latest', anything else → 'stable'. Fallback chain when the requested "
+        "tag is missing on OTA: tag → 'stable' → GitHub releases (each step "
+        "prints a clear warning). Pass 'none' to skip the tag and use legacy "
+        "latest-by-time selection on OTA."
+    ),
+)
 def install_cli_command(
     packages,
     build_type,
@@ -413,6 +504,7 @@ def install_cli_command(
     archive_name,
     at_timestamp,
     from_github,
+    tag,
 ):
     """
     Download and install packages from OTA server or GitHub releases.
@@ -460,4 +552,5 @@ def install_cli_command(
             archive_name,
             at_timestamp,
             from_github,
+            tag=tag,
         )

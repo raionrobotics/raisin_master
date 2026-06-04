@@ -75,3 +75,6 @@ vcpkg.json
 vcpkg_installed/*
 **/.venv
 .ccache/*
+
+# Worktrees
+.worktrees/
