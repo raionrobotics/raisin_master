@@ -626,6 +626,88 @@ def _fetch_archive_manifest(
         return None
 
 
+def _fetch_archive_by_tag(
+    archive_name: str,
+    platform_str: str,
+    tag: str,
+):
+    """Fetch an archive resolved through a tag (e.g., 'stable').
+
+    Two-step resolution:
+      1. GET /archive-tags/by-name?archiveName=&tagName= to find the archive id
+         for the requested platform.
+      2. GET /archives/{archive_id} to get the package manifest list.
+
+    Args:
+        archive_name: Archive base name (e.g., 'raisin-robot').
+        platform_str: Platform (e.g., 'ubuntu-24.04-arm64').
+        tag: Tag name to resolve (e.g., 'stable').
+
+    Returns:
+        Tuple of (packages_list, archive_id, archive_version) on success, None
+        if the tag doesn't exist for that platform or the server is unreachable.
+    """
+    cache_key = ("__by_tag__", archive_name, platform_str, tag)
+    if cache_key in _archive_cache:
+        return _archive_cache[cache_key]
+
+    ctx = _get_auth_context()
+    if not ctx:
+        return None
+    base, headers = ctx
+
+    try:
+        resp = requests.get(
+            f"{base}/archive-tags/by-name",
+            headers=headers,
+            params={"archiveName": archive_name, "tagName": tag},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        tag_data = _unwrap_response(resp.json())
+        if not isinstance(tag_data, dict):
+            return None
+        manifests = tag_data.get("manifests", []) or []
+        manifest = next(
+            (m for m in manifests if m.get("platform") == platform_str),
+            None,
+        )
+        if not manifest:
+            return None
+
+        archive_id = manifest.get("archiveId")
+        if not archive_id:
+            return None
+
+        resp2 = requests.get(
+            f"{base}/archives/{archive_id}",
+            headers=headers,
+            timeout=10,
+        )
+        resp2.raise_for_status()
+        archive = _unwrap_response(resp2.json())
+        if not isinstance(archive, dict):
+            return None
+
+        result = (
+            archive.get("packages", []),
+            archive.get("id"),
+            archive.get("version"),
+        )
+        _archive_cache[cache_key] = result
+        return result
+
+    except requests.HTTPError as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == 404:
+            return None
+        print(f"⚠️ OTA server error fetching tag '{tag}': {e}")
+        return None
+    except requests.RequestException as e:
+        print(f"⚠️ OTA server unreachable: {e}")
+        return None
+
+
 def _stream_download(url: str, download_path: Path, error_context: str = "") -> bool:
     """Stream download a file from a URL.
 

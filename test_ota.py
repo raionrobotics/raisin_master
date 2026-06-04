@@ -690,6 +690,92 @@ class TestDownload(unittest.TestCase):
         # Only one HTTP call thanks to caching
         self.assertEqual(mock_get.call_count, 1)
 
+    @patch("commands.ota_client.authenticate", return_value="tok")
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
+    def test_fetch_archive_by_tag_returns_archive(self, mock_get, _ep, _auth):
+        tag_response = _mock_response(
+            json_data={
+                "data": {
+                    "id": "tag-1",
+                    "archiveName": "raisin-robot",
+                    "tagName": "stable",
+                    "manifests": [
+                        {"archiveId": "arch-2", "platform": "linux-22.04-x86_64"},
+                        {"archiveId": "arch-3", "platform": "linux-22.04-arm64"},
+                    ],
+                }
+            }
+        )
+        archive_response = _mock_response(
+            json_data={
+                "data": {
+                    "id": "arch-2",
+                    "version": "v1.0.97",
+                    "packages": [
+                        {"packageName": "raisin", "manifestHash": "abc", "packageId": "p1"},
+                    ],
+                }
+            }
+        )
+        mock_get.side_effect = [tag_response, archive_response]
+
+        result = ota._fetch_archive_by_tag(
+            "raisin-robot", "linux-22.04-x86_64", "stable"
+        )
+        self.assertIsNotNone(result)
+        packages, archive_id, archive_version = result
+        self.assertEqual(archive_id, "arch-2")
+        self.assertEqual(archive_version, "v1.0.97")
+        self.assertEqual(len(packages), 1)
+        self.assertEqual(mock_get.call_count, 2)
+
+    @patch("commands.ota_client.authenticate", return_value="tok")
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
+    def test_fetch_archive_by_tag_returns_none_when_platform_missing(
+        self, mock_get, _ep, _auth
+    ):
+        tag_response = _mock_response(
+            json_data={
+                "data": {
+                    "id": "tag-1",
+                    "manifests": [
+                        {"archiveId": "arch-3", "platform": "linux-22.04-arm64"},
+                    ],
+                }
+            }
+        )
+        mock_get.return_value = tag_response
+
+        result = ota._fetch_archive_by_tag(
+            "raisin-robot", "linux-22.04-x86_64", "stable"
+        )
+        self.assertIsNone(result)
+        # No second call to /archives/{id}
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch("commands.ota_client.authenticate", return_value="tok")
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
+    def test_fetch_archive_by_tag_returns_none_on_404(self, mock_get, _ep, _auth):
+        err_resp = MagicMock()
+        err_resp.status_code = 404
+        http_err = ota.requests.HTTPError(response=err_resp)
+        not_found = _mock_response(status_code=404, raise_for_status=http_err)
+        mock_get.return_value = not_found
+
+        result = ota._fetch_archive_by_tag(
+            "raisin-robot", "linux-22.04-x86_64", "stable"
+        )
+        self.assertIsNone(result)
+
     @patch("commands.ota_client._download_package_blob")
     @patch("commands.ota_client._fetch_archive_manifest")
     def test_download_package_happy_path(self, mock_manifest, mock_blob):
