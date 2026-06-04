@@ -1292,6 +1292,68 @@ class TestInstallIntegration(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(mock_install.call_args[0][3], "team-archive")
 
+    def test_install_cli_default_tag_is_stable(self):
+        from commands.install import install_cli_command
+
+        runner = CliRunner()
+        with patch("commands.install.install_command") as mock_install:
+            result = runner.invoke(install_cli_command, ["mypkg"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(mock_install.call_args.kwargs["tag"], "stable")
+
+    def test_install_cli_custom_tag_passed_through(self):
+        from commands.install import install_cli_command
+
+        runner = CliRunner()
+        with patch("commands.install.install_command") as mock_install:
+            result = runner.invoke(
+                install_cli_command, ["mypkg", "--tag", "beta"]
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(mock_install.call_args.kwargs["tag"], "beta")
+
+    def test_install_cli_tag_none_passes_string_for_install_command_to_normalize(
+        self,
+    ):
+        # The CLI itself accepts any string; the install_command layer
+        # is responsible for normalising the literal 'none' to Python None
+        # so the underlying ota_client falls back to legacy selection.
+        from commands.install import install_cli_command
+
+        runner = CliRunner()
+        with patch("commands.install.install_command") as mock_install:
+            result = runner.invoke(
+                install_cli_command, ["mypkg", "--tag", "none"]
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(mock_install.call_args.kwargs["tag"], "none")
+
+    def test_install_command_normalises_tag_none_for_download(self):
+        # When no packages are queued, install_command forwards to
+        # download_all_from_archive and must normalise 'none' (any case) to
+        # None so the OTA client falls back to legacy lookup.
+        from commands.install import install_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._orig_script_directory = g.script_directory
+            g.script_directory = tmpdir
+            try:
+                with patch(
+                    "commands.install.load_configuration",
+                    return_value=([{"name": "any-repo"}], {}, "user", None, []),
+                ):
+                    with patch(
+                        "commands.install.download_all_from_archive"
+                    ) as mock_dl:
+                        install_command([], "release", tag="none")
+            finally:
+                g.script_directory = self._orig_script_directory
+
+        self.assertIsNone(mock_dl.call_args.kwargs["tag"])
+
 
 # ============================================================================
 # 7. Integration: publish.py
