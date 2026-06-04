@@ -28,6 +28,19 @@ from commands.utils import load_configuration, parse_version_specifier
 from commands.ota_client import download_package_at_timestamp, download_all_from_archive
 
 
+def _default_tag_for_user_type(user_type: Optional[str]) -> str:
+    """Map configuration_setting.yaml `user_type` to the default archive tag.
+
+    - "devel" (and anything that starts with "dev") → "latest"
+      — developers want the freshest build.
+    - everything else (including "user") → "stable"
+      — production-style installs default to the promoted/blessed archive.
+    """
+    if user_type and user_type.strip().lower().startswith("dev"):
+        return "latest"
+    return "stable"
+
+
 def install_command(
     targets,
     build_type,
@@ -35,7 +48,7 @@ def install_command(
     archive_name: Optional[str] = None,
     at_timestamp: Optional[str] = None,
     from_github: bool = False,
-    tag: Optional[str] = "stable",
+    tag: Optional[str] = None,
 ):
     """
     Install packages and their dependencies.
@@ -47,8 +60,11 @@ def install_command(
         archive_name (str): Optional archive base name override (e.g., 'raisin-robot')
         at_timestamp (str): Optional timestamp for time-travel install (e.g., '2024-01-15')
         from_github (bool): If True, skip OTA and download directly from GitHub
-        tag (str): Archive tag to resolve (default 'stable'). Set to 'none' or
-            None to fall back to legacy latest-by-time selection. Ignored when
+        tag (str): Archive tag to resolve. When None (default), the tag is
+            derived from configuration_setting.yaml: `user_type: devel` →
+            "latest", anything else → "stable". Pass an explicit tag string
+            (e.g. "beta") to override, or "none"/None at this layer to fall
+            back to legacy latest-by-time selection. Ignored when
             `archive_version` is provided.
     """
     print("🚀 Starting installation process...")
@@ -75,6 +91,15 @@ def install_command(
     if not tokens:
         print(
             "⚠️ No GitHub tokens found. Packages not available via OTA will be skipped."
+        )
+
+    # If the caller didn't pin a tag, derive it from the user_type.
+    # "devel" → bleeding-edge ("latest"), anything else → "stable".
+    if tag is None:
+        tag = _default_tag_for_user_type(user_type)
+        print(
+            f"ℹ️  No --tag provided; using '{tag}' "
+            f"(derived from configuration_setting.yaml user_type='{user_type}')."
         )
 
     # Process installation queue
@@ -439,11 +464,12 @@ def install_command(
 @click.option(
     "--tag",
     "tag",
-    default="stable",
-    show_default=True,
+    default=None,
     help=(
-        "Install from the archive marked with this tag (default 'stable'). "
-        "Pass 'none' to fall back to legacy latest-by-time selection."
+        "Install from the archive marked with this tag. When omitted, the tag "
+        "defaults based on configuration_setting.yaml user_type: 'devel' → "
+        "'latest', anything else → 'stable'. Pass 'none' to fall back to legacy "
+        "latest-by-time selection."
     ),
 )
 def install_cli_command(

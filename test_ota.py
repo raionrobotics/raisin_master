@@ -1293,7 +1293,10 @@ class TestInstallIntegration(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(mock_install.call_args[0][3], "team-archive")
 
-    def test_install_cli_default_tag_is_stable(self):
+    def test_install_cli_default_tag_is_none_for_install_command_to_derive(self):
+        # The CLI default is now None so that install_command can derive
+        # the right tag from configuration_setting.yaml's user_type.
+        # An explicit --tag value (any other test) still propagates as-is.
         from commands.install import install_cli_command
 
         runner = CliRunner()
@@ -1301,7 +1304,7 @@ class TestInstallIntegration(unittest.TestCase):
             result = runner.invoke(install_cli_command, ["mypkg"])
 
         self.assertEqual(result.exit_code, 0)
-        self.assertEqual(mock_install.call_args.kwargs["tag"], "stable")
+        self.assertIsNone(mock_install.call_args.kwargs["tag"])
 
     def test_install_cli_custom_tag_passed_through(self):
         from commands.install import install_cli_command
@@ -1354,6 +1357,59 @@ class TestInstallIntegration(unittest.TestCase):
                 g.script_directory = self._orig_script_directory
 
         self.assertIsNone(mock_dl.call_args.kwargs["tag"])
+
+    def test_default_tag_for_user_type_devel_is_latest(self):
+        from commands.install import _default_tag_for_user_type
+
+        self.assertEqual(_default_tag_for_user_type("devel"), "latest")
+        self.assertEqual(_default_tag_for_user_type("DEVEL"), "latest")
+        self.assertEqual(_default_tag_for_user_type(" devel "), "latest")
+        self.assertEqual(_default_tag_for_user_type("developer"), "latest")
+
+    def test_default_tag_for_user_type_user_is_stable(self):
+        from commands.install import _default_tag_for_user_type
+
+        self.assertEqual(_default_tag_for_user_type("user"), "stable")
+        self.assertEqual(_default_tag_for_user_type(""), "stable")
+        self.assertEqual(_default_tag_for_user_type(None), "stable")
+        self.assertEqual(_default_tag_for_user_type("anything-else"), "stable")
+
+    def _run_install_command_with_user_type(self, user_type):
+        """Run install_command with no packages + no --tag, return the
+        ``tag`` kwarg actually forwarded to download_all_from_archive."""
+        from commands.install import install_command
+
+        self._orig_script_directory = g.script_directory
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            try:
+                with patch(
+                    "commands.install.load_configuration",
+                    return_value=(
+                        [{"name": "any-repo"}],
+                        {},
+                        user_type,
+                        None,
+                        [],
+                    ),
+                ):
+                    with patch(
+                        "commands.install.download_all_from_archive"
+                    ) as mock_dl:
+                        install_command([], "release")
+                return mock_dl.call_args.kwargs["tag"]
+            finally:
+                g.script_directory = self._orig_script_directory
+
+    def test_install_command_defaults_to_latest_for_devel_user(self):
+        self.assertEqual(
+            self._run_install_command_with_user_type("devel"), "latest"
+        )
+
+    def test_install_command_defaults_to_stable_for_regular_user(self):
+        self.assertEqual(
+            self._run_install_command_with_user_type("user"), "stable"
+        )
 
 
 # ============================================================================

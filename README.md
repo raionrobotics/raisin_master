@@ -109,7 +109,9 @@ git clone <your-package-repository>
 Run the `install` command to download packages from the OTA server (primary) or GitHub releases (fallback).
 
 ```bash
-# Install from the archive tagged 'stable' (default)
+# Install from the tagged archive (default tag is derived from
+# configuration_setting.yaml's user_type: 'devel' → 'latest',
+# anything else → 'stable')
 raisin install
 
 # Install a specific package
@@ -157,7 +159,11 @@ raisin install raisin_network --type debug --archive-name team-robot --archive-v
 
 > **Note:** Packages are downloaded from the OTA server by default. Use `--archive-name` to override `RAISIN_ARCHIVE_NAME` for a single install command. For debug installs, `-debug` is added only when the provided archive name does not already end with `-debug`. Use `--from-github` to bypass OTA and download directly from GitHub releases (useful for debugging or when OTA is unavailable).
 >
-> **Tag selection:** By default `raisin install` resolves the archive through the `stable` tag. If no archive is tagged `stable` for your platform, the install aborts with an actionable error — it does **not** silently fall back to the most recent build. Pass `--tag <name>` to opt into a different tag (e.g. `beta`), or `--tag none` to use the legacy latest-by-time selection.
+> **Tag selection:** By default `raisin install` resolves the archive through a tag derived from `configuration_setting.yaml`:
+> - `user_type: devel` → defaults to **`latest`** (newest archive available, including pre-releases)
+> - anything else (e.g. `user_type: user`) → defaults to **`stable`** (the promoted/blessed archive)
+>
+> If no archive is tagged with the resolved tag for your platform, the install aborts with an actionable error — it does **not** silently fall back to the most recent build. Pass `--tag <name>` to override (e.g. `beta`), or `--tag none` to use the legacy latest-by-time selection.
 
 ### 6. Install Package Dependencies
 
