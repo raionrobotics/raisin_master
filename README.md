@@ -49,15 +49,6 @@ Run the install command to set up the RAISIN command-line tool. This:
 - Installs system dependencies (Python, CMake, Ninja, clang-format, pre-commit, gh)
 - Adds a shell function for auto-activation
 
-On Ubuntu or other Debian-based systems, install the Python virtual environment packages first:
-
-```bash
-sudo apt update
-sudo apt install python3-venv python3-virtualenv python3-pip
-```
-
-Then run the RAISIN installer:
-
 ```bash
 ./raisin --install
 ```
