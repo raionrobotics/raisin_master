@@ -183,6 +183,21 @@ function(raisin_windows_export)
     endif ()
 endfunction()
 
+function(raisin_enable_coverage)
+    # Add gcov line coverage when building tests
+    if(RAISIN_BUILD_TEST AND NOT WIN32)
+        foreach(target_name IN LISTS ARGV)
+            target_compile_options(${target_name} PRIVATE --coverage -O0 -g)
+            get_target_property(_target_type ${target_name} TYPE)
+            if(_target_type STREQUAL "STATIC_LIBRARY")
+                target_link_libraries(${target_name} PUBLIC gcov)
+            else()
+                target_link_options(${target_name} PRIVATE --coverage)
+            endif()
+        endforeach()
+    endif()
+endfunction()
+
 macro(raisin_linux_only)
     if(WIN32)
         # This will return from the scope that *calls* the macro

@@ -78,3 +78,4 @@ vcpkg_installed/*
 
 # Worktrees
 .worktrees/
+/coverage_report
