@@ -57,7 +57,7 @@ function(raisin_install PROJECT_NAME)
     set(find_package_string "")
     # Loop over the *remaining* arguments, which are the dependencies
     foreach(libName IN LISTS ARG_UNPARSED_ARGUMENTS)
-        string(APPEND find_package_string "find_package(${libName} REQUIRED)\n")
+        string(APPEND find_package_string "if(NOT TARGET ${libName})\n    find_package(${libName} REQUIRED)\nendif()\n")
     endforeach()
 
     set(_package_config_in_content
