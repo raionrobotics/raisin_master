@@ -271,6 +271,7 @@ def run_unittests(
     build_type: Optional[str],
     coverage_output: str = "coverage_report",
     coverage: bool = False,
+    timeout: int = 300,
 ) -> None:
     requested = (build_type or "").lower().strip()
     if requested and requested not in {"debug", "release"}:
@@ -302,7 +303,19 @@ def run_unittests(
     for exe in executables:
         click.echo(f"\n▶ {exe}")
         try:
-            subprocess.run([str(exe)], cwd=build_dir, check=True)
+            # timeout=0 disables the limit; otherwise a hung test is killed
+            # (SIGKILL) after `timeout` seconds, marked failed, and we move on.
+            subprocess.run(
+                [str(exe)],
+                cwd=build_dir,
+                check=True,
+                timeout=(timeout if timeout > 0 else None),
+            )
+        except subprocess.TimeoutExpired:
+            failures += 1
+            click.echo(
+                f"⏱️  Timed out after {timeout}s (killed): {exe}", err=True
+            )
         except subprocess.CalledProcessError as e:
             failures += 1
             click.echo(f"❌ Failed with exit code {e.returncode}: {exe}", err=True)
@@ -341,10 +354,19 @@ def run_unittests(
     "(coverage_report/<module>/index.html) plus a landing page, after running "
     "tests. Requires a build configured with -DRAISIN_BUILD_TEST=ON (Linux/gcc).",
 )
+@click.option(
+    "--timeout",
+    default=60,
+    show_default=True,
+    type=int,
+    help="Per-test-executable timeout in seconds; a test exceeding it is killed "
+    "and marked failed (so a hung test cannot block the run). Use 0 to disable.",
+)
 def test_command(
     build_type: Optional[str],
     coverage_output: str,
     coverage: bool,
+    timeout: int,
 ) -> None:
     """
     Run all unit tests from the CMake build folder.
@@ -355,6 +377,7 @@ def test_command(
         python3 raisin.py test debug         # runs debug tests
         python3 raisin.py test release       # runs release tests
         python3 raisin.py test --coverage    # runs tests and generate coverage report
+        python3 raisin.py test --timeout 60  # kill any test hung longer than 60 s
 
     """
     try:
@@ -362,6 +385,7 @@ def test_command(
             build_type,
             coverage_output=coverage_output,
             coverage=coverage,
+            timeout=timeout,
         )
     except click.ClickException:
         raise
