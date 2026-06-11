@@ -269,7 +269,7 @@ def _generate_coverage_report_per_module(
 
 def run_unittests(
     build_type: Optional[str],
-    coverage_output: str = "coverage_report",
+    coverage_output: str = "coverage-report",
     coverage: bool = False,
     timeout: int = 300,
 ) -> None:
@@ -342,7 +342,7 @@ def run_unittests(
 )
 @click.option(
     "--coverage-output",
-    default="coverage_report",
+    default="coverage-report",
     show_default=True,
     help="Directory to write the HTML report (index.html) into.",
 )
@@ -351,7 +351,7 @@ def run_unittests(
     is_flag=True,
     default=False,
     help="Generate an HTML line-coverage report (gcovr) per package/module "
-    "(coverage_report/<module>/index.html) plus a landing page, after running "
+    "(coverage-report/<module>/index.html) plus a landing page, after running "
     "tests. Requires a build configured with -DRAISIN_BUILD_TEST=ON (Linux/gcc).",
 )
 @click.option(
