@@ -79,4 +79,4 @@ vcpkg_installed/*
 # Worktrees
 .worktrees/
 
-CMake
+/CMake/

@@ -1482,7 +1482,12 @@ def _discover_pure_cmake_projects(
                     cmake_args = raw_args.get(arch, [])
                 else:
                     cmake_args = raw_args
-                provides = raw_provides if isinstance(raw_provides, list) else []
+                if isinstance(raw_provides, list):
+                    provides = raw_provides
+                elif isinstance(raw_provides, str):
+                    provides = [raw_provides]
+                else:
+                    provides = []
             else:
                 project = entry
                 cmake_args = []
