@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import click
@@ -105,6 +106,13 @@ def _resolve_output_dir(coverage_output: str) -> Path:
     return output_dir
 
 
+# Paths excluded from coverage even though they live under a package directory
+COVERAGE_EXCLUDE_PATTERNS = [
+    r".*/third_party/.*",
+    r".*/3rdparty/.*",
+]
+
+
 def _run_gcovr_html(build_dir: Path, root: Path, filter_pattern: str, index: Path) -> str:
     """Run gcovr to write an --html-details report; return its stdout summary."""
     index.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +131,8 @@ def _run_gcovr_html(build_dir: Path, root: Path, filter_pattern: str, index: Pat
         "--print-summary",
         str(build_dir),
     ]
+    for pattern in COVERAGE_EXCLUDE_PATTERNS:
+        cmd.extend(["--exclude", pattern])
     try:
         proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
@@ -267,11 +277,95 @@ def _generate_coverage_report_per_module(
     click.echo(f"   Landing page: {landing}")
 
 
+def _pkg_label_for_exe(exe: Path, build_dir: Path) -> str:
+    """Short package name a test executable belongs to (for grouping)."""
+    parts = exe.relative_to(build_dir).parts
+    if "CMakeFiles" in parts:
+        pkg_parts = parts[: parts.index("CMakeFiles")]
+    else:
+        pkg_parts = parts[:-1]
+    if pkg_parts and pkg_parts[0] == "src" and len(pkg_parts) > 1:
+        return pkg_parts[-1]
+    return exe.stem
+
+
+def _parse_gtest_xml(path: Path):
+    """Parse a gtest JUnit XML; return per-binary counts or None on failure."""
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        return None
+
+    def gi(key):
+        try:
+            return int(root.get(key, 0) or 0)
+        except ValueError:
+            return 0
+
+    return {"tests": gi("tests"), "failed": gi("failures") + gi("errors"), "disabled": gi("disabled")}
+
+
+def _aggregate_test_results(results) -> dict:
+    """Roll up per-executable results into per-package counts."""
+    agg: dict = {}
+    for r in results:
+        a = agg.setdefault(
+            r["label"],
+            {"tests": 0, "passed": 0, "failed": 0, "disabled": 0, "crashed": False},
+        )
+        data = _parse_gtest_xml(r["xml"]) if r["xml"] and r["xml"].is_file() else None
+        if data:
+            a["tests"] += data["tests"]
+            a["failed"] += data["failed"]
+            a["passed"] += data["tests"] - data["failed"]
+            a["disabled"] += data["disabled"]
+        else:
+            # No XML written -> the binary crashed/timed out before finishing.
+            a["crashed"] = True
+    return agg
+
+
+def _print_test_table(agg: dict) -> None:
+    """Print a per-package pass/fail summary table to the console."""
+    name_w = max([len("Package")] + [len(n) for n in agg]) + 2
+    header = f"{'Package':<{name_w}}{'Tests':>7}{'Pass':>7}{'Fail':>7}{'Disabled':>10}"
+    click.echo("\n" + header)
+    click.echo("─" * len(header))
+    tot = {"tests": 0, "passed": 0, "failed": 0, "disabled": 0}
+    for name, a in sorted(agg.items()):
+        for k in tot:
+            tot[k] += a[k]
+        line = f"{name:<{name_w}}{a['tests']:>7}{a['passed']:>7}{a['failed']:>7}{a['disabled']:>10}"
+        if a["crashed"]:
+            line += "  (crashed/timeout)"
+        click.echo(click.style(line, fg="red" if a["failed"] or a["crashed"] else "green"))
+    click.echo("─" * len(header))
+    click.echo(f"{'TOTAL':<{name_w}}{tot['tests']:>7}{tot['passed']:>7}{tot['failed']:>7}{tot['disabled']:>10}")
+
+
+def _write_test_report_md(report_dir: Path, agg: dict) -> Path:
+    """Write the per-package pass/fail summary (same as the console table) as Markdown."""
+    lines = ["# Unit test report", "", "| Package | Tests | Pass | Fail | Disabled |", "|---|--:|--:|--:|--:|"]
+    tot = {"tests": 0, "passed": 0, "failed": 0, "disabled": 0}
+    for name, a in sorted(agg.items()):
+        for k in tot:
+            tot[k] += a[k]
+        note = " (crashed/timeout)" if a["crashed"] else ""
+        lines.append(f"| {name}{note} | {a['tests']} | {a['passed']} | {a['failed']} | {a['disabled']} |")
+    lines.append(f"| **TOTAL** | **{tot['tests']}** | **{tot['passed']}** | **{tot['failed']}** | **{tot['disabled']}** |")
+
+    path = report_dir / "report.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def run_unittests(
     build_type: Optional[str],
     coverage_output: str = "coverage-report",
     coverage: bool = False,
     timeout: int = 300,
+    report: bool = False,
+    report_output: str = "test-report",
 ) -> None:
     requested = (build_type or "").lower().strip()
     if requested and requested not in {"debug", "release"}:
@@ -299,31 +393,55 @@ def run_unittests(
 
     click.echo(f"🧪 Running {len(executables)} unit test(s) in {build_dir}")
 
+    # With --report, have each gtest binary emit JUnit XML to aggregate later.
+    xml_dir = None
+    results = []
+    if report:
+        report_path = _resolve_output_dir(report_output)
+        xml_dir = report_path / "xml"
+        xml_dir.mkdir(parents=True, exist_ok=True)
+
     failures = 0
     for exe in executables:
         click.echo(f"\n▶ {exe}")
+        cmd = [str(exe)]
+        xml_file = None
+        if report:
+            label = _pkg_label_for_exe(exe, build_dir)
+            xml_file = xml_dir / f"{label}__{exe.stem}.xml"
+            cmd.append(f"--gtest_output=xml:{xml_file}")
+        status = "pass"
         try:
             # timeout=0 disables the limit; otherwise a hung test is killed
             # (SIGKILL) after `timeout` seconds, marked failed, and we move on.
             subprocess.run(
-                [str(exe)],
+                cmd,
                 cwd=build_dir,
                 check=True,
                 timeout=(timeout if timeout > 0 else None),
             )
         except subprocess.TimeoutExpired:
             failures += 1
+            status = "timeout"
             click.echo(
                 f"⏱️  Timed out after {timeout}s (killed): {exe}", err=True
             )
         except subprocess.CalledProcessError as e:
             failures += 1
+            status = "fail"
             click.echo(f"❌ Failed with exit code {e.returncode}: {exe}", err=True)
+        if report:
+            results.append({"label": _pkg_label_for_exe(exe, build_dir), "status": status, "xml": xml_file})
 
     if failures:
         click.echo(f"\n⚠️  {failures} test(s) failed.", err=True)
     else:
         click.echo("\n✅ All unit tests passed.")
+
+    if report:
+        agg = _aggregate_test_results(results)
+        _print_test_table(agg)
+        click.echo(f"\n📝 Test report: {_write_test_report_md(report_path, agg)}")
 
     # Generate the coverage report even if some tests failed, so partial
     # coverage is still available. Done before raising on failures.
@@ -362,11 +480,26 @@ def run_unittests(
     help="Per-test-executable timeout in seconds; a test exceeding it is killed "
     "and marked failed (so a hung test cannot block the run). Use 0 to disable.",
 )
+@click.option(
+    "--report",
+    is_flag=True,
+    default=False,
+    help="Collect per-package pass/fail counts (gtest XML), print a console "
+    "table, and save it as Markdown (test-report/report.md).",
+)
+@click.option(
+    "--report-output",
+    default="test-report",
+    show_default=True,
+    help="Directory for the --report output (report.md + xml/).",
+)
 def test_command(
     build_type: Optional[str],
     coverage_output: str,
     coverage: bool,
     timeout: int,
+    report: bool,
+    report_output: str,
 ) -> None:
     """
     Run all unit tests from the CMake build folder.
@@ -377,6 +510,7 @@ def test_command(
         python3 raisin.py test debug         # runs debug tests
         python3 raisin.py test release       # runs release tests
         python3 raisin.py test --coverage    # runs tests and generate coverage report
+        python3 raisin.py test --report      # per-package pass/fail table + report.md
         python3 raisin.py test --timeout 60  # kill any test hung longer than 60 s
 
     """
@@ -386,6 +520,8 @@ def test_command(
             coverage_output=coverage_output,
             coverage=coverage,
             timeout=timeout,
+            report=report,
+            report_output=report_output,
         )
     except click.ClickException:
         raise
