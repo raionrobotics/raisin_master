@@ -320,6 +320,27 @@ raisin() {
     echo "  ✅ Added raisin() function to ${shell_config}"
   fi
 
+  # Tab-completion (Click)
+  echo ""
+  echo "🔧 Setting up tab-completion..."
+  if [[ "${shell_config}" == *".zshrc" ]]; then
+    completion_mode="zsh_source"
+    completion_file="${HOME}/.raisin-complete.zsh"
+  else
+    completion_mode="bash_source"
+    completion_file="${HOME}/.raisin-complete.bash"
+  fi
+  if _RAISIN_COMPLETE="${completion_mode}" "${install_path}" > "${completion_file}" 2>/dev/null \
+       && grep -q "_raisin_completion\|complete .*raisin" "${completion_file}"; then
+    if ! grep -q "raisin-complete" "${shell_config}"; then
+      echo "source \"${completion_file}\"" >> "${shell_config}"
+    fi
+    echo "  ✅ Tab-completion installed (${completion_file})"
+  else
+    rm -f "${completion_file}"
+    echo "  ⚠️  Could not generate tab-completion; skipping."
+  fi
+
   echo ""
   echo "┌──────────────────────────────────────────────────────────┐"
   echo "│  Installation complete!                                  │"
