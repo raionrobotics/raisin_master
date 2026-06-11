@@ -71,4 +71,4 @@ cli.add_command(info_command, name="info")
 
 
 if __name__ == "__main__":
-    cli()
+    cli(prog_name="raisin")
