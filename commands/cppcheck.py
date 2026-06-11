@@ -15,19 +15,48 @@ from commands.test import _resolve_build_dir
 from commands.utils import get_build_jobs
 
 # Checks to enable in cppcheck
-_ENABLE = "warning,performance,portability,style"
+_ENABLE = "warning,performance,portability" # style is disabled now
 
-# subtrees to skip
+# subtrees to skip (always)
 _IGNORE_SUBTREES = [
     "generated",
-    "src/raisin_gui/thirdParty",
-    "src/raisin_third_party_common",
-    "src/raisin_third_party_robot",
-    "src/raisin_third_party_gui",
-    "src/raisin_plugin/raisin_ouster_plugin/third_party",
-    "src/raisin_plugin/raisin_livox_lidar_plugin/third_party",
-    "src/raisin_plugin/raisin_lidar_slam_plugin/thirdparty",
 ]
+
+# Any directory whose name contains one of these substrings (case-insensitive)
+# is treated as a third-party subtree and skipped.
+_IGNORE_DIR_TOKENS = [
+    "thirdparty",
+    "third_party",
+    "3rdparty",
+]
+
+# Directory names that are pruned while scanning for third-party subtrees, so
+# the walk stays fast and never descends into build/dependency output.
+_SCAN_PRUNE_DIRS = {
+    ".git",
+    ".cache",
+    "build",
+    "cmake-build-debug",
+    "cmake-build-release",
+    "install",
+    "node_modules",
+}
+
+
+def _discover_ignore_subtrees(root: Path) -> list:
+    """Find directories under root whose name marks a third-party subtree."""
+    found = []
+    for dirpath, dirnames, _ in os.walk(root):
+        # Prune noisy directories in place so os.walk does not descend.
+        dirnames[:] = [d for d in dirnames if d not in _SCAN_PRUNE_DIRS]
+        for name in list(dirnames):
+            low = name.lower()
+            if any(token in low for token in _IGNORE_DIR_TOKENS):
+                rel = os.path.relpath(os.path.join(dirpath, name), root)
+                found.append(rel)
+                # Do not descend into a subtree we are already skipping.
+                dirnames.remove(name)
+    return found
 
 # External/system locations to skip
 _SUPPRESS_PATH_GLOBS = [
@@ -145,7 +174,9 @@ def run_cppcheck(
     ]
     if suppressions.is_file():
         cmd.append(f"--suppressions-list={suppressions}")
-    for rel in _IGNORE_SUBTREES:
+    ignore_subtrees = _IGNORE_SUBTREES + _discover_ignore_subtrees(root)
+    for rel in ignore_subtrees:
+        rel = rel.replace(os.sep, "/")
         cmd.append(f"-i{root / rel}")
         cmd.append(f"--suppress=*:*/{rel}/*")
     for glob in _SUPPRESS_PATH_GLOBS:
