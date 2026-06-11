@@ -399,6 +399,8 @@ def run_unittests(
     if report:
         report_path = _resolve_output_dir(report_output)
         xml_dir = report_path / "xml"
+        if xml_dir.is_dir():
+            shutil.rmtree(xml_dir)
         xml_dir.mkdir(parents=True, exist_ok=True)
 
     failures = 0
