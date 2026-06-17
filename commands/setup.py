@@ -200,12 +200,12 @@ def _build_single_cmake_project(
 
 @click.command()
 @click.option(
-    "--no_test",
+    "--test",
     is_flag=True,
-    help="Disable building unit tests for this setup run",
+    help="Enable building unit tests for this setup run",
 )
 @click.argument("targets", nargs=-1)
-def setup_command(no_test, targets):
+def setup_command(test, targets):
     """
     Generate interface files (.msg, .srv, .action) and configure CMake.
 
@@ -225,7 +225,7 @@ def setup_command(no_test, targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup(build_test_enabled=(not no_test))
+    setup(build_test_enabled=test)
 
 
 def process_build_targets(targets):
