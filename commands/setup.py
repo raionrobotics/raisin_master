@@ -2268,7 +2268,7 @@ def setup(
 
     # Update the CMakeLists.txt based on the template
     if build_test_enabled is None:
-        build_test_enabled = True
+        build_test_enabled = False
     update_cmake_file(project_directories, build_dir, bool(build_test_enabled))
 
     if package_name == "":  # this means we are not in the release mode

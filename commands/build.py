@@ -274,8 +274,13 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     default=None,
     help="Python interpreter for raisin Python packages (default: raisin venv Python)",
 )
+@click.option(
+    "--test",
+    is_flag=True,
+    help="Enable building unit tests (and coverage instrumentation) for this build",
+)
 @click.argument("targets", nargs=-1)
-def build_cli_command(build_types, install, python_executable, targets):
+def build_cli_command(build_types, install, python_executable, test, targets):
     """
     Compile the project using CMake and Ninja.
 
@@ -285,6 +290,7 @@ def build_cli_command(build_types, install, python_executable, targets):
         raisin build --type debug --install          # Build debug and install
         raisin build -t release -t debug -i          # Build both types and install
         raisin build -t release raisin_network       # Build specific target
+        raisin build -t debug --test                 # Build with unit tests enabled
 
     \b
     Note: This command first runs setup, then compiles.
@@ -304,7 +310,7 @@ def build_cli_command(build_types, install, python_executable, targets):
 
     raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
 
-    setup(raisin_march=raisin_march)
+    setup(raisin_march=raisin_march, build_test_enabled=test)
 
     # Then build
     build_types = list(build_types) if build_types else []
