@@ -218,6 +218,7 @@ def _build_package(
         package_name=target,
         build_type=build_type,
         build_dir=str(build_dir),
+        build_test_enabled=False,
         raisin_march=raisin_march,
     )
     build_dir.mkdir(parents=True, exist_ok=True)
