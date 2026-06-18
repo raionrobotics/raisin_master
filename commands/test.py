@@ -1,7 +1,10 @@
 """
 Test command for RAISIN.
 
-Runs all unit test executables built by CMake that end with `_unittest`.
+Runs the GoogleTest executables built by CMake: unit tests (names ending in
+`_unittest`) and integration tests (names ending in `_inttest`). By default
+both run (unit first); --unit / --integration restrict to one kind. The
+coverage report (--coverage) stays unit-test driven.
 """
 
 import os
@@ -18,14 +21,42 @@ from typing import Optional
 from commands import globals as g
 
 
-def _is_unittest_executable(path: Path) -> bool:
+# Test-executable name suffixes, in run order (unit first, then integration).
+UNIT_SUFFIX = "_unittest"
+INTEGRATION_SUFFIX = "_inttest"
+ALL_SUFFIXES = (UNIT_SUFFIX, INTEGRATION_SUFFIX)
+
+
+def _is_test_executable(path: Path, suffix: str) -> bool:
     if not path.is_file():
         return False
-    if not path.stem.endswith("_unittest"):
+    if not path.stem.endswith(suffix):
         return False
     if platform.system().lower() == "windows":
         return path.suffix.lower() in {".exe", ".bat", ".cmd"}
     return os.access(path, os.X_OK)
+
+
+def _is_unittest_executable(path: Path) -> bool:
+    # Kept for the coverage path, which is unit-test driven.
+    return _is_test_executable(path, UNIT_SUFFIX)
+
+
+def _discover_tests(build_dir: Path, suffixes) -> list:
+    """Collect test executables under build_dir, ordered by suffix (the order in
+    `suffixes`, i.e. unit before integration) then path."""
+    found = []
+    seen = set()
+    for suffix in suffixes:
+        for p in sorted(build_dir.rglob(f"*{suffix}*"), key=lambda p: str(p)):
+            # Skip CMake's internal scratch dirs (TryCompile artifacts, compiler
+            # checks) which can contain binaries whose names match the suffix.
+            if p in seen or "CMakeFiles" in p.parts:
+                continue
+            if _is_test_executable(p, suffix):
+                seen.add(p)
+                found.append(p)
+    return found
 
 
 def _get_build_dir_from_config(build_type: str) -> Path:
@@ -361,6 +392,7 @@ def _write_test_report_md(report_dir: Path, agg: dict) -> Path:
 
 def run_unittests(
     build_type: Optional[str],
+    suffixes=ALL_SUFFIXES,
     coverage_output: str = "coverage-report",
     coverage: bool = False,
     timeout: int = 300,
@@ -380,18 +412,17 @@ def run_unittests(
             f"Run: python3 raisin.py build --type {build_type_for_message}"
         )
 
-    executables = sorted(
-        [p for p in build_dir.rglob("*_unittest*") if _is_unittest_executable(p)],
-        key=lambda p: str(p),
-    )
+    executables = _discover_tests(build_dir, suffixes)
 
     if not executables:
         raise click.ClickException(
-            f"No unit test executables found under: {build_dir}\n"
-            "Expected files whose name ends with '_unittest'."
+            f"No test executables found under: {build_dir}\n"
+            f"Expected files whose name ends with one of: {', '.join(suffixes)}."
         )
 
-    click.echo(f"🧪 Running {len(executables)} unit test(s) in {build_dir}")
+    suffix_names = {UNIT_SUFFIX: "unit", INTEGRATION_SUFFIX: "integration"}
+    kinds = " + ".join(suffix_names.get(s, s.lstrip("_")) for s in suffixes)
+    click.echo(f"🧪 Running {len(executables)} {kinds} test(s) in {build_dir}")
 
     # With --report, have each gtest binary emit JUnit XML to aggregate later.
     xml_dir = None
@@ -438,7 +469,7 @@ def run_unittests(
     if failures:
         click.echo(f"\n⚠️  {failures} test(s) failed.", err=True)
     else:
-        click.echo("\n✅ All unit tests passed.")
+        click.echo("\n✅ All tests passed.")
 
     if report:
         agg = _aggregate_test_results(results)
@@ -459,6 +490,14 @@ def run_unittests(
     "build_type",
     required=False,
     type=click.Choice(["debug", "release"], case_sensitive=False),
+)
+@click.option(
+    "--unit", "only_unit", is_flag=True,
+    help="Run only unit tests (executables ending in _unittest).",
+)
+@click.option(
+    "--integration", "only_integration", is_flag=True,
+    help="Run only integration tests (executables ending in _inttest).",
 )
 @click.option(
     "--coverage-output",
@@ -497,6 +536,8 @@ def run_unittests(
 )
 def test_command(
     build_type: Optional[str],
+    only_unit: bool,
+    only_integration: bool,
     coverage_output: str,
     coverage: bool,
     timeout: int,
@@ -504,21 +545,36 @@ def test_command(
     report_output: str,
 ) -> None:
     """
-    Run all unit tests from the CMake build folder.
+    Run tests from the CMake build folder.
+
+    By default runs BOTH unit (*_unittest) and integration (*_inttest) tests,
+    unit first. Use --unit or --integration to run only one kind.
 
     \b
     Examples:
-        python3 raisin.py test               # runs release tests (default)
-        python3 raisin.py test debug         # runs debug tests
-        python3 raisin.py test release       # runs release tests
-        python3 raisin.py test --coverage    # runs tests and generate coverage report
+        python3 raisin.py test               # unit + integration (release)
+        python3 raisin.py test debug         # unit + integration (debug)
+        python3 raisin.py test --unit        # unit tests only
+        python3 raisin.py test --integration # integration tests only
+        python3 raisin.py test --coverage    # run tests + per-module coverage report
         python3 raisin.py test --report      # per-package pass/fail table + report.md
         python3 raisin.py test --timeout 60  # kill any test hung longer than 60 s
 
     """
+    if only_unit and only_integration:
+        raise click.ClickException("--unit and --integration are mutually exclusive")
+
+    if only_unit:
+        suffixes = (UNIT_SUFFIX,)
+    elif only_integration:
+        suffixes = (INTEGRATION_SUFFIX,)
+    else:
+        suffixes = ALL_SUFFIXES
+
     try:
         run_unittests(
             build_type,
+            suffixes=suffixes,
             coverage_output=coverage_output,
             coverage=coverage,
             timeout=timeout,
