@@ -25,6 +25,7 @@ _IGNORE_SUBTREES = [
 # Any directory whose name contains one of these substrings (case-insensitive)
 # is treated as a third-party subtree and skipped.
 _IGNORE_DIR_TOKENS = [
+    "test",
     "thirdparty",
     "third_party",
     "3rdparty",
