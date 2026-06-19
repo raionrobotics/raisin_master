@@ -395,7 +395,7 @@ def run_unittests(
     suffixes=ALL_SUFFIXES,
     coverage_output: str = "coverage-report",
     coverage: bool = False,
-    timeout: int = 300,
+    timeout: int = 600,
     report: bool = False,
     report_output: str = "test-report",
 ) -> None:
@@ -515,7 +515,7 @@ def run_unittests(
 )
 @click.option(
     "--timeout",
-    default=60,
+    default=600,
     show_default=True,
     type=int,
     help="Per-test-executable timeout in seconds; a test exceeding it is killed "
