@@ -652,6 +652,8 @@ class TestDownload(unittest.TestCase):
         archive_list = [
             {
                 "id": "arch-1",
+                "name": "raisin-robot",
+                "platform": "linux-22.04-x86_64",
                 "version": "v2024.01",
                 "packages": [
                     {"packageName": "mypkg", "tagName": "v1.0.0", "packageId": "p1"}
@@ -676,8 +678,49 @@ class TestDownload(unittest.TestCase):
         "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
     )
     @patch("commands.ota_client.requests.get")
+    def test_fetch_archive_manifest_uses_exact_version_param(
+        self, mock_get, _ep, _auth
+    ):
+        archive_list = [
+            {
+                "id": "arch-dso-103",
+                "name": "dso",
+                "platform": "ubuntu-24.04-arm64",
+                "version": "1.0.3",
+                "packages": [],
+            }
+        ]
+        mock_get.return_value = _mock_response(
+            json_data={
+                "data": {"archives": archive_list, "total": 1, "page": 1, "limit": 20}
+            }
+        )
+
+        result = ota._fetch_archive_manifest("dso", "ubuntu-24.04-arm64", "1.0.3")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1], "arch-dso-103")
+        params = mock_get.call_args.kwargs["params"]
+        self.assertEqual(params["name"], "dso")
+        self.assertEqual(params["platform"], "ubuntu-24.04-arm64")
+        self.assertEqual(params["version"], "1.0.3")
+        self.assertNotIn("search", params)
+
+    @patch("commands.ota_client.authenticate", return_value="tok")
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
     def test_fetch_archive_manifest_caching(self, mock_get, _ep, _auth):
-        archive_list = [{"id": "arch-1", "version": "v2024.01", "packages": []}]
+        archive_list = [
+            {
+                "id": "arch-1",
+                "name": "raisin-robot",
+                "platform": "linux-22.04-x86_64",
+                "version": "v2024.01",
+                "packages": [],
+            }
+        ]
         mock_get.return_value = _mock_response(
             json_data={
                 "data": {"archives": archive_list, "total": 1, "page": 1, "limit": 20}
@@ -715,7 +758,11 @@ class TestDownload(unittest.TestCase):
                     "id": "arch-2",
                     "version": "v1.0.97",
                     "packages": [
-                        {"packageName": "raisin", "manifestHash": "abc", "packageId": "p1"},
+                        {
+                            "packageName": "raisin",
+                            "manifestHash": "abc",
+                            "packageId": "p1",
+                        },
                     ],
                 }
             }
@@ -778,9 +825,7 @@ class TestDownload(unittest.TestCase):
 
     @patch("commands.ota_client._fetch_archive_by_tag")
     @patch("commands.ota_client._download_package_blob")
-    def test_download_all_uses_tag_when_provided(
-        self, mock_dl, mock_fetch_by_tag
-    ):
+    def test_download_all_uses_tag_when_provided(self, mock_dl, mock_fetch_by_tag):
         mock_fetch_by_tag.return_value = (
             [{"packageName": "raisin", "manifestHash": "abc", "packageId": "p1"}],
             "arch-tagged",
@@ -789,18 +834,14 @@ class TestDownload(unittest.TestCase):
         mock_dl.return_value = True
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            ota.download_all_from_archive(
-                "release", Path(tmpdir), tag="stable"
-            )
+            ota.download_all_from_archive("release", Path(tmpdir), tag="stable")
 
         mock_fetch_by_tag.assert_called_once()
         args = mock_fetch_by_tag.call_args.args
         self.assertEqual(args[2], "stable")  # tag is third positional
 
     @patch("commands.ota_client._fetch_archive_by_tag")
-    def test_download_all_returns_empty_when_tag_unresolvable(
-        self, mock_fetch_by_tag
-    ):
+    def test_download_all_returns_empty_when_tag_unresolvable(self, mock_fetch_by_tag):
         # When the requested tag can't be resolved (and tag IS 'stable' so
         # no further fallback), the function should surface an empty result
         # (and a warning) rather than aborting, so install.py can fall back
@@ -897,7 +938,9 @@ class TestDownload(unittest.TestCase):
 
             mock_blob.side_effect = fake_download
 
-            result = ota.download_package("mypkg", "", "release", install_base, tag=None)
+            result = ota.download_package(
+                "mypkg", "", "release", install_base, tag=None
+            )
 
             metadata_path = (
                 install_base
@@ -989,7 +1032,9 @@ class TestDownload(unittest.TestCase):
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
-            result = ota.download_package("mypkg", "", "release", install_base, tag=None)
+            result = ota.download_package(
+                "mypkg", "", "release", install_base, tag=None
+            )
 
         self.assertIsNone(result)
 
@@ -997,13 +1042,13 @@ class TestDownload(unittest.TestCase):
     def test_download_package_manifest_unavailable(self, _manifest):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
-            result = ota.download_package("mypkg", "", "release", Path(tmpdir), tag=None)
+            result = ota.download_package(
+                "mypkg", "", "release", Path(tmpdir), tag=None
+            )
         self.assertIsNone(result)
 
     @patch("commands.ota_client._fetch_archive_by_tag", return_value=None)
-    def test_download_package_returns_none_when_tag_unresolvable(
-        self, _by_tag
-    ):
+    def test_download_package_returns_none_when_tag_unresolvable(self, _by_tag):
         # Per-package install returns None when the tag can't be resolved
         # (and tag is 'stable' so no further fallback). install.py's
         # per-target loop will then fall back to GitHub releases.
@@ -1193,9 +1238,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
             # tag=None opts into the legacy latest-by-time selection that
             # mock_manifest is faking; without it the default tag='stable'
             # would route through _fetch_archive_by_tag instead.
-            result = ota.download_all_from_archive(
-                "release", install_base, tag=None
-            )
+            result = ota.download_all_from_archive("release", install_base, tag=None)
 
             metadata_path = (
                 install_base
@@ -1384,9 +1427,7 @@ class TestInstallIntegration(unittest.TestCase):
 
         runner = CliRunner()
         with patch("commands.install.install_command") as mock_install:
-            result = runner.invoke(
-                install_cli_command, ["mypkg", "--tag", "beta"]
-            )
+            result = runner.invoke(install_cli_command, ["mypkg", "--tag", "beta"])
 
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(mock_install.call_args.kwargs["tag"], "beta")
@@ -1401,9 +1442,7 @@ class TestInstallIntegration(unittest.TestCase):
 
         runner = CliRunner()
         with patch("commands.install.install_command") as mock_install:
-            result = runner.invoke(
-                install_cli_command, ["mypkg", "--tag", "none"]
-            )
+            result = runner.invoke(install_cli_command, ["mypkg", "--tag", "none"])
 
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(mock_install.call_args.kwargs["tag"], "none")
@@ -1422,9 +1461,7 @@ class TestInstallIntegration(unittest.TestCase):
                     "commands.install.load_configuration",
                     return_value=([{"name": "any-repo"}], {}, "user", None, []),
                 ):
-                    with patch(
-                        "commands.install.download_all_from_archive"
-                    ) as mock_dl:
+                    with patch("commands.install.download_all_from_archive") as mock_dl:
                         install_command([], "release", tag="none")
             finally:
                 g.script_directory = self._orig_script_directory
@@ -1466,23 +1503,17 @@ class TestInstallIntegration(unittest.TestCase):
                         [],
                     ),
                 ):
-                    with patch(
-                        "commands.install.download_all_from_archive"
-                    ) as mock_dl:
+                    with patch("commands.install.download_all_from_archive") as mock_dl:
                         install_command([], "release")
                 return mock_dl.call_args.kwargs["tag"]
             finally:
                 g.script_directory = self._orig_script_directory
 
     def test_install_command_defaults_to_latest_for_devel_user(self):
-        self.assertEqual(
-            self._run_install_command_with_user_type("devel"), "latest"
-        )
+        self.assertEqual(self._run_install_command_with_user_type("devel"), "latest")
 
     def test_install_command_defaults_to_stable_for_regular_user(self):
-        self.assertEqual(
-            self._run_install_command_with_user_type("user"), "stable"
-        )
+        self.assertEqual(self._run_install_command_with_user_type("user"), "stable")
 
 
 # ============================================================================

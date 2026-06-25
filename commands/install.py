@@ -121,12 +121,27 @@ def install_command(
     session = requests.Session()
     is_successful = True
 
+    # When the caller pinned an explicit archive (name AND/OR version), we
+    # refuse to fall back silently to another archive, another tag, or GitHub
+    # releases. A miss must be a hard, loud failure — the alternative is what
+    # caused `--archive-name dso --archive-version 1.0.3` to quietly resolve
+    # to `raisin-dev 1.0.3` and install the wrong controllers.
+    explicit_archive_pin = bool(archive_name) or bool(archive_version)
+
     if not install_queue:
         # Normalize 'none' (case-insensitive) to None for legacy fallback.
-        resolved_tag = (
-            None if (tag is None or str(tag).lower() == "none") else tag
-        )
-        if archive_version:
+        resolved_tag = None if (tag is None or str(tag).lower() == "none") else tag
+        if archive_name and archive_version:
+            print(
+                "ℹ️  No packages specified. Installing all packages from "
+                f"archive '{archive_name}' version '{archive_version}'."
+            )
+        elif archive_name:
+            print(
+                "ℹ️  No packages specified. Installing all packages from "
+                f"archive '{archive_name}'."
+            )
+        elif archive_version:
             print(
                 "ℹ️  No packages specified. Installing all packages from "
                 f"archive version {archive_version}."
@@ -154,14 +169,40 @@ def install_command(
             print("🎉🎉🎉 Installation process finished successfully.")
             return
 
-        # OTA returned nothing (tag missing, server unreachable, etc.).
-        # Mirror the per-package path: fall back to GitHub releases for each
-        # repo declared in configuration_setting.yaml. download_all_from_archive
-        # has already printed a clear warning explaining why we're here.
-        print(
-            "ℹ️  Falling back to GitHub releases for every configured "
-            "repository (filtered by repos_to_ignore)."
-        )
+        if explicit_archive_pin:
+            # The user pinned an exact archive (name/version) and OTA could
+            # not satisfy that request. Don't quietly install something else.
+            print("")
+            print("=" * 72)
+            print("❌ Requested archive not found on OTA — refusing to fall back.")
+            print(
+                "   archive_name    : "
+                f"{archive_name if archive_name else '(default)'}"
+            )
+            print(
+                "   archive_version : "
+                f"{archive_version if archive_version else '(latest)'}"
+            )
+            print(
+                "   platform        : "
+                f"{os_type}-{os_version}-{architecture} ({build_type})"
+            )
+            print(
+                "   No GitHub fallback is performed when an archive is "
+                "pinned explicitly."
+            )
+            print("=" * 72)
+            return
+
+        # OTA returned nothing (tag missing, server unreachable, etc.) and
+        # the caller did NOT pin a specific archive. Fall back to GitHub
+        # releases per repo, but make the fallback visible.
+        print("")
+        print("=" * 72)
+        print("⚠️  OTA archive not available — falling back to GitHub releases.")
+        print("    This installs every configured repository individually and")
+        print("    may not match any single archive on the OTA server.")
+        print("=" * 72)
         for repo_name in all_repositories.keys():
             if repo_name in repo_ignore_set:
                 continue
@@ -276,9 +317,7 @@ def install_command(
                     # Normalize 'none' (case-insensitive) to None so the OTA
                     # client falls back to legacy latest-by-time selection.
                     resolved_tag = (
-                        None
-                        if (tag is None or str(tag).lower() == "none")
-                        else tag
+                        None if (tag is None or str(tag).lower() == "none") else tag
                     )
                     ota_result = ota_download(
                         package_name,
@@ -293,10 +332,28 @@ def install_command(
                     processed_packages[package_name] = ota_result["version"]
                     install_queue.extend(ota_result.get("dependencies", []))
                     continue
+                if explicit_archive_pin:
+                    # User pinned an archive; if the package isn't in it,
+                    # do not quietly grab it from GitHub instead.
+                    print(
+                        f"❌ Package '{package_name}' not found in pinned "
+                        f"archive '{archive_name or '(default)'}'"
+                        f"{f' v{archive_version}' if archive_version else ''}"
+                        " — refusing to fall back to GitHub."
+                    )
+                    is_successful = False
+                    continue
             except Exception as e:
                 print(
                     f"⚠️ OTA download failed for '{package_name}': {e}. Falling back to GitHub."
                 )
+                if explicit_archive_pin:
+                    print(
+                        "❌ Archive was pinned explicitly — aborting "
+                        f"'{package_name}' instead of falling back to GitHub."
+                    )
+                    is_successful = False
+                    continue
 
         # Priority 4: Find and install remote release
         repo_info = all_repositories.get(package_name)

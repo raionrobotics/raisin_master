@@ -570,13 +570,16 @@ def _fetch_archive_manifest(
     base, headers = ctx
 
     try:
+        # Use the server's exact `version` filter when pinning an archive.
+        # Do not send `search=<version>`: search is fuzzy and has historically
+        # mixed sibling archive names into requests such as dso@1.0.3.
         params = {
             "name": archive_name,
             "platform": platform_str,
             "status": "available",
         }
         if archive_version:
-            params["search"] = archive_version
+            params["version"] = archive_version
 
         resp = requests.get(
             f"{base}/archives",
@@ -592,25 +595,34 @@ def _fetch_archive_manifest(
             if isinstance(result_data, dict)
             else result_data
         )
+
+        # Strict client-side filter: even though we sent `name=...` and
+        # `platform=...`, the server has been observed to ignore both filters
+        # when other params are present, returning archives with different
+        # names AND different platforms (e.g. an x86_64 archive surfacing in
+        # response to an arm64 query). Guard against that explicitly.
+        archives = [
+            a
+            for a in archives
+            if a.get("name") == archive_name and a.get("platform") == platform_str
+        ]
         if not archives:
             return None
 
-        # Find matching archive (exact version match if specified)
         archive = None
         if archive_version:
+            v_stripped = archive_version.lstrip("v")
             for a in archives:
-                if a.get("version") == archive_version:
+                a_ver = a.get("version", "")
+                if a_ver == archive_version or a_ver.lstrip("v") == v_stripped:
                     archive = a
                     break
             if not archive:
-                # Try without 'v' prefix
-                v_stripped = archive_version.lstrip("v")
-                for a in archives:
-                    if a.get("version", "").lstrip("v") == v_stripped:
-                        archive = a
-                        break
-        if not archive:
-            # Use the most recent archive
+                # Version pinned but not present for this archive name. Do not
+                # silently fall back to "most recent" — that's how `dso 1.0.3`
+                # got resolved to a sibling archive in the past.
+                return None
+        else:
             archive = archives[0]
 
         result = (
@@ -711,9 +723,7 @@ def _fetch_archive_by_tag(
             # token would surface as a misleading "tag not found" error.
             _clear_cached_token()
             if authenticate():
-                print(
-                    "🔄 Re-authenticated with OTA server, retrying tag lookup..."
-                )
+                print("🔄 Re-authenticated with OTA server, retrying tag lookup...")
                 return _fetch_archive_by_tag(
                     archive_name, platform_str, tag, _retry=False
                 )
@@ -941,13 +951,9 @@ def download_package(
     # Selection priority mirrors download_all_from_archive:
     # archive_version > tag > legacy latest-by-time.
     if archive_version:
-        manifest = _fetch_archive_manifest(
-            archive_name, platform_str, archive_version
-        )
+        manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
     elif tag:
-        manifest = _fetch_archive_with_stable_fallback(
-            archive_name, platform_str, tag
-        )
+        manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
         if manifest is None:
             # Neither the requested tag nor 'stable' resolved on OTA.
             # Return None so install.py falls back to GitHub releases.
@@ -1074,13 +1080,9 @@ def download_all_from_archive(
 
     # Selection priority: archive_version > tag > legacy latest.
     if archive_version:
-        manifest = _fetch_archive_manifest(
-            archive_name, platform_str, archive_version
-        )
+        manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
     elif tag:
-        manifest = _fetch_archive_with_stable_fallback(
-            archive_name, platform_str, tag
-        )
+        manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
         if manifest is None:
             # Neither the requested tag nor 'stable' resolved on OTA.
             # Return empty so install.py falls back to GitHub releases
