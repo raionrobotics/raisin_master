@@ -711,6 +711,72 @@ class TestDownload(unittest.TestCase):
         "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
     )
     @patch("commands.ota_client.requests.get")
+    def test_fetch_archive_manifest_strips_v_prefix_on_send(self, mock_get, _ep, _auth):
+        # Server stores versions without the `v` prefix; the client must
+        # normalize the user's `-v v1.0.3` before sending so a future
+        # strict server-side match still hits.
+        archive_list = [
+            {
+                "id": "arch-dso-103",
+                "name": "dso",
+                "platform": "ubuntu-24.04-arm64",
+                "version": "1.0.3",
+                "packages": [],
+            }
+        ]
+        mock_get.return_value = _mock_response(
+            json_data={
+                "data": {"archives": archive_list, "total": 1, "page": 1, "limit": 20}
+            }
+        )
+
+        result = ota._fetch_archive_manifest("dso", "ubuntu-24.04-arm64", "v1.0.3")
+
+        self.assertIsNotNone(result)
+        params = mock_get.call_args.kwargs["params"]
+        self.assertEqual(params["version"], "1.0.3")
+
+    @patch("commands.ota_client.authenticate", return_value="tok")
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
+    def test_fetch_archive_manifest_tolerates_null_version(self, mock_get, _ep, _auth):
+        # A nulled `version` field used to crash with AttributeError on
+        # `None.lstrip(...)`. The strict filter should ignore the bad row
+        # and still pick the valid one.
+        archive_list = [
+            {
+                "id": "arch-bad",
+                "name": "dso",
+                "platform": "ubuntu-24.04-arm64",
+                "version": None,
+                "packages": [],
+            },
+            {
+                "id": "arch-good",
+                "name": "dso",
+                "platform": "ubuntu-24.04-arm64",
+                "version": "1.0.3",
+                "packages": [],
+            },
+        ]
+        mock_get.return_value = _mock_response(
+            json_data={
+                "data": {"archives": archive_list, "total": 2, "page": 1, "limit": 20}
+            }
+        )
+
+        result = ota._fetch_archive_manifest("dso", "ubuntu-24.04-arm64", "1.0.3")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1], "arch-good")
+
+    @patch("commands.ota_client.authenticate", return_value="tok")
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
     def test_fetch_archive_manifest_caching(self, mock_get, _ep, _auth):
         archive_list = [
             {

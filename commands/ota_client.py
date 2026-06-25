@@ -579,7 +579,9 @@ def _fetch_archive_manifest(
             "status": "available",
         }
         if archive_version:
-            params["version"] = archive_version
+            # Normalize the `v` prefix so callers can use either `1.0.3` or
+            # `v1.0.3` without depending on how the server stores versions.
+            params["version"] = archive_version.lstrip("v")
 
         resp = requests.get(
             f"{base}/archives",
@@ -613,7 +615,10 @@ def _fetch_archive_manifest(
         if archive_version:
             v_stripped = archive_version.lstrip("v")
             for a in archives:
-                a_ver = a.get("version", "")
+                # Use `or ""` rather than `.get(key, "")` because the server
+                # returns the key with a null value when version is unset,
+                # and the dict default only applies when the key is missing.
+                a_ver = a.get("version") or ""
                 if a_ver == archive_version or a_ver.lstrip("v") == v_stripped:
                     archive = a
                     break
