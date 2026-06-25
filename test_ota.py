@@ -712,9 +712,11 @@ class TestDownload(unittest.TestCase):
     )
     @patch("commands.ota_client.requests.get")
     def test_fetch_archive_manifest_strips_v_prefix_on_send(self, mock_get, _ep, _auth):
-        # Server stores versions without the `v` prefix; the client must
-        # normalize the user's `-v v1.0.3` before sending so a future
-        # strict server-side match still hits.
+        # Server stores versions without the `v` prefix and normalizes the
+        # leading `v` case-insensitively (`/^v/i`). The client must strip
+        # both cases on send so a user typing `-v V1.0.3` still resolves to
+        # the correct archive and the strict client-side comparison below
+        # doesn't trip on a casing mismatch.
         archive_list = [
             {
                 "id": "arch-dso-103",
@@ -724,17 +726,30 @@ class TestDownload(unittest.TestCase):
                 "packages": [],
             }
         ]
-        mock_get.return_value = _mock_response(
-            json_data={
-                "data": {"archives": archive_list, "total": 1, "page": 1, "limit": 20}
-            }
-        )
 
-        result = ota._fetch_archive_manifest("dso", "ubuntu-24.04-arm64", "v1.0.3")
+        for user_input in ("v1.0.3", "V1.0.3"):
+            mock_get.reset_mock()
+            ota._archive_cache.clear()
+            mock_get.return_value = _mock_response(
+                json_data={
+                    "data": {
+                        "archives": archive_list,
+                        "total": 1,
+                        "page": 1,
+                        "limit": 20,
+                    }
+                }
+            )
 
-        self.assertIsNotNone(result)
-        params = mock_get.call_args.kwargs["params"]
-        self.assertEqual(params["version"], "1.0.3")
+            result = ota._fetch_archive_manifest(
+                "dso", "ubuntu-24.04-arm64", user_input
+            )
+
+            self.assertIsNotNone(
+                result, f"version={user_input!r} should resolve to the archive"
+            )
+            params = mock_get.call_args.kwargs["params"]
+            self.assertEqual(params["version"], "1.0.3")
 
     @patch("commands.ota_client.authenticate", return_value="tok")
     @patch(

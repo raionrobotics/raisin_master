@@ -510,7 +510,7 @@ def upload_package(
             f"{base}/packages/{package_id}/tags",
             headers=headers,
             json={
-                "tag": f"v{version.lstrip('v')}",
+                "tag": f"v{version.lstrip('vV')}",
                 "version": version,
                 "platform": platform_str,
                 "buildType": build_type,
@@ -581,7 +581,7 @@ def _fetch_archive_manifest(
         if archive_version:
             # Normalize the `v` prefix so callers can use either `1.0.3` or
             # `v1.0.3` without depending on how the server stores versions.
-            params["version"] = archive_version.lstrip("v")
+            params["version"] = archive_version.lstrip("vV")
 
         resp = requests.get(
             f"{base}/archives",
@@ -613,13 +613,13 @@ def _fetch_archive_manifest(
 
         archive = None
         if archive_version:
-            v_stripped = archive_version.lstrip("v")
+            v_stripped = archive_version.lstrip("vV")
             for a in archives:
                 # Use `or ""` rather than `.get(key, "")` because the server
                 # returns the key with a null value when version is unset,
                 # and the dict default only applies when the key is missing.
                 a_ver = a.get("version") or ""
-                if a_ver == archive_version or a_ver.lstrip("v") == v_stripped:
+                if a_ver == archive_version or a_ver.lstrip("vV") == v_stripped:
                     archive = a
                     break
             if not archive:
@@ -991,7 +991,7 @@ def download_package(
         if name != package_name:
             continue
         tag = pkg.get("tagName") or pkg.get("version", "")
-        pkg_version_str = tag.lstrip("v") if tag else ""
+        pkg_version_str = tag.lstrip("vV") if tag else ""
         try:
             pkg_version = parse_version(pkg_version_str)
             if spec.contains(pkg_version):
@@ -1009,7 +1009,7 @@ def download_package(
     if not pkg_id:
         return None
     tag = best_pkg.get("tagName") or best_pkg.get("version", "")
-    version = tag.lstrip("v") if tag else "0.0.0"
+    version = tag.lstrip("vV") if tag else "0.0.0"
 
     install_dir = (
         install_base_path
@@ -1124,7 +1124,7 @@ def download_all_from_archive(
             continue
 
         tag = pkg.get("tagName") or pkg.get("version", "")
-        version = tag.lstrip("v") if tag else "0.0.0"
+        version = tag.lstrip("vV") if tag else "0.0.0"
 
         install_dir = (
             install_base_path
@@ -1260,7 +1260,7 @@ def download_package_at_timestamp(
 
         blob_hash = manifest.get("blobHash")
         raw_version = manifest.get("version", "0.0.0")
-        version = raw_version.lstrip("v") if raw_version else "0.0.0"
+        version = raw_version.lstrip("vV") if raw_version else "0.0.0"
 
         if not blob_hash:
             print(f"⚠️ Manifest for '{package_name}' has no blob hash")
