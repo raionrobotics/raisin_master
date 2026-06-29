@@ -11,7 +11,7 @@ from typing import Optional
 import click
 
 from commands import globals as g
-from commands.test import _resolve_build_dir
+from commands.build_dir import resolve_build_dir
 from commands.utils import get_build_jobs
 
 # Checks to enable in cppcheck
@@ -130,6 +130,73 @@ def _generate_html(xml_path: Path, report_dir: Path, source_dir: Path):
     return index if index.is_file() else None
 
 
+def _write_cppcheck_md(report_path: Path, root: Path):
+    """Build a Markdown summary from cppcheck-htmlreport's stats.html.
+
+    stats.html lists, per severity, a 'total findings: N' header followed by
+    '<count> <file>' rows. We turn that into report/cppcheck.md: a severity
+    totals table plus the top files per severity. Returns the md path (or None
+    if stats.html is missing).
+    """
+    import re
+
+    stats = report_path / "stats.html"
+    if not stats.is_file():
+        return None
+    raw = stats.read_text(encoding="utf-8", errors="ignore")
+    # Replace tags with a space (not newline) so each "<count> <file>" row, which
+    # sits on one source line, stays intact; line breaks come from real newlines.
+    text = re.sub(r"<[^>]+>", " ", raw).replace("&#160;", " ").replace("&amp;", "&")
+    text = re.sub(r"[ \t]+", " ", text)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    hdr = re.compile(r"Top \d+ files for (\w+) severity, total findings:\s*(\d+)")
+    rowre = re.compile(r"^(\d+)\s+(/\S.*)$")
+    root_str = str(root)
+    sections, cur = [], None
+    for ln in lines:
+        m = hdr.search(ln)
+        if m:
+            cur = {"sev": m.group(1), "total": int(m.group(2)), "files": []}
+            sections.append(cur)
+            continue
+        if cur is not None:
+            rm = rowre.match(ln)
+            if rm:
+                path = rm.group(2)
+                if path.startswith(root_str + "/"):
+                    path = path[len(root_str) + 1:]
+                cur["files"].append((int(rm.group(1)), path))
+
+    grand = sum(s["total"] for s in sections)
+    out = [
+        "# cppcheck report",
+        "",
+        f"Total findings: **{grand}**",
+        "",
+        "| Severity | Findings |",
+        "|---|--:|",
+    ]
+    for s in sections:
+        out.append(f"| {s['sev']} | {s['total']} |")
+    out.append("")
+    for s in sections:
+        if not s["files"]:
+            continue
+        out.append(f"## {s['sev']} ({s['total']})")
+        out.append("")
+        out.append("| Count | File |")
+        out.append("|--:|---|")
+        for cnt, path in s["files"]:
+            out.append(f"| {cnt} | `{path}` |")
+        out.append("")
+
+    md_path = report_path.parent / f"{report_path.name}.md"
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return md_path
+
+
 def run_cppcheck(
     build_type: Optional[str],
     jobs: int,
@@ -140,7 +207,7 @@ def run_cppcheck(
     _cppcheck_preflight()
 
     root = Path(g.script_directory)
-    build_dir = _resolve_build_dir(build_type)
+    build_dir = resolve_build_dir(build_type)
     if not build_dir.is_dir():
         build_type_for_message = (build_type or "release").lower().strip() or "release"
         raise click.ClickException(
@@ -198,6 +265,9 @@ def run_cppcheck(
         index = _generate_html(xml_path, report_path, root)
         if index is not None:
             click.echo(f"🌐 HTML report: {index}")
+        md = _write_cppcheck_md(report_path, root)
+        if md is not None:
+            click.echo(f"📝 Markdown summary: {md}")
 
     if strict and result.returncode != 0:
         raise click.ClickException("cppcheck reported findings (strict mode).")

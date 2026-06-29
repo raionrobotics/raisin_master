@@ -34,6 +34,10 @@ else()
 endif()
 set(RAISIN_MARCH "${RAISIN_DEFAULT_MARCH}" CACHE STRING "Target CPU architecture (-march=). Defaults to a portable baseline for the current architecture. Override with values like 'native' or 'znver2' when needed.")
 
+# Sanitizer mode for test targets, applied per-target via raisin_enable_test_instrumentation()
+set(RAISIN_SANITIZER "off" CACHE STRING "Sanitizer for test targets: off|address|thread|undefined")
+set_property(CACHE RAISIN_SANITIZER PROPERTY STRINGS off address thread undefined)
+
 if (NOT WIN32)
     include(CheckCCompilerFlag)
     check_c_compiler_flag("-march=${RAISIN_MARCH}" RAISIN_MARCH_SUPPORTED)
@@ -50,19 +54,6 @@ else ()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4267") # mute possible loss of data (precision mismatch)
     add_definitions(-DWIN32_LEAN_AND_MEAN)
 endif()
-
-## Top-level CMakeLists.txt
-#set(SAN_FLAGS "-fsanitize=address,undefined,leak -fno-omit-frame-pointer")
-#
-#foreach(lang C CXX)
-#    set(CMAKE_${lang}_FLAGS_DEBUG
-#            "${CMAKE_${lang}_FLAGS_DEBUG} ${SAN_FLAGS}")
-#endforeach()
-#
-#set(CMAKE_EXE_LINKER_FLAGS_DEBUG
-#        "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address,undefined,leak")
-#set(CMAKE_SHARED_LINKER_FLAGS_DEBUG
-#        "${CMAKE_SHARED_LINKER_FLAGS_DEBUG} -fsanitize=address,undefined,leak")
 
 if((CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU"))
     find_program(CCACHE_FOUND ccache)

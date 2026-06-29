@@ -19,6 +19,8 @@ import click
 from typing import Optional
 
 from commands import globals as g
+from commands import sanitizer as san
+from commands.build_dir import resolve_build_dir
 
 
 # Test-executable name suffixes, in run order (unit first, then integration).
@@ -57,50 +59,6 @@ def _discover_tests(build_dir: Path, suffixes) -> list:
                 seen.add(p)
                 found.append(p)
     return found
-
-
-def _get_build_dir_from_config(build_type: str) -> Path:
-    config_path = Path(g.script_directory) / "configuration_setting.yaml"
-    if not config_path.is_file():
-        return Path(g.script_directory) / f"cmake-build-{build_type}"
-
-    try:
-        import yaml
-    except ImportError as e:
-        raise click.ClickException(
-            "Missing dependency 'pyyaml'; required to read configuration_setting.yaml"
-        ) from e
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
-    except Exception as e:
-        raise click.ClickException(f"Failed to read {config_path}: {e}") from e
-
-    key = "release_build_dir" if build_type == "release" else "debug_build_dir"
-    raw = config.get(key)
-    if not raw:
-        return Path(g.script_directory) / f"cmake-build-{build_type}"
-
-    build_dir = Path(str(raw))
-    if not build_dir.is_absolute():
-        build_dir = (Path(g.script_directory) / build_dir).resolve()
-    return build_dir
-
-
-def _resolve_build_dir(build_type: Optional[str]) -> Path:
-    preferred = (build_type or "release").lower().strip() or "release"
-    build_dir = _get_build_dir_from_config(preferred)
-
-    if not build_dir.is_dir() and not build_type and preferred == "release":
-        debug_dir = _get_build_dir_from_config("debug")
-        if debug_dir.is_dir():
-            click.echo(
-                f"⚠️  {build_dir} not found; falling back to {debug_dir}",
-                err=True,
-            )
-            build_dir = debug_dir
-    return build_dir
 
 
 def _coverage_preflight(build_dir: Path):
@@ -304,8 +262,33 @@ def _generate_coverage_report_per_module(
         click.echo(f"   • {name:35s} {pct_txt:>7}  → {module_out}")
 
     landing = _write_module_landing(output_dir, rows)
+    md = _write_coverage_md(root / "report" / "coverage.md", rows)
     click.echo(f"✅ Per-module reports written under: {output_dir}")
     click.echo(f"   Landing page: {landing}")
+    click.echo(f"   Markdown summary: {md}")
+
+
+def _write_coverage_md(out_path: Path, rows) -> Path:
+    """Write a per-module line-coverage summary (from gcovr) as Markdown."""
+    rows = sorted(rows, key=lambda r: r["name"])
+    cov = sum(r["covered"] or 0 for r in rows)
+    tot = sum(r["total"] or 0 for r in rows)
+    overall = f"{(100.0 * cov / tot):.1f}%" if tot else "n/a"
+    lines = [
+        "# Coverage report",
+        "",
+        f"Overall line coverage: **{overall}** ({cov}/{tot} lines across {len(rows)} module(s))",
+        "",
+        "| Module | Line coverage | Lines | Source |",
+        "|---|--:|--:|---|",
+    ]
+    for r in rows:
+        pct = f"{r['percent']:.1f}%" if r["percent"] is not None else "n/a"
+        ln = f"{r['covered']}/{r['total']}" if r["total"] is not None else "-"
+        lines.append(f"| {r['name']} | {pct} | {ln} | `{r['src']}` |")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path
 
 
 def _pkg_label_for_exe(exe: Path, build_dir: Path) -> str:
@@ -374,7 +357,7 @@ def _print_test_table(agg: dict) -> None:
     click.echo(f"{'TOTAL':<{name_w}}{tot['tests']:>7}{tot['passed']:>7}{tot['failed']:>7}{tot['disabled']:>10}")
 
 
-def _write_test_report_md(report_dir: Path, agg: dict) -> Path:
+def _write_test_report_md(out_path: Path, agg: dict) -> Path:
     """Write the per-package pass/fail summary (same as the console table) as Markdown."""
     lines = ["# Unit test report", "", "| Package | Tests | Pass | Fail | Disabled |", "|---|--:|--:|--:|--:|"]
     tot = {"tests": 0, "passed": 0, "failed": 0, "disabled": 0}
@@ -385,25 +368,40 @@ def _write_test_report_md(report_dir: Path, agg: dict) -> Path:
         lines.append(f"| {name}{note} | {a['tests']} | {a['passed']} | {a['failed']} | {a['disabled']} |")
     lines.append(f"| **TOTAL** | **{tot['tests']}** | **{tot['passed']}** | **{tot['failed']}** | **{tot['disabled']}** |")
 
-    path = report_dir / "report.md"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path
+
+
+def _pkg_matches(exe: Path, build_dir: Path, wanted_lower: list) -> bool:
+    """True if exe belongs to one of the requested packages (case-insensitive)."""
+    label = _pkg_label_for_exe(exe, build_dir).lower()
+    parts = [p.lower() for p in exe.relative_to(build_dir).parts]
+    return any(w == label or w in parts for w in wanted_lower)
 
 
 def run_unittests(
     build_type: Optional[str],
     suffixes=ALL_SUFFIXES,
-    coverage_output: str = "coverage-report",
     coverage: bool = False,
     timeout: int = 600,
-    report: bool = False,
-    report_output: str = "test-report",
+    sanitizer: str = "off",
+    packages=(),
+    cppcheck: bool = False,
 ) -> None:
     requested = (build_type or "").lower().strip()
     if requested and requested not in {"debug", "release"}:
         raise click.ClickException("build_type must be 'debug' or 'release'")
 
-    build_dir = _resolve_build_dir(build_type)
+    # All artifacts are collected under "report/"
+    report_root = Path(g.script_directory) / "report"
+    report_unit_output = "report/unittest"          # gtest xml dir
+    coverage_output = "report/coverage"              # gcovr html dir
+    cppcheck_output = "report/cppcheck"              # cppcheck html dir
+    _san_short = {"address": "asan", "thread": "tsan", "undefined": "ubsan"}.get(sanitizer, sanitizer)
+    sanitizer_output = f"report/{_san_short}" if sanitizer != "off" else None  # sanitizer logs dir
+
+    build_dir = resolve_build_dir(build_type)
 
     if not build_dir.is_dir():
         build_type_for_message = requested or "release"
@@ -411,6 +409,13 @@ def run_unittests(
             f"Build directory not found: {build_dir}\n"
             f"Run: python3 raisin.py build --type {build_type_for_message}"
         )
+
+    # Run cppcheck first
+    if cppcheck:
+        from commands.cppcheck import run_cppcheck
+        from commands.utils import get_build_jobs
+        click.echo("🔎 Running cppcheck static analysis...")
+        run_cppcheck(build_type, jobs=get_build_jobs(), strict=False, report_dir=cppcheck_output)
 
     executables = _discover_tests(build_dir, suffixes)
 
@@ -420,15 +425,89 @@ def run_unittests(
             f"Expected files whose name ends with one of: {', '.join(suffixes)}."
         )
 
+    sanitizer = (sanitizer or "off").lower()
+
+    # Pick which executables to run: --package wins; otherwise a sanitizer run
+    # auto-restricts to binaries actually built with the sanitizer (skips
+    # uninstrumented ones, which can SEGV at startup under preload).
+    if packages:
+        wanted = [p.lower() for p in packages]
+        selected = [e for e in executables if _pkg_matches(e, build_dir, wanted)]
+        if not selected:
+            raise click.ClickException(
+                f"No test executables match --package {', '.join(packages)} under: {build_dir}"
+            )
+        skipped = len(executables) - len(selected)
+        click.echo(f"📦 Package filter: {len(selected)} selected, {skipped} skipped.")
+        executables = selected
+    elif sanitizer != "off":
+        if shutil.which("readelf") is None:
+            click.echo("⚠️  readelf not found; cannot auto-scope to instrumented binaries.", err=True)
+        else:
+            instrumented = [e for e in executables if san.binary_is_instrumented(e, sanitizer)]
+            skipped = len(executables) - len(instrumented)
+            if instrumented:
+                click.echo(
+                    f"🧷 Sanitizer scope: {len(instrumented)} instrumented binary(ies); "
+                    f"skipping {skipped} uninstrumented (pass --package to override)."
+                )
+                executables = instrumented
+            else:
+                # Nothing was built with the sanitizer -- stop with a clear
+                # message instead of running the whole suite for nothing.
+                bt = requested or "release"
+                flag = san.SAN_FLAG.get(sanitizer, "--asan")
+                raise click.ClickException(
+                    f"{flag} ({sanitizer}) was requested but no instrumented test "
+                    f"binaries were found under: {build_dir}\n"
+                    f"This build was not configured with the sanitizer. Build it first, "
+                    f"matching the build type you test:\n"
+                    f"  raisin build -t {bt} {flag}\n"
+                    f"  raisin test {bt} {flag}\n"
+                    f"(No build type defaults to the release build dir; pass 'debug' to "
+                    f"target the debug build.)"
+                )
+
     suffix_names = {UNIT_SUFFIX: "unit", INTEGRATION_SUFFIX: "integration"}
     kinds = " + ".join(suffix_names.get(s, s.lstrip("_")) for s in suffixes)
     click.echo(f"🧪 Running {len(executables)} {kinds} test(s) in {build_dir}")
 
-    # With --report, have each gtest binary emit JUnit XML to aggregate later.
-    xml_dir = None
+    if sanitizer != "off":
+        san.apply_env(sanitizer)
+        click.echo(f"🧷 Sanitizer mode: {sanitizer}")
+        # The ASan runtime must load first; preload it so uninstrumented test
+        # binaries that link the instrumented .so don't abort at startup.
+        preload = san.resolve_runtime(build_dir, sanitizer)
+        if preload:
+            existing = os.environ.get("LD_PRELOAD", "")
+            os.environ["LD_PRELOAD"] = ":".join(preload + ([existing] if existing else []))
+            click.echo(f"🧷 LD_PRELOAD={os.environ['LD_PRELOAD']}")
+        elif sanitizer in ("address", "undefined"):
+            click.echo(
+                f"⚠️  Could not locate the {sanitizer} runtime to preload; "
+                "uninstrumented binaries linking the instrumented library may abort.",
+                err=True,
+            )
+
+    # Capture sanitizer diagnostics to report/<asan|tsan|ubsan>
+    san_dir = None
+    san_entries = []
+    if sanitizer != "off":
+        san_path = Path(sanitizer_output)
+        if not san_path.is_absolute():
+            san_path = Path(g.script_directory) / san_path
+        if san_path.is_dir():
+            shutil.rmtree(san_path)
+        san_dir = _resolve_output_dir(sanitizer_output)
+        click.echo(f"🧷 Sanitizer report dir: {san_dir}")
+
+    # The unit pass/fail report is produced only for a normal run. A sanitizer
+    # run aborts each binary on the first error, so its counts are meaningless:
+    # we skip the gtest XML and emit only the sanitizer report (report/<mode>.md).
     results = []
-    if report:
-        report_path = _resolve_output_dir(report_output)
+    xml_dir = None
+    if sanitizer == "off":
+        report_path = _resolve_output_dir(report_unit_output)
         xml_dir = report_path / "xml"
         if xml_dir.is_dir():
             shutil.rmtree(xml_dir)
@@ -437,22 +516,32 @@ def run_unittests(
     failures = 0
     for exe in executables:
         click.echo(f"\n▶ {exe}")
-        cmd = [str(exe)]
+        # TSan's shadow-memory mapping requires ASLR disabled; launch via setarch -R.
+        cmd = ["setarch", "-R", str(exe)] if sanitizer == "thread" else [str(exe)]
+        label = _pkg_label_for_exe(exe, build_dir)
         xml_file = None
-        if report:
-            label = _pkg_label_for_exe(exe, build_dir)
+        if xml_dir is not None:
             xml_file = xml_dir / f"{label}__{exe.stem}.xml"
             cmd.append(f"--gtest_output=xml:{xml_file}")
+        san_log = None
+        if san_dir is not None:
+            san_log = san_dir / f"{label}__{exe.stem}.log"
+            san_entries.append({"label": label, "exe": exe, "prefix": san_log})
         status = "pass"
         try:
             # timeout=0 disables the limit; otherwise a hung test is killed
             # (SIGKILL) after `timeout` seconds, marked failed, and we move on.
-            subprocess.run(
-                cmd,
-                cwd=build_dir,
-                check=True,
-                timeout=(timeout if timeout > 0 else None),
-            )
+            if san_log is not None:
+                rc = san.run_streaming_capture(cmd, build_dir, timeout, san_log)
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, cmd)
+            else:
+                subprocess.run(
+                    cmd,
+                    cwd=build_dir,
+                    check=True,
+                    timeout=(timeout if timeout > 0 else None),
+                )
         except subprocess.TimeoutExpired:
             failures += 1
             status = "timeout"
@@ -463,18 +552,30 @@ def run_unittests(
             failures += 1
             status = "fail"
             click.echo(f"❌ Failed with exit code {e.returncode}: {exe}", err=True)
-        if report:
-            results.append({"label": _pkg_label_for_exe(exe, build_dir), "status": status, "xml": xml_file})
+        results.append({"label": label, "status": status, "xml": xml_file})
+        # Keep only sanitizer logs with reportable (PROJECT/CRASH) findings;
+        # clean or SYSTEM-only logs are dropped.
+        if san_log is not None and san_log.is_file() \
+                and not san.log_has_reportable_findings(san_log, Path(g.script_directory)):
+            san_log.unlink()
 
-    if failures:
-        click.echo(f"\n⚠️  {failures} test(s) failed.", err=True)
-    else:
-        click.echo("\n✅ All tests passed.")
-
-    if report:
+    # Normal run: print the pass/fail table and write report/unittest.md. A
+    # sanitizer run produces no unit-test result -- only the sanitizer report.
+    if sanitizer == "off":
+        if failures:
+            click.echo(f"\n⚠️  {failures} test(s) failed.", err=True)
+        else:
+            click.echo("\n✅ All tests passed.")
         agg = _aggregate_test_results(results)
         _print_test_table(agg)
-        click.echo(f"\n📝 Test report: {_write_test_report_md(report_path, agg)}")
+        click.echo(f"\n📝 Test report: {_write_test_report_md(report_root / 'unittest.md', agg)}")
+
+    if san_dir is not None:
+        summary = san.summarize_logs(san_dir, san_entries, sanitizer)
+        n_logs = len([p for p in san_dir.glob("*.log") if p.is_file()])
+        click.echo(f"\n🧷 Sanitizer report: {summary}")
+        if n_logs == 0:
+            click.echo("   No sanitizer findings recorded (all instrumented binaries clean).")
 
     # Generate the coverage report even if some tests failed, so partial
     # coverage is still available. Done before raising on failures.
@@ -482,7 +583,12 @@ def run_unittests(
         _generate_coverage_report_per_module(build_dir, coverage_output)
 
     if failures:
-        raise click.ClickException(f"{failures} test(s) failed.")
+        if sanitizer == "off":
+            raise click.ClickException(f"{failures} test(s) failed.")
+        raise click.ClickException(
+            f"{failures} binary(ies) aborted under the sanitizer "
+            f"(see report/{_san_short}.md)."
+        )
 
 
 @click.command(name="test")
@@ -500,18 +606,12 @@ def run_unittests(
     help="Run only integration tests (executables ending in _inttest).",
 )
 @click.option(
-    "--coverage-output",
-    default="coverage-report",
-    show_default=True,
-    help="Directory to write the HTML report (index.html) into.",
-)
-@click.option(
     "--coverage",
     is_flag=True,
     default=False,
-    help="Generate an HTML line-coverage report (gcovr) per package/module "
-    "(coverage-report/<module>/index.html) plus a landing page, after running "
-    "tests. Requires a build configured with -DRAISIN_BUILD_TEST=ON (Linux/gcc).",
+    help="Also generate an HTML line-coverage report (gcovr) per package/module "
+    "under report/coverage/, plus a landing page. Requires a build configured with "
+    "-DRAISIN_BUILD_TEST=ON (Linux/gcc).",
 )
 @click.option(
     "--timeout",
@@ -522,47 +622,71 @@ def run_unittests(
     "and marked failed (so a hung test cannot block the run). Use 0 to disable.",
 )
 @click.option(
-    "--report",
-    is_flag=True,
-    default=False,
-    help="Collect per-package pass/fail counts (gtest XML), print a console "
-    "table, and save it as Markdown (test-report/report.md).",
+    "--asan", is_flag=True, default=False,
+    help="Run under AddressSanitizer + UBSan (build with 'raisin build --asan'). "
+    "Covers undefined-behavior checks too. Only binaries actually built with the "
+    "sanitizer are run, unless --package is given.",
 )
 @click.option(
-    "--report-output",
-    default="test-report",
-    show_default=True,
-    help="Directory for the --report output (report.md + xml/).",
+    "--tsan", is_flag=True, default=False,
+    help="Run under ThreadSanitizer (build with 'raisin build --tsan'); each "
+    "binary is launched under 'setarch -R' (ASLR off).",
+)
+@click.option(
+    "--cppcheck",
+    is_flag=True,
+    default=False,
+    help="Also run cppcheck static analysis on the build (writes report/cppcheck/), "
+    "after the tests. Same engine as 'raisin cppcheck'.",
+)
+@click.option(
+    "--package",
+    "-p",
+    "packages",
+    multiple=True,
+    help="Only run tests of the named package(s) (e.g. -p raisin_parameter). May be "
+    "repeated. Matches the package directory name.",
 )
 def test_command(
     build_type: Optional[str],
     only_unit: bool,
     only_integration: bool,
-    coverage_output: str,
     coverage: bool,
     timeout: int,
-    report: bool,
-    report_output: str,
+    asan: bool,
+    tsan: bool,
+    cppcheck: bool,
+    packages: tuple,
 ) -> None:
     """
     Run tests from the CMake build folder.
 
     By default runs BOTH unit (*_unittest) and integration (*_inttest) tests,
-    unit first. Use --unit or --integration to run only one kind.
+    unit first. Use --unit or --integration to run only one kind. The per-package
+    pass/fail report (report/unittest/report.md) is always produced. All artifacts
+    are collected under report/ (report/unittest, report/coverage, report/cppcheck,
+    report/sanitizer-<mode>).
 
     \b
     Examples:
-        python3 raisin.py test               # unit + integration (release)
-        python3 raisin.py test debug         # unit + integration (debug)
-        python3 raisin.py test --unit        # unit tests only
-        python3 raisin.py test --integration # integration tests only
-        python3 raisin.py test --coverage    # run tests + per-module coverage report
-        python3 raisin.py test --report      # per-package pass/fail table + report.md
-        python3 raisin.py test --timeout 60  # kill any test hung longer than 60 s
+        raisin test debug                 # unit + integration (debug)
+        raisin test debug --unit          # unit tests only
+        raisin test debug --integration   # integration tests only
+        raisin test debug --coverage      # + per-module coverage report
+        raisin test debug --cppcheck      # + cppcheck static analysis
+        raisin test debug --asan          # tests under ASan+UBSan
+        raisin test debug --tsan          # tests under ThreadSanitizer
+        raisin test debug -p raisin_parameter   # only one package's tests
 
     """
     if only_unit and only_integration:
         raise click.ClickException("--unit and --integration are mutually exclusive")
+
+    # The sanitizer flags map to a single mode and are mutually exclusive
+    # (ASan and TSan cannot be combined). --asan already includes UBSan checks.
+    if asan and tsan:
+        raise click.ClickException("--asan and --tsan are mutually exclusive")
+    sanitizer = "address" if asan else "thread" if tsan else "off"
 
     if only_unit:
         suffixes = (UNIT_SUFFIX,)
@@ -575,11 +699,11 @@ def test_command(
         run_unittests(
             build_type,
             suffixes=suffixes,
-            coverage_output=coverage_output,
             coverage=coverage,
             timeout=timeout,
-            report=report,
-            report_output=report_output,
+            sanitizer=sanitizer,
+            packages=packages,
+            cppcheck=cppcheck,
         )
     except click.ClickException:
         raise

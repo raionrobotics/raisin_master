@@ -183,22 +183,58 @@ function(raisin_windows_export)
     endif ()
 endfunction()
 
-function(raisin_enable_coverage)
-    # Add gcov line coverage when building tests
-    if(RAISIN_BUILD_TEST AND NOT WIN32)
-        foreach(target_name IN LISTS ARGV)
-            get_target_property(_target_type ${target_name} TYPE)
-            if(_target_type STREQUAL "INTERFACE_LIBRARY")
-                target_compile_options(${target_name} INTERFACE --coverage -O0 -g)
-                target_link_options(${target_name} INTERFACE --coverage)
-            elseif(_target_type STREQUAL "STATIC_LIBRARY")
-                target_compile_options(${target_name} PRIVATE --coverage -O0 -g)
-                target_link_options(${target_name} INTERFACE --coverage)
-            else()
-                target_compile_options(${target_name} PRIVATE --coverage -O0 -g)
-                target_link_options(${target_name} PRIVATE --coverage)
-            endif()
-        endforeach()
+function(_raisin_instrument_targets _compile _link)
+    # Apply compile/link options to each target in ARGN, scoped by target type.
+    # `_compile`/`_link` are ;-separated flag lists. Static libraries are not
+    # linked themselves, so their link options must propagate to consumers
+    # (INTERFACE); regular libraries/executables keep them PRIVATE.
+    foreach(target_name IN LISTS ARGN)
+        get_target_property(_target_type ${target_name} TYPE)
+        if(_target_type STREQUAL "INTERFACE_LIBRARY")
+            target_compile_options(${target_name} INTERFACE ${_compile})
+            target_link_options(${target_name} INTERFACE ${_link})
+        elseif(_target_type STREQUAL "STATIC_LIBRARY")
+            target_compile_options(${target_name} PRIVATE ${_compile})
+            target_link_options(${target_name} INTERFACE ${_link})
+        else()
+            target_compile_options(${target_name} PRIVATE ${_compile})
+            target_link_options(${target_name} PRIVATE ${_link})
+        endif()
+    endforeach()
+endfunction()
+
+function(_raisin_sanitizer_flags out_var)
+    # Resolve RAISIN_SANITIZER (address|thread|undefined) to compiler flags.
+    # -fno-sanitize=unreachable: Disable unreachable check to avoid false
+    #  positives from libstdc++ ABI mismatch between GCC 9 and 13.
+    if(RAISIN_SANITIZER STREQUAL "address")
+        # ASan on Linux includes LeakSanitizer by default; pair with UBSan.
+        set(_san -fsanitize=address,undefined -fno-sanitize=unreachable -fno-omit-frame-pointer -g)
+    elseif(RAISIN_SANITIZER STREQUAL "thread")
+        # TSan needs light optimization; the binary must also be launched with
+        # `setarch -R` (ASLR off) at runtime -- handled by `raisin test --tsan`.
+        set(_san -fsanitize=thread -O1 -fno-omit-frame-pointer -g)
+    elseif(RAISIN_SANITIZER STREQUAL "undefined")
+        set(_san -fsanitize=undefined -fno-sanitize=unreachable -fno-omit-frame-pointer -g)
+    else()
+        message(FATAL_ERROR "Unknown RAISIN_SANITIZER='${RAISIN_SANITIZER}' (off|address|thread|undefined)")
+    endif()
+    set(${out_var} "${_san}" PARENT_SCOPE)
+endfunction()
+
+function(raisin_enable_test_instrumentation)
+    # Single entry point for test-build instrumentation. Sanitizer and coverage
+    # are mutually exclusive (conflicting -O levels, and you would not measure
+    # coverage of a sanitizer run): a sanitizer build instruments with the
+    # sanitizer only; otherwise a test build gets gcov coverage.
+    if(WIN32)
+        return()
+    endif()
+    if(DEFINED RAISIN_SANITIZER AND NOT RAISIN_SANITIZER STREQUAL "off")
+        _raisin_sanitizer_flags(_san)
+        _raisin_instrument_targets("${_san}" "${_san}" ${ARGV})
+    elseif(RAISIN_BUILD_TEST)
+        _raisin_instrument_targets("--coverage;-O0;-g" "--coverage" ${ARGV})
     endif()
 endfunction()
 

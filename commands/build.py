@@ -38,7 +38,7 @@ def _resolve_default_python(script_directory):
     return str(candidate) if candidate.is_file() else None
 
 
-def build_command(build_types, to_install=False, raisin_march=None, python_executable=None):
+def build_command(build_types, to_install=False, raisin_march=None, python_executable=None, sanitizer="off"):
     """
     Build the project with CMake and Ninja.
 
@@ -47,6 +47,7 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
         to_install (bool): Whether to run install target after build
         raisin_march (str): Optional CPU target override passed to CMake
         python_executable (str): Python interpreter for raisin Python packages
+        sanitizer (str): Sanitizer mode for test targets ('off'|'address'|'thread'|'undefined')
     """
     check_supported_architecture()
     script_directory = g.script_directory
@@ -92,6 +93,8 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
                     cmake_command.append(f"-DRAISIN_MARCH={raisin_march}")
                 if python_executable:
                     cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
+                if sanitizer and sanitizer != "off":
+                    cmake_command.append(f"-DRAISIN_SANITIZER={sanitizer}")
                 # Under QEMU, use compiler wrappers that retry on segfault
                 cmake_env = None
                 use_retry = (
@@ -277,10 +280,18 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
 @click.option(
     "--test",
     is_flag=True,
-    help="Enable building unit tests (and coverage instrumentation) for this build",
+    help="Build unit tests (+coverage instrumentation) for this build, without a sanitizer.",
+)
+@click.option(
+    "--asan", is_flag=True,
+    help="Build tests with AddressSanitizer+UBSan (implies --test). Run with 'raisin test --asan'.",
+)
+@click.option(
+    "--tsan", is_flag=True,
+    help="Build tests with ThreadSanitizer (implies --test). Run with 'raisin test --tsan'.",
 )
 @click.argument("targets", nargs=-1)
-def build_cli_command(build_types, install, python_executable, test, targets):
+def build_cli_command(build_types, install, python_executable, test, asan, tsan, targets):
     """
     Compile the project using CMake and Ninja.
 
@@ -290,7 +301,9 @@ def build_cli_command(build_types, install, python_executable, test, targets):
         raisin build --type debug --install          # Build debug and install
         raisin build -t release -t debug -i          # Build both types and install
         raisin build -t release raisin_network       # Build specific target
-        raisin build -t debug --test                 # Build with unit tests enabled
+        raisin build -t debug --test                 # Tests, no sanitizer
+        raisin build -t debug --asan                 # Tests + ASan+UBSan (ASan/TSan are mutually exclusive)
+        raisin build -t debug --tsan                 # Tests + ThreadSanitizer (ASan/TSan are mutually exclusive)
 
     \b
     Note: This command first runs setup, then compiles.
@@ -310,7 +323,12 @@ def build_cli_command(build_types, install, python_executable, test, targets):
 
     raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
 
-    setup(raisin_march=raisin_march, build_test_enabled=test)
+    if asan and tsan:
+        raise click.ClickException("--asan and --tsan are mutually exclusive")
+    sanitizer = "address" if asan else "thread" if tsan else "off"
+    build_test_enabled = test or asan or tsan
+
+    setup(raisin_march=raisin_march, build_test_enabled=build_test_enabled)
 
     # Then build
     build_types = list(build_types) if build_types else []
@@ -320,4 +338,4 @@ def build_cli_command(build_types, install, python_executable, test, targets):
         click.echo("   Example: raisin build --type release")
         sys.exit(1)
 
-    build_command(build_types, to_install=install, raisin_march=raisin_march, python_executable=python_executable)
+    build_command(build_types, to_install=install, raisin_march=raisin_march, python_executable=python_executable, sanitizer=sanitizer)
