@@ -76,9 +76,7 @@ vcpkg_installed/*
 **/.venv
 .ccache/*
 
-/test-report
-/coverage-report
-/cppcheck-report
+/report
 
 # Worktrees
 .worktrees/

@@ -202,6 +202,61 @@ function(raisin_enable_coverage)
     endif()
 endfunction()
 
+function(raisin_enable_sanitizer)
+    # Instrument the given targets with a sanitizer when RAISIN_SANITIZER is set.
+    # Mirrors raisin_enable_coverage: pass the library and its test executable so
+    # bugs inside the library are caught too. No-op unless RAISIN_SANITIZER names
+    # a mode (off|address|thread|undefined); ASan and TSan are mutually exclusive,
+    # so the variable holds a single mode rather than a list.
+    if(WIN32 OR NOT DEFINED RAISIN_SANITIZER OR RAISIN_SANITIZER STREQUAL "off")
+        return()
+    endif()
+
+    if(RAISIN_SANITIZER STREQUAL "address")
+        # ASan on Linux includes LeakSanitizer by default; pair with UBSan.
+        set(_san -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+        set(_nosan -fno-sanitize=address,undefined)
+    elseif(RAISIN_SANITIZER STREQUAL "thread")
+        # TSan needs light optimization; the binary must also be launched with
+        # `setarch -R` (ASLR off) at runtime -- handled by `raisin test --tsan`.
+        set(_san -fsanitize=thread -O1 -fno-omit-frame-pointer -g)
+        set(_nosan -fno-sanitize=thread)
+    elseif(RAISIN_SANITIZER STREQUAL "undefined")
+        set(_san -fsanitize=undefined -fno-omit-frame-pointer -g)
+        set(_nosan -fno-sanitize=undefined)
+    else()
+        message(FATAL_ERROR "Unknown RAISIN_SANITIZER='${RAISIN_SANITIZER}' (off|address|thread|undefined)")
+    endif()
+
+    # The sanitizer runtime must be linked in, so apply the same flag to both
+    # compile and link steps.
+    foreach(target_name IN LISTS ARGV)
+        get_target_property(_target_type ${target_name} TYPE)
+        if(_target_type STREQUAL "INTERFACE_LIBRARY")
+            target_compile_options(${target_name} INTERFACE ${_san})
+            target_link_options(${target_name} INTERFACE ${_san})
+        else()
+            target_compile_options(${target_name} PRIVATE ${_san})
+            target_link_options(${target_name} PRIVATE ${_san})
+        endif()
+
+        # Exclude test code from instrumentation: sanitizer checks should focus
+        # on library/production code, not the tests themselves. Sources living
+        # under a test/ directory get -fno-sanitize=... appended (it comes after
+        # the target's -fsanitize=... on the command line, so it wins). The test
+        # executable is still linked with the runtime, so bugs in the production
+        # code it exercises are still caught.
+        get_target_property(_srcs ${target_name} SOURCES)
+        if(_srcs)
+            foreach(_s IN LISTS _srcs)
+                if(_s MATCHES "(^|/)test/")
+                    set_source_files_properties(${_s} PROPERTIES COMPILE_OPTIONS "${_nosan}")
+                endif()
+            endforeach()
+        endif()
+    endforeach()
+endfunction()
+
 macro(raisin_linux_only)
     if(WIN32)
         # This will return from the scope that *calls* the macro

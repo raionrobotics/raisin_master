@@ -38,7 +38,7 @@ def _resolve_default_python(script_directory):
     return str(candidate) if candidate.is_file() else None
 
 
-def build_command(build_types, to_install=False, raisin_march=None, python_executable=None):
+def build_command(build_types, to_install=False, raisin_march=None, python_executable=None, sanitizer="off"):
     """
     Build the project with CMake and Ninja.
 
@@ -47,6 +47,7 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
         to_install (bool): Whether to run install target after build
         raisin_march (str): Optional CPU target override passed to CMake
         python_executable (str): Python interpreter for raisin Python packages
+        sanitizer (str): Sanitizer mode for test targets ('off'|'address'|'thread'|'undefined')
     """
     check_supported_architecture()
     script_directory = g.script_directory
@@ -92,6 +93,8 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
                     cmake_command.append(f"-DRAISIN_MARCH={raisin_march}")
                 if python_executable:
                     cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
+                if sanitizer and sanitizer != "off":
+                    cmake_command.append(f"-DRAISIN_SANITIZER={sanitizer}")
                 # Under QEMU, use compiler wrappers that retry on segfault
                 cmake_env = None
                 use_retry = (
@@ -277,10 +280,25 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
 @click.option(
     "--test",
     is_flag=True,
-    help="Enable building unit tests (and coverage instrumentation) for this build",
+    help="Build unit tests (+coverage instrumentation) for this build, without a "
+    "sanitizer.",
+)
+@click.option(
+    "--asan", is_flag=True,
+    help="Build tests with AddressSanitizer+UBSan (implies --test). Run with 'raisin "
+    "test --asan'.",
+)
+@click.option(
+    "--tsan", is_flag=True,
+    help="Build tests with ThreadSanitizer (implies --test). Run with 'raisin test --tsan'.",
+)
+@click.option(
+    "--ubsan", is_flag=True,
+    help="Build tests with UndefinedBehaviorSanitizer (implies --test). Run with "
+    "'raisin test --ubsan'.",
 )
 @click.argument("targets", nargs=-1)
-def build_cli_command(build_types, install, python_executable, test, targets):
+def build_cli_command(build_types, install, python_executable, test, asan, tsan, ubsan, targets):
     """
     Compile the project using CMake and Ninja.
 
@@ -290,10 +308,14 @@ def build_cli_command(build_types, install, python_executable, test, targets):
         raisin build --type debug --install          # Build debug and install
         raisin build -t release -t debug -i          # Build both types and install
         raisin build -t release raisin_network       # Build specific target
-        raisin build -t debug --test                 # Build with unit tests enabled
+        raisin build -t debug --test                 # Tests, no sanitizer
+        raisin build -t debug --asan                 # Tests + ASan+UBSan
+        raisin build -t debug --tsan                 # Tests + ThreadSanitizer
+        raisin build -t debug --ubsan                # Tests + UBSan
 
     \b
-    Note: This command first runs setup, then compiles.
+    Note: This command first runs setup, then compiles. ASan/TSan are mutually
+    exclusive; switching sanitizer modes reconfigures and rebuilds.
     Run 'sudo bash install_dependencies.sh' to install package dependencies.
     """
     # Import here to avoid circular dependency
@@ -310,7 +332,15 @@ def build_cli_command(build_types, install, python_executable, test, targets):
 
     raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
 
-    setup(raisin_march=raisin_march, build_test_enabled=test)
+    # --test builds tests without a sanitizer; --asan/--tsan/--ubsan select a
+    # sanitizer (mutually exclusive) and imply a test build.
+    selected = [m for m, on in (("address", asan), ("thread", tsan), ("undefined", ubsan)) if on]
+    if len(selected) > 1:
+        raise click.ClickException("--asan, --tsan and --ubsan are mutually exclusive")
+    sanitizer = selected[0] if selected else "off"
+    build_test_enabled = test or bool(selected)
+
+    setup(raisin_march=raisin_march, build_test_enabled=build_test_enabled)
 
     # Then build
     build_types = list(build_types) if build_types else []
@@ -320,4 +350,4 @@ def build_cli_command(build_types, install, python_executable, test, targets):
         click.echo("   Example: raisin build --type release")
         sys.exit(1)
 
-    build_command(build_types, to_install=install, raisin_march=raisin_march, python_executable=python_executable)
+    build_command(build_types, to_install=install, raisin_march=raisin_march, python_executable=python_executable, sanitizer=sanitizer)
