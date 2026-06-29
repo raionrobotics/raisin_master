@@ -133,7 +133,7 @@ def run_streaming_capture(cmd, cwd, timeout, log_path: Path) -> int:
         t.start()
         try:
             proc.wait(timeout=timeout if timeout and timeout > 0 else None)
-        except subprocess.TimeoutExpired:
+        except BaseException:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except ProcessLookupError:

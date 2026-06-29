@@ -222,14 +222,6 @@ function(_raisin_sanitizer_flags out_var)
     set(${out_var} "${_san}" PARENT_SCOPE)
 endfunction()
 
-function(raisin_enable_coverage)
-    # Add gcov line coverage when building tests. Kept for backward compatibility;
-    # new code can use raisin_enable_test_instrumentation() instead.
-    if(RAISIN_BUILD_TEST AND NOT WIN32)
-        _raisin_instrument_targets("--coverage;-O0;-g" "--coverage" ${ARGV})
-    endif()
-endfunction()
-
 function(raisin_enable_test_instrumentation)
     # Single entry point for test-build instrumentation. Sanitizer and coverage
     # are mutually exclusive (conflicting -O levels, and you would not measure

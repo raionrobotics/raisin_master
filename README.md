@@ -227,7 +227,22 @@ raisin build -t release --install --raisin-py-exec /path/to/myvenv/bin/python3
 
 When `--install` is used, a `raisin.pth` file is automatically written to the target Python's `site-packages` directory. This makes raisin Python packages (such as `raisin_network_py`) importable without setting `PYTHONPATH`:
 
-### 9. Additional Commands
+### 9. Run Tests
+
+Use the `test` command to run the test suite. Build first with the matching flag, then run the tests.
+
+```bash
+# Unit tests with cppcheck static analysis and coverage
+raisin build -t debug --test && raisin test debug --cppcheck --coverage --unit
+
+# Unit tests with AddressSanitizer+UndefinedBehaviorSanitizer
+raisin build -t debug --asan && raisin test debug --asan --unit
+
+# Unit tests with ThreadSanitizer
+raisin build -t debug --tsan && raisin test debug --tsan --unit
+```
+
+### 10. Additional Commands
 
 #### Publish a Release
 Build, package, and upload a release to GitHub or OTA server:
