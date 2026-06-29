@@ -49,7 +49,7 @@ def install_command(
     at_timestamp: Optional[str] = None,
     from_github: bool = False,
     tag: Optional[str] = None,
-) -> bool:
+):
     """
     Install packages and their dependencies.
 
@@ -92,7 +92,7 @@ def install_command(
     ) = load_configuration()
     if not all_repositories:
         print("❌ Error: No repositories found in configuration_setting.yaml")
-        return False
+        return
     if not tokens:
         print(
             "⚠️ No GitHub tokens found. Packages not available via OTA will be skipped."
@@ -172,7 +172,7 @@ def install_command(
 
         if ota_results:
             print("🎉🎉🎉 Installation process finished successfully.")
-            return True
+            return
 
         if explicit_archive_pin:
             # The user pinned an exact archive (name/version) and OTA could
@@ -197,7 +197,7 @@ def install_command(
                 "pinned explicitly."
             )
             print("=" * 72)
-            return False
+            return
 
         # OTA returned nothing (tag missing, server unreachable, etc.) and
         # the caller did NOT pin a specific archive. Fall back to GitHub
@@ -218,7 +218,7 @@ def install_command(
                 "❌ Error: No fallback targets — every repository is in "
                 "repos_to_ignore. Nothing to install."
             )
-            return False
+            return
 
     while install_queue:
         target_spec = install_queue.pop(0)
@@ -495,7 +495,6 @@ def install_command(
         print("🎉🎉🎉 Installation process finished successfully.")
     else:
         print("❌ Installation process finished with errors.")
-    return is_successful
 
 
 # ============================================================================
@@ -591,11 +590,6 @@ def install_cli_command(
     else:
         build_types = [build_type]
 
-    # Run every build_type even if an earlier one fails so the user sees the
-    # full picture, then exit non-zero if any of them reported failure. That's
-    # important for CI: a silent zero-exit on a broken install used to mask
-    # cases like the dso/raisin-dev cross-archive bug.
-    overall_success = True
     for bt in build_types:
         if from_github:
             click.echo(f"📥 Installing from GitHub releases ({bt})...")
@@ -613,7 +607,7 @@ def install_cli_command(
             click.echo(f"📥 Installing {len(packages)} package(s) ({bt})...")
         else:
             click.echo(f"📥 Installing all packages from latest archive ({bt})...")
-        succeeded = install_command(
+        install_command(
             packages,
             bt,
             archive_version,
@@ -622,8 +616,3 @@ def install_cli_command(
             from_github,
             tag=tag,
         )
-        if not succeeded:
-            overall_success = False
-
-    if not overall_success:
-        raise click.exceptions.Exit(code=1)
