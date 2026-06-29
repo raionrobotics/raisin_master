@@ -11,10 +11,7 @@ import os
 import platform
 import re
 import shutil
-import signal
 import subprocess
-import sys
-import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -22,6 +19,8 @@ import click
 from typing import Optional
 
 from commands import globals as g
+from commands import sanitizer as san
+from commands.build_dir import resolve_build_dir
 
 
 # Test-executable name suffixes, in run order (unit first, then integration).
@@ -60,50 +59,6 @@ def _discover_tests(build_dir: Path, suffixes) -> list:
                 seen.add(p)
                 found.append(p)
     return found
-
-
-def _get_build_dir_from_config(build_type: str) -> Path:
-    config_path = Path(g.script_directory) / "configuration_setting.yaml"
-    if not config_path.is_file():
-        return Path(g.script_directory) / f"cmake-build-{build_type}"
-
-    try:
-        import yaml
-    except ImportError as e:
-        raise click.ClickException(
-            "Missing dependency 'pyyaml'; required to read configuration_setting.yaml"
-        ) from e
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
-    except Exception as e:
-        raise click.ClickException(f"Failed to read {config_path}: {e}") from e
-
-    key = "release_build_dir" if build_type == "release" else "debug_build_dir"
-    raw = config.get(key)
-    if not raw:
-        return Path(g.script_directory) / f"cmake-build-{build_type}"
-
-    build_dir = Path(str(raw))
-    if not build_dir.is_absolute():
-        build_dir = (Path(g.script_directory) / build_dir).resolve()
-    return build_dir
-
-
-def _resolve_build_dir(build_type: Optional[str]) -> Path:
-    preferred = (build_type or "release").lower().strip() or "release"
-    build_dir = _get_build_dir_from_config(preferred)
-
-    if not build_dir.is_dir() and not build_type and preferred == "release":
-        debug_dir = _get_build_dir_from_config("debug")
-        if debug_dir.is_dir():
-            click.echo(
-                f"⚠️  {build_dir} not found; falling back to {debug_dir}",
-                err=True,
-            )
-            build_dir = debug_dir
-    return build_dir
 
 
 def _coverage_preflight(build_dir: Path):
@@ -307,8 +262,33 @@ def _generate_coverage_report_per_module(
         click.echo(f"   • {name:35s} {pct_txt:>7}  → {module_out}")
 
     landing = _write_module_landing(output_dir, rows)
+    md = _write_coverage_md(root / "report" / "coverage.md", rows)
     click.echo(f"✅ Per-module reports written under: {output_dir}")
     click.echo(f"   Landing page: {landing}")
+    click.echo(f"   Markdown summary: {md}")
+
+
+def _write_coverage_md(out_path: Path, rows) -> Path:
+    """Write a per-module line-coverage summary (from gcovr) as Markdown."""
+    rows = sorted(rows, key=lambda r: r["name"])
+    cov = sum(r["covered"] or 0 for r in rows)
+    tot = sum(r["total"] or 0 for r in rows)
+    overall = f"{(100.0 * cov / tot):.1f}%" if tot else "n/a"
+    lines = [
+        "# Coverage report",
+        "",
+        f"Overall line coverage: **{overall}** ({cov}/{tot} lines across {len(rows)} module(s))",
+        "",
+        "| Module | Line coverage | Lines | Source |",
+        "|---|--:|--:|---|",
+    ]
+    for r in rows:
+        pct = f"{r['percent']:.1f}%" if r["percent"] is not None else "n/a"
+        ln = f"{r['covered']}/{r['total']}" if r["total"] is not None else "-"
+        lines.append(f"| {r['name']} | {pct} | {ln} | `{r['src']}` |")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path
 
 
 def _pkg_label_for_exe(exe: Path, build_dir: Path) -> str:
@@ -377,7 +357,7 @@ def _print_test_table(agg: dict) -> None:
     click.echo(f"{'TOTAL':<{name_w}}{tot['tests']:>7}{tot['passed']:>7}{tot['failed']:>7}{tot['disabled']:>10}")
 
 
-def _write_test_report_md(report_dir: Path, agg: dict) -> Path:
+def _write_test_report_md(out_path: Path, agg: dict) -> Path:
     """Write the per-package pass/fail summary (same as the console table) as Markdown."""
     lines = ["# Unit test report", "", "| Package | Tests | Pass | Fail | Disabled |", "|---|--:|--:|--:|--:|"]
     tot = {"tests": 0, "passed": 0, "failed": 0, "disabled": 0}
@@ -388,369 +368,16 @@ def _write_test_report_md(report_dir: Path, agg: dict) -> Path:
         lines.append(f"| {name}{note} | {a['tests']} | {a['passed']} | {a['failed']} | {a['disabled']} |")
     lines.append(f"| **TOTAL** | **{tot['tests']}** | **{tot['passed']}** | **{tot['failed']}** | **{tot['disabled']}** |")
 
-    path = report_dir / "report.md"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
-
-
-def _apply_sanitizer_env(sanitizer: str) -> None:
-    """Set sanitizer runtime options (without clobbering user-provided ones).
-
-    Sanitizers abort with a non-zero exit code on the first error, so the
-    existing check=True run already counts a sanitizer hit as a test failure;
-    these options just make the diagnostics louder and fail-fast.
-
-    Leak detection defaults to OFF: only one package (the one whose CMakeLists
-    calls raisin_enable_sanitizer) is instrumented, but `raisin test` runs the
-    whole suite, and once the ASan runtime is preloaded (see
-    _resolve_sanitizer_runtime) every binary -- including uninstrumented ones --
-    runs LeakSanitizer at exit and reports leaks in code that was never meant to
-    be leak-checked. That is noise, not a bug in the code under test. To leak-
-    check the instrumented package, run its binary directly with
-    ASAN_OPTIONS=detect_leaks=1.
-    """
-    defaults = {
-        "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1:halt_on_error=1:strict_string_checks=1",
-        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1",
-        "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1",
-    }
-    for key, value in defaults.items():
-        os.environ.setdefault(key, value)
-
-
-def _build_compiler(build_dir: Path) -> Optional[str]:
-    """Return the C++ compiler this build dir was configured with (from cache)."""
-    cache = build_dir / "CMakeCache.txt"
-    if not cache.is_file():
-        return None
-    try:
-        for line in cache.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if line.startswith("CMAKE_CXX_COMPILER:"):
-                return line.split("=", 1)[1].strip()
-    except Exception:
-        return None
-    return None
-
-
-def _resolve_sanitizer_runtime(build_dir: Path, sanitizer: str) -> list:
-    """Absolute paths of sanitizer runtimes to LD_PRELOAD, or [] if not needed.
-
-    raisin_enable_sanitizer instruments a SHARED library (e.g. raisin_parameter)
-    but not the many test executables that link it. ASan then aborts those
-    executables at startup with "ASan runtime does not come first in initial
-    library list", because libasan is pulled in only transitively via the .so.
-    Preloading the runtime puts it first and lets the whole suite run. (TSan
-    cannot be made to work via LD_PRELOAD, so 'thread' is excluded.)
-    """
-    if sanitizer not in ("address", "undefined"):
-        return []
-    cxx = _build_compiler(build_dir) or shutil.which("c++") or shutil.which("cc") or "cc"
-    # gcc names first, then the clang runtime equivalents.
-    if sanitizer == "address":
-        candidates = ["libasan.so", "libclang_rt.asan-x86_64.so"]
-    else:
-        candidates = ["libubsan.so", "libclang_rt.ubsan_standalone-x86_64.so"]
-    for name in candidates:
-        try:
-            out = subprocess.run(
-                [cxx, f"-print-file-name={name}"],
-                capture_output=True, text=True, check=False,
-            ).stdout.strip()
-        except Exception:
-            continue
-        # The compiler echoes the bare name back when it can't locate the lib.
-        if out and out != name and Path(out).is_file():
-            return [str(Path(out).resolve())]
-    return []
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path
 
 
 def _pkg_matches(exe: Path, build_dir: Path, wanted_lower: list) -> bool:
-    """True if exe belongs to one of the requested packages (case-insensitive).
-
-    Matches either the package label (the package directory name) or any path
-    component, so '-p raisin_parameter' selects src/raisin/raisin_parameter/*.
-    """
+    """True if exe belongs to one of the requested packages (case-insensitive)."""
     label = _pkg_label_for_exe(exe, build_dir).lower()
     parts = [p.lower() for p in exe.relative_to(build_dir).parts]
     return any(w == label or w in parts for w in wanted_lower)
-
-
-# DT_NEEDED soname fragments that mark a binary as built with each sanitizer
-# (gcc names first, then the clang runtime equivalents).
-_SAN_SONAME_TOKENS = {
-    "address": ("libasan", "libclang_rt.asan"),
-    "undefined": ("libubsan", "libclang_rt.ubsan"),
-    "thread": ("libtsan", "libclang_rt.tsan"),
-}
-
-# Sanitizer mode <-> the short CLI flag that selects it (test side) and the
-# value the build side takes via `raisin build --test <mode>`.
-_SAN_FLAG = {"address": "--asan", "thread": "--tsan", "undefined": "--ubsan"}
-
-
-def _binary_is_instrumented(exe: Path, sanitizer: str) -> bool:
-    """True if exe itself was linked with the sanitizer runtime (its own NEEDED).
-
-    A binary compiled with -fsanitize=... lists the runtime among its own
-    DT_NEEDED entries. A binary that merely loads an instrumented .so pulls the
-    runtime in only transitively and is NOT treated as instrumented here -- that
-    is exactly the set we want to skip, since preloading the runtime into an
-    uninstrumented binary can destabilize it. On any uncertainty (no readelf,
-    parse error) the binary is kept rather than silently dropped.
-    """
-    tokens = _SAN_SONAME_TOKENS.get(sanitizer)
-    if not tokens:
-        return True
-    try:
-        out = subprocess.run(
-            ["readelf", "-d", str(exe)], capture_output=True, text=True, check=False
-        ).stdout
-    except Exception:
-        return True
-    for line in out.splitlines():
-        if "(NEEDED)" in line and any(t in line for t in tokens):
-            return True
-    return False
-
-
-def _run_streaming_capture(cmd, cwd, timeout, log_path: Path) -> int:
-    """Run cmd, tee combined stdout+stderr to both the console and log_path.
-
-    Used for sanitizer runs so diagnostics are captured to a file reliably --
-    GCC's UBSan ignores its log_path option and prints to stderr, so we can't
-    rely on the sanitizers writing files themselves. Streams live (chunked) and
-    SIGKILLs the whole process group on timeout, matching the non-capturing path.
-    Returns the process exit code; raises subprocess.TimeoutExpired on timeout.
-    """
-    with open(log_path, "wb") as f:
-        proc = subprocess.Popen(
-            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-
-        def pump():
-            for chunk in iter(lambda: proc.stdout.read(4096), b""):
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
-                f.write(chunk)
-
-        t = threading.Thread(target=pump)
-        t.start()
-        try:
-            proc.wait(timeout=timeout if timeout and timeout > 0 else None)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait()
-            t.join()
-            raise
-        t.join()
-    return proc.returncode
-
-
-def _log_has_findings(log_path: Path) -> bool:
-    try:
-        text = log_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return False
-    return any(m in text for m in _SAN_FINDING_MARKERS)
-
-
-# Lines that mark a genuine sanitizer diagnostic in a log file.
-_SAN_FINDING_MARKERS = (
-    "runtime error:",
-    "ERROR: AddressSanitizer",
-    "ERROR: LeakSanitizer",
-    "ERROR: ThreadSanitizer",
-    "ERROR: MemorySanitizer",
-)
-
-# A source file:line inside a stack frame or error line (excludes binary+offset
-# frames, which end in "+0x...)" and have no ":<line>").
-_SAN_LOC_RE = re.compile(r"(/[^\s():]+\.(?:cpp|cxx|cc|c|hpp|hxx|hh|h|tcc|ipp)):(\d+)")
-# A backtrace frame:  "    #4 0x... in <func> <location-or-binary+offset>"
-_SAN_FRAME_RE = re.compile(r"^\s*#(\d+)\s+0x[0-9a-fA-F]+\s+in\s+(.*)$")
-
-
-def _san_kind(marker_line: str) -> str:
-    """Short error kind, e.g. 'ASan: SEGV' or 'UBSan: load of invalid bool'."""
-    if "runtime error:" in marker_line:
-        reason = marker_line.split("runtime error:", 1)[1].strip()
-        # keep it short
-        return "UBSan: " + (reason[:60] + "…" if len(reason) > 60 else reason)
-    m = re.search(r"ERROR:\s*(\w*Sanitizer):\s*(.*)", marker_line)
-    if m:
-        tool = m.group(1).replace("Sanitizer", "San")
-        detail = m.group(2).split(" on ", 1)[0].split("(", 1)[0].strip()
-        return f"{tool}: {detail}"[:70]
-    return marker_line.strip()[:70]
-
-
-def _parse_sanitizer_findings(text: str, root: Path) -> list:
-    """Parse a sanitizer log into findings, each with the precise source site.
-
-    Returns a list of dicts: {kind, message, location, in_project, frames}.
-    `location` is the first project-source frame (path under `root`) — the line
-    you actually need to look at — falling back to the error line's own location
-    (UBSan) and then to '(no source frame)'. `frames` are the project-source
-    frames, with paths made relative to root.
-    """
-    root_str = str(root)
-
-    def rel(p):
-        return p[len(root_str) + 1:] if p.startswith(root_str + "/") else p
-
-    lines = text.splitlines()
-    findings = []
-    i = 0
-    n = len(lines)
-    while i < n:
-        line = lines[i]
-        if any(m in line for m in _SAN_FINDING_MARKERS):
-            message = line.strip()
-            # location on the error line itself (UBSan always has one; it may be
-            # in project src or in a system header).
-            em = _SAN_LOC_RE.search(line)
-            err_loc_any = f"{em.group(1)}:{em.group(2)}" if em else None
-            err_in_project = bool(em and em.group(1).startswith(root_str)
-                                  and "/cmake-build-" not in em.group(1))
-
-            # Collect the backtrace. ASan prints intro lines ("The signal is
-            # caused by...") between the error line and frame #0, so skip
-            # non-frame lines until frames start; stop when the backtrace ends.
-            proj_frames = []
-            j = i + 1
-            started = False
-            while j < n:
-                lj = lines[j]
-                fm = _SAN_FRAME_RE.match(lj)
-                if fm:
-                    started = True
-                    rest = fm.group(2)
-                    lm = _SAN_LOC_RE.search(rest)
-                    if lm and lm.group(1).startswith(root_str) and "/cmake-build-" not in lm.group(1):
-                        func = rest[: lm.start()].strip().rstrip("(").strip()
-                        proj_frames.append((fm.group(1), func, f"{lm.group(1)}:{lm.group(2)}"))
-                    j += 1
-                    continue
-                if any(m in lj for m in _SAN_FINDING_MARKERS):
-                    break          # next finding begins
-                if started:
-                    break          # backtrace ended
-                j += 1             # still in the intro preamble; keep skipping
-
-            first_proj = proj_frames[0][2] if proj_frames else None
-            # Scope: PROJECT = UB at a src/ line (fix it); SYSTEM = UB inside a
-            # system/3rd-party header (usually a toolchain/ABI artifact, not your
-            # bug); CRASH = a signal with no source line (look at the trigger).
-            if err_in_project:
-                scope, location = "PROJECT", rel(err_loc_any)
-            elif err_loc_any:
-                scope, location = "SYSTEM", err_loc_any
-            elif first_proj:
-                scope, location = "CRASH", rel(first_proj)
-            else:
-                scope, location = "CRASH", "(no project source frame)"
-
-            findings.append({
-                "kind": _san_kind(message),
-                "message": message,
-                "scope": scope,
-                "location": location,
-                "trigger": rel(first_proj) if first_proj else None,
-                "frames": [(nf, fn, rel(lc)) for (nf, fn, lc) in proj_frames[:6]],
-            })
-            i = j
-            continue
-        i += 1
-
-    # de-duplicate identical (scope, kind, location) findings within one binary
-    seen, uniq = set(), []
-    for f in findings:
-        key = (f["scope"], f["kind"], f["location"])
-        if key not in seen:
-            seen.add(key)
-            uniq.append(f)
-    return uniq
-
-
-def _summarize_sanitizer_logs(san_dir: Path, entries: list, sanitizer: str) -> Path:
-    """Scan per-binary sanitizer log files and write summary.md; return its path.
-
-    Empty/clean binaries leave no log file (deleted after the run), so their
-    absence means "no findings". For each finding the report pins the precise
-    source site (file:line) and flags whether it is in project code or only in
-    system/3rd-party code (the latter is typically a toolchain artifact).
-    """
-    root = Path(g.script_directory)
-    rows = []
-    for e in entries:
-        lf = e["prefix"]  # the per-binary .log (kept only if it had findings)
-        if not lf.is_file():
-            continue
-        try:
-            text = lf.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        findings = _parse_sanitizer_findings(text, root)
-        if findings:
-            rows.append({"label": e["label"], "exe": str(e["exe"]),
-                         "log": lf.name, "findings": findings})
-
-    rows.sort(key=lambda r: r["label"])
-    n_findings = sum(len(r["findings"]) for r in rows)
-
-    scope_icon = {"PROJECT": "🔴 PROJECT", "SYSTEM": "⚪ SYSTEM", "CRASH": "🟠 CRASH"}
-    n_project = sum(1 for r in rows for f in r["findings"] if f["scope"] == "PROJECT")
-
-    lines = [
-        f"# Sanitizer report ({sanitizer})",
-        "",
-        f"Binaries with findings: **{len(rows)}**  ·  total findings: **{n_findings}**  "
-        f"·  🔴 PROJECT (fixable): **{n_project}**",
-        "",
-        "- 🔴 **PROJECT** — UB/error at a `src/` line. **This is your bug; fix it.**",
-        "- ⚪ **SYSTEM** — error inside a system/3rd-party header (e.g. libstdc++). "
-        "Usually a toolchain/ABI artifact, not your code; suppress.",
-        "- 🟠 **CRASH** — a signal (SEGV/abort) with no source line; see the trigger frame.",
-        "",
-        "| Package | Scope | Location (file:line) | Kind |",
-        "|---|---|---|---|",
-    ]
-    for r in rows:
-        for f in r["findings"]:
-            lines.append(
-                f"| {r['label']} | {scope_icon.get(f['scope'], f['scope'])} "
-                f"| `{f['location']}` | {f['kind']} |"
-            )
-    if not rows:
-        lines.append("| _none_ | | | |")
-    lines.append("")
-
-    for r in rows:
-        lines.append(f"## {Path(r['exe']).name}  (`{r['label']}`)")
-        lines.append(f"raw log: `{r['log']}`")
-        lines.append("")
-        for f in r["findings"]:
-            lines.append(f"- **[{f['scope']}] {f['kind']}**")
-            lines.append(f"  - 📍 `{f['location']}`")
-            if f["trigger"] and f["trigger"] != f["location"]:
-                lines.append(f"  - triggered from: `{f['trigger']}`")
-            lines.append(f"  - {f['message']}")
-            if f["frames"]:
-                lines.append("  - call path (project frames):")
-                lines.append("    ```")
-                for (nf, func, loc) in f["frames"]:
-                    fn = (func[:70] + "…") if len(func) > 70 else func
-                    lines.append(f"    #{nf} {fn}  {loc}")
-                lines.append("    ```")
-        lines.append("")
-
-    path = san_dir / "summary.md"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
 
 
 def run_unittests(
@@ -766,13 +393,15 @@ def run_unittests(
     if requested and requested not in {"debug", "release"}:
         raise click.ClickException("build_type must be 'debug' or 'release'")
 
-    # All artifacts are collected under report/ with fixed sub-directories.
-    report_unit_output = "report/unittest"
-    coverage_output = "report/coverage"
-    cppcheck_output = "report/cppcheck"
-    sanitizer_output = f"report/sanitizer-{sanitizer}" if sanitizer != "off" else None
+    # All artifacts are collected under "report/"
+    report_root = Path(g.script_directory) / "report"
+    report_unit_output = "report/unittest"          # gtest xml dir
+    coverage_output = "report/coverage"              # gcovr html dir
+    cppcheck_output = "report/cppcheck"              # cppcheck html dir
+    _san_short = {"address": "asan", "thread": "tsan", "undefined": "ubsan"}.get(sanitizer, sanitizer)
+    sanitizer_output = f"report/{_san_short}" if sanitizer != "off" else None  # sanitizer logs dir
 
-    build_dir = _resolve_build_dir(build_type)
+    build_dir = resolve_build_dir(build_type)
 
     if not build_dir.is_dir():
         build_type_for_message = requested or "release"
@@ -781,11 +410,8 @@ def run_unittests(
             f"Run: python3 raisin.py build --type {build_type_for_message}"
         )
 
-    # Static analysis (cppcheck) is independent of test execution, so run it
-    # first -- results appear immediately and aren't blocked by slow/failing
-    # tests. (Coverage stays after the run; it needs the gcda the tests emit.)
+    # Run cppcheck first
     if cppcheck:
-        # Lazy import: commands.cppcheck imports from this module.
         from commands.cppcheck import run_cppcheck
         from commands.utils import get_build_jobs
         click.echo("🔎 Running cppcheck static analysis...")
@@ -801,11 +427,9 @@ def run_unittests(
 
     sanitizer = (sanitizer or "off").lower()
 
-    # Scope which executables run (method B). An explicit --package always wins;
-    # otherwise, in a sanitizer run, auto-restrict to binaries that were actually
-    # built with the sanitizer. This avoids preloading the runtime into
-    # uninstrumented binaries (which can cause spurious startup SEGVs) and skips
-    # unrelated suites that the instrumented package never touches.
+    # Pick which executables to run: --package wins; otherwise a sanitizer run
+    # auto-restricts to binaries actually built with the sanitizer (skips
+    # uninstrumented ones, which can SEGV at startup under preload).
     if packages:
         wanted = [p.lower() for p in packages]
         selected = [e for e in executables if _pkg_matches(e, build_dir, wanted)]
@@ -818,13 +442,9 @@ def run_unittests(
         executables = selected
     elif sanitizer != "off":
         if shutil.which("readelf") is None:
-            click.echo(
-                "⚠️  readelf not found; cannot auto-scope to instrumented binaries. "
-                "Running the full suite (use --package to scope manually).",
-                err=True,
-            )
+            click.echo("⚠️  readelf not found; cannot auto-scope to instrumented binaries.", err=True)
         else:
-            instrumented = [e for e in executables if _binary_is_instrumented(e, sanitizer)]
+            instrumented = [e for e in executables if san.binary_is_instrumented(e, sanitizer)]
             skipped = len(executables) - len(instrumented)
             if instrumented:
                 click.echo(
@@ -833,18 +453,16 @@ def run_unittests(
                 )
                 executables = instrumented
             else:
-                # Nothing here was built with the sanitizer. Running the whole
-                # suite with the runtime preloaded is pointless (no instrumented
-                # code to check) and slow/fragile, so stop with a clear message
-                # rather than silently grinding through every binary.
+                # Nothing was built with the sanitizer -- stop with a clear
+                # message instead of running the whole suite for nothing.
                 bt = requested or "release"
-                flag = _SAN_FLAG.get(sanitizer, "--asan")
+                flag = san.SAN_FLAG.get(sanitizer, "--asan")
                 raise click.ClickException(
                     f"{flag} ({sanitizer}) was requested but no instrumented test "
                     f"binaries were found under: {build_dir}\n"
                     f"This build was not configured with the sanitizer. Build it first, "
                     f"matching the build type you test:\n"
-                    f"  raisin build -t {bt} --test {sanitizer}\n"
+                    f"  raisin build -t {bt} {flag}\n"
                     f"  raisin test {bt} {flag}\n"
                     f"(No build type defaults to the release build dir; pass 'debug' to "
                     f"target the debug build.)"
@@ -855,11 +473,11 @@ def run_unittests(
     click.echo(f"🧪 Running {len(executables)} {kinds} test(s) in {build_dir}")
 
     if sanitizer != "off":
-        _apply_sanitizer_env(sanitizer)
+        san.apply_env(sanitizer)
         click.echo(f"🧷 Sanitizer mode: {sanitizer}")
         # The ASan runtime must load first; preload it so uninstrumented test
         # binaries that link the instrumented .so don't abort at startup.
-        preload = _resolve_sanitizer_runtime(build_dir, sanitizer)
+        preload = san.resolve_runtime(build_dir, sanitizer)
         if preload:
             existing = os.environ.get("LD_PRELOAD", "")
             os.environ["LD_PRELOAD"] = ":".join(preload + ([existing] if existing else []))
@@ -871,9 +489,7 @@ def run_unittests(
                 err=True,
             )
 
-    # Capture sanitizer diagnostics to report/sanitizer-<mode>: each binary's
-    # output is teed to a log file, and clean logs are dropped afterwards so only
-    # binaries with findings remain, plus a summary.md.
+    # Capture sanitizer diagnostics to report/<asan|tsan|ubsan>
     san_dir = None
     san_entries = []
     if sanitizer != "off":
@@ -885,14 +501,17 @@ def run_unittests(
         san_dir = _resolve_output_dir(sanitizer_output)
         click.echo(f"🧷 Sanitizer report dir: {san_dir}")
 
-    # The pass/fail report is always produced: each gtest binary emits JUnit XML
-    # which is aggregated into report/unittest/report.md.
+    # The unit pass/fail report is produced only for a normal run. A sanitizer
+    # run aborts each binary on the first error, so its counts are meaningless:
+    # we skip the gtest XML and emit only the sanitizer report (report/<mode>.md).
     results = []
-    report_path = _resolve_output_dir(report_unit_output)
-    xml_dir = report_path / "xml"
-    if xml_dir.is_dir():
-        shutil.rmtree(xml_dir)
-    xml_dir.mkdir(parents=True, exist_ok=True)
+    xml_dir = None
+    if sanitizer == "off":
+        report_path = _resolve_output_dir(report_unit_output)
+        xml_dir = report_path / "xml"
+        if xml_dir.is_dir():
+            shutil.rmtree(xml_dir)
+        xml_dir.mkdir(parents=True, exist_ok=True)
 
     failures = 0
     for exe in executables:
@@ -900,8 +519,10 @@ def run_unittests(
         # TSan's shadow-memory mapping requires ASLR disabled; launch via setarch -R.
         cmd = ["setarch", "-R", str(exe)] if sanitizer == "thread" else [str(exe)]
         label = _pkg_label_for_exe(exe, build_dir)
-        xml_file = xml_dir / f"{label}__{exe.stem}.xml"
-        cmd.append(f"--gtest_output=xml:{xml_file}")
+        xml_file = None
+        if xml_dir is not None:
+            xml_file = xml_dir / f"{label}__{exe.stem}.xml"
+            cmd.append(f"--gtest_output=xml:{xml_file}")
         san_log = None
         if san_dir is not None:
             san_log = san_dir / f"{label}__{exe.stem}.log"
@@ -911,7 +532,7 @@ def run_unittests(
             # timeout=0 disables the limit; otherwise a hung test is killed
             # (SIGKILL) after `timeout` seconds, marked failed, and we move on.
             if san_log is not None:
-                rc = _run_streaming_capture(cmd, build_dir, timeout, san_log)
+                rc = san.run_streaming_capture(cmd, build_dir, timeout, san_log)
                 if rc != 0:
                     raise subprocess.CalledProcessError(rc, cmd)
             else:
@@ -932,24 +553,28 @@ def run_unittests(
             status = "fail"
             click.echo(f"❌ Failed with exit code {e.returncode}: {exe}", err=True)
         results.append({"label": label, "status": status, "xml": xml_file})
-        # Keep only sanitizer logs that actually contain findings.
-        if san_log is not None and san_log.is_file() and not _log_has_findings(san_log):
+        # Keep only sanitizer logs with reportable (PROJECT/CRASH) findings;
+        # clean or SYSTEM-only logs are dropped.
+        if san_log is not None and san_log.is_file() \
+                and not san.log_has_reportable_findings(san_log, Path(g.script_directory)):
             san_log.unlink()
 
-    if failures:
-        click.echo(f"\n⚠️  {failures} test(s) failed.", err=True)
-    else:
-        click.echo("\n✅ All tests passed.")
-
-    agg = _aggregate_test_results(results)
-    _print_test_table(agg)
-    click.echo(f"\n📝 Test report: {_write_test_report_md(report_path, agg)}")
+    # Normal run: print the pass/fail table and write report/unittest.md. A
+    # sanitizer run produces no unit-test result -- only the sanitizer report.
+    if sanitizer == "off":
+        if failures:
+            click.echo(f"\n⚠️  {failures} test(s) failed.", err=True)
+        else:
+            click.echo("\n✅ All tests passed.")
+        agg = _aggregate_test_results(results)
+        _print_test_table(agg)
+        click.echo(f"\n📝 Test report: {_write_test_report_md(report_root / 'unittest.md', agg)}")
 
     if san_dir is not None:
-        summary = _summarize_sanitizer_logs(san_dir, san_entries, sanitizer)
-        n_files = len([p for p in san_dir.glob("*") if p.is_file() and p.name != "summary.md"])
+        summary = san.summarize_logs(san_dir, san_entries, sanitizer)
+        n_logs = len([p for p in san_dir.glob("*.log") if p.is_file()])
         click.echo(f"\n🧷 Sanitizer report: {summary}")
-        if n_files == 0:
+        if n_logs == 0:
             click.echo("   No sanitizer findings recorded (all instrumented binaries clean).")
 
     # Generate the coverage report even if some tests failed, so partial
@@ -958,7 +583,12 @@ def run_unittests(
         _generate_coverage_report_per_module(build_dir, coverage_output)
 
     if failures:
-        raise click.ClickException(f"{failures} test(s) failed.")
+        if sanitizer == "off":
+            raise click.ClickException(f"{failures} test(s) failed.")
+        raise click.ClickException(
+            f"{failures} binary(ies) aborted under the sanitizer "
+            f"(see report/{_san_short}.md)."
+        )
 
 
 @click.command(name="test")
@@ -993,17 +623,14 @@ def run_unittests(
 )
 @click.option(
     "--asan", is_flag=True, default=False,
-    help="Run under AddressSanitizer+UBSan (build with 'raisin build --test address'). "
-    "Only binaries actually built with the sanitizer are run, unless --package is given.",
+    help="Run under AddressSanitizer + UBSan (build with 'raisin build --asan'). "
+    "Covers undefined-behavior checks too. Only binaries actually built with the "
+    "sanitizer are run, unless --package is given.",
 )
 @click.option(
     "--tsan", is_flag=True, default=False,
-    help="Run under ThreadSanitizer (build with 'raisin build --test thread'); each "
+    help="Run under ThreadSanitizer (build with 'raisin build --tsan'); each "
     "binary is launched under 'setarch -R' (ASLR off).",
-)
-@click.option(
-    "--ubsan", is_flag=True, default=False,
-    help="Run under UndefinedBehaviorSanitizer (build with 'raisin build --test undefined').",
 )
 @click.option(
     "--cppcheck",
@@ -1028,7 +655,6 @@ def test_command(
     timeout: int,
     asan: bool,
     tsan: bool,
-    ubsan: bool,
     cppcheck: bool,
     packages: tuple,
 ) -> None:
@@ -1050,7 +676,6 @@ def test_command(
         raisin test debug --cppcheck      # + cppcheck static analysis
         raisin test debug --asan          # tests under ASan+UBSan
         raisin test debug --tsan          # tests under ThreadSanitizer
-        raisin test debug --ubsan         # tests under UBSan
         raisin test debug -p raisin_parameter   # only one package's tests
 
     """
@@ -1058,12 +683,10 @@ def test_command(
         raise click.ClickException("--unit and --integration are mutually exclusive")
 
     # The sanitizer flags map to a single mode and are mutually exclusive
-    # (ASan and TSan cannot be combined).
-    selected = [name for name, on in
-                (("address", asan), ("thread", tsan), ("undefined", ubsan)) if on]
-    if len(selected) > 1:
-        raise click.ClickException("--asan, --tsan and --ubsan are mutually exclusive")
-    sanitizer = selected[0] if selected else "off"
+    # (ASan and TSan cannot be combined). --asan already includes UBSan checks.
+    if asan and tsan:
+        raise click.ClickException("--asan and --tsan are mutually exclusive")
+    sanitizer = "address" if asan else "thread" if tsan else "off"
 
     if only_unit:
         suffixes = (UNIT_SUFFIX,)

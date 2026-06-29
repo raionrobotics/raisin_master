@@ -280,25 +280,18 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
 @click.option(
     "--test",
     is_flag=True,
-    help="Build unit tests (+coverage instrumentation) for this build, without a "
-    "sanitizer.",
+    help="Build unit tests (+coverage instrumentation) for this build, without a sanitizer.",
 )
 @click.option(
     "--asan", is_flag=True,
-    help="Build tests with AddressSanitizer+UBSan (implies --test). Run with 'raisin "
-    "test --asan'.",
+    help="Build tests with AddressSanitizer+UBSan (implies --test). Run with 'raisin test --asan'.",
 )
 @click.option(
     "--tsan", is_flag=True,
     help="Build tests with ThreadSanitizer (implies --test). Run with 'raisin test --tsan'.",
 )
-@click.option(
-    "--ubsan", is_flag=True,
-    help="Build tests with UndefinedBehaviorSanitizer (implies --test). Run with "
-    "'raisin test --ubsan'.",
-)
 @click.argument("targets", nargs=-1)
-def build_cli_command(build_types, install, python_executable, test, asan, tsan, ubsan, targets):
+def build_cli_command(build_types, install, python_executable, test, asan, tsan, targets):
     """
     Compile the project using CMake and Ninja.
 
@@ -309,13 +302,11 @@ def build_cli_command(build_types, install, python_executable, test, asan, tsan,
         raisin build -t release -t debug -i          # Build both types and install
         raisin build -t release raisin_network       # Build specific target
         raisin build -t debug --test                 # Tests, no sanitizer
-        raisin build -t debug --asan                 # Tests + ASan+UBSan
-        raisin build -t debug --tsan                 # Tests + ThreadSanitizer
-        raisin build -t debug --ubsan                # Tests + UBSan
+        raisin build -t debug --asan                 # Tests + ASan+UBSan (ASan/TSan are mutually exclusive)
+        raisin build -t debug --tsan                 # Tests + ThreadSanitizer (ASan/TSan are mutually exclusive)
 
     \b
-    Note: This command first runs setup, then compiles. ASan/TSan are mutually
-    exclusive; switching sanitizer modes reconfigures and rebuilds.
+    Note: This command first runs setup, then compiles.
     Run 'sudo bash install_dependencies.sh' to install package dependencies.
     """
     # Import here to avoid circular dependency
@@ -332,13 +323,10 @@ def build_cli_command(build_types, install, python_executable, test, asan, tsan,
 
     raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
 
-    # --test builds tests without a sanitizer; --asan/--tsan/--ubsan select a
-    # sanitizer (mutually exclusive) and imply a test build.
-    selected = [m for m, on in (("address", asan), ("thread", tsan), ("undefined", ubsan)) if on]
-    if len(selected) > 1:
-        raise click.ClickException("--asan, --tsan and --ubsan are mutually exclusive")
-    sanitizer = selected[0] if selected else "off"
-    build_test_enabled = test or bool(selected)
+    if asan and tsan:
+        raise click.ClickException("--asan and --tsan are mutually exclusive")
+    sanitizer = "address" if asan else "thread" if tsan else "off"
+    build_test_enabled = test or asan or tsan
 
     setup(raisin_march=raisin_march, build_test_enabled=build_test_enabled)
 

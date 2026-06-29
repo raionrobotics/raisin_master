@@ -34,8 +34,7 @@ else()
 endif()
 set(RAISIN_MARCH "${RAISIN_DEFAULT_MARCH}" CACHE STRING "Target CPU architecture (-march=). Defaults to a portable baseline for the current architecture. Override with values like 'native' or 'znver2' when needed.")
 
-# Sanitizer mode for test targets, applied per-target via raisin_enable_sanitizer().
-# Single value because ASan and TSan cannot be combined. Default off -> no-op.
+# Sanitizer mode for test targets, applied per-target via raisin_enable_test_instrumentation()
 set(RAISIN_SANITIZER "off" CACHE STRING "Sanitizer for test targets: off|address|thread|undefined")
 set_property(CACHE RAISIN_SANITIZER PROPERTY STRINGS off address thread undefined)
 
