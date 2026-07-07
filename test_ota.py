@@ -142,6 +142,43 @@ class TestConfiguration(unittest.TestCase):
                 result = ota.get_ssh_key_path()
                 self.assertEqual(result.name, "id_ed25519")
 
+    def test_get_robot_api_key_from_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": " robot-key ",  # pragma: allowlist secret
+            },
+            clear=True,
+        ):
+            self.assertEqual(ota.get_robot_api_key(), "robot-key")
+
+    def test_save_and_read_robot_api_key_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            key_path = Path(tmpdir) / "robot-api-key"
+            with patch.dict(
+                os.environ,
+                {"RAISIN_ROBOT_API_KEY_FILE": str(key_path)},
+                clear=True,
+            ):
+                saved_path = ota.save_robot_api_key(" robot-key ")
+                self.assertEqual(saved_path, key_path)
+                if os.name == "posix":
+                    self.assertEqual(saved_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(ota.get_robot_api_key(), "robot-key")
+
+    @unittest.skipIf(os.name != "posix", "POSIX file permission check")
+    def test_insecure_robot_api_key_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            key_path = Path(tmpdir) / "robot-api-key"
+            key_path.write_text("robot-key\n", encoding="utf-8")
+            os.chmod(key_path, 0o644)
+            with patch.dict(
+                os.environ,
+                {"RAISIN_ROBOT_API_KEY_FILE": str(key_path)},
+                clear=True,
+            ):
+                self.assertIsNone(ota.get_robot_api_key())
+
 
 # ============================================================================
 # 1b. Token Persistence Tests
@@ -625,6 +662,7 @@ class TestDownload(unittest.TestCase):
         ota._cached_token = None
         ota._auth_failed = False
         ota._archive_cache.clear()
+        ota._install_session_id = None
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
@@ -637,6 +675,7 @@ class TestDownload(unittest.TestCase):
         ota._cached_token = None
         ota._auth_failed = False
         ota._archive_cache.clear()
+        ota._install_session_id = None
         g.os_type = self._orig_os_type
         g.os_version = self._orig_os_version
         g.architecture = self._orig_architecture
@@ -904,6 +943,134 @@ class TestDownload(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
+    def test_download_package_blob_uses_robot_endpoint_when_key_configured(
+        self, mock_get, _ep
+    ):
+        mock_get.return_value = _mock_response(iter_content=[b"pkg-data"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_path = Path(tmpdir) / "pkg.zip"
+            with patch.dict(
+                os.environ,
+                {
+                    "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                    "RAISIN_OTA_CLIENT_VERSION": "raisin-cli-test",
+                },
+                clear=True,
+            ):
+                result = ota._download_package_blob(
+                    "arch-1",
+                    "pkg-1",
+                    "mypkg",
+                    download_path,
+                    archive_name="dso",
+                    archive_version="v1.0.3",
+                    platform_str="ubuntu-24.04-arm64",
+                    install_session_id="session-1",
+                )
+
+            self.assertTrue(result)
+            self.assertEqual(download_path.read_bytes(), b"pkg-data")
+
+        call_args = mock_get.call_args
+        self.assertEqual(
+            call_args.args[0],
+            "https://ota.example.com/robots/me/archives/by-key/"
+            "packages/pkg-1/download",
+        )
+        self.assertEqual(
+            call_args.kwargs["params"],
+            {
+                "name": "dso",
+                "platform": "ubuntu-24.04-arm64",
+                "version": "1.0.3",
+            },
+        )
+        self.assertEqual(
+            call_args.kwargs["headers"]["Authorization"], "Robot robot-key"
+        )
+        self.assertEqual(
+            call_args.kwargs["headers"]["X-Client-Version"], "raisin-cli-test"
+        )
+        self.assertEqual(
+            call_args.kwargs["headers"]["X-Install-Session-Id"], "session-1"
+        )
+
+    @patch("commands.ota_client._stream_download", return_value=True)
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    def test_download_package_blob_keeps_legacy_path_without_robot_key(
+        self, _ep, mock_stream
+    ):
+        with patch.dict(os.environ, {}, clear=True):
+            result = ota._download_package_blob(
+                "arch-1",
+                "pkg-1",
+                "mypkg",
+                Path("/tmp/pkg.zip"),
+                archive_name="dso",
+                archive_version="1.0.3",
+                platform_str="ubuntu-24.04-arm64",
+                install_session_id="session-1",
+            )
+
+        self.assertTrue(result)
+        mock_stream.assert_called_once_with(
+            "https://ota.example.com/archives/arch-1/packages/pkg-1/download",
+            Path("/tmp/pkg.zip"),
+            "mypkg",
+        )
+
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.post")
+    def test_report_software_snapshot_posts_robot_payload(self, mock_post, _ep):
+        mock_post.return_value = _mock_response()
+        packages = [{"packageId": "pkg-1", "packageName": "mypkg", "version": "1.2.0"}]
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_CLIENT_VERSION": "raisin-cli-test",
+            },
+            clear=True,
+        ):
+            result = ota.report_software_snapshot(
+                archive_id="arch-1",
+                archive_name="dso",
+                archive_version="v1.0.3",
+                platform_str="ubuntu-24.04-arm64",
+                packages=packages,
+                install_session_id="session-1",
+            )
+
+        self.assertTrue(result)
+        call_args = mock_post.call_args
+        self.assertEqual(
+            call_args.args[0],
+            "https://ota.example.com/robots/me/software-snapshot",
+        )
+        self.assertEqual(
+            call_args.kwargs["headers"]["Authorization"], "Robot robot-key"
+        )
+        self.assertEqual(
+            call_args.kwargs["headers"]["X-Install-Session-Id"], "session-1"
+        )
+        self.assertEqual(call_args.kwargs["json"]["archiveId"], "arch-1")
+        self.assertEqual(call_args.kwargs["json"]["name"], "dso")
+        self.assertEqual(call_args.kwargs["json"]["version"], "1.0.3")
+        self.assertEqual(call_args.kwargs["json"]["platform"], "ubuntu-24.04-arm64")
+        self.assertEqual(call_args.kwargs["json"]["packages"], packages)
+        self.assertEqual(call_args.kwargs["json"]["installSessionId"], "session-1")
+        self.assertEqual(call_args.kwargs["json"]["clientVersion"], "raisin-cli-test")
+
     @patch("commands.ota_client._fetch_archive_by_tag")
     @patch("commands.ota_client._download_package_blob")
     def test_download_all_uses_tag_when_provided(self, mock_dl, mock_fetch_by_tag):
@@ -1013,7 +1180,7 @@ class TestDownload(unittest.TestCase):
                 zf.writestr("release.yaml", "version: 1.2.0\ndependencies:\n  - depA\n")
 
             # Make _download_package_blob write the zip to disk (already done)
-            def fake_download(archive_id, pkg_id, name, path):
+            def fake_download(archive_id, pkg_id, name, path, **_kwargs):
                 # File already written above
                 return True
 
@@ -1083,7 +1250,7 @@ class TestDownload(unittest.TestCase):
             with zipfile.ZipFile(download_file, "w") as zf:
                 zf.writestr("release.yaml", "version: 1.5.0\n")
 
-            def fake_download(archive_id, pkg_id, name, path):
+            def fake_download(archive_id, pkg_id, name, path, **_kwargs):
                 return True
 
             mock_blob.side_effect = fake_download
@@ -1172,6 +1339,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._cached_token = None
         ota._auth_failed = False
         ota._archive_cache.clear()
+        ota._install_session_id = None
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
@@ -1184,6 +1352,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._cached_token = None
         ota._auth_failed = False
         ota._archive_cache.clear()
+        ota._install_session_id = None
         g.os_type = self._orig_os_type
         g.os_version = self._orig_os_version
         g.architecture = self._orig_architecture
@@ -1284,9 +1453,13 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         self.assertEqual(metadata["blobHash"], "abc123" * 10 + "abcd")
         self.assertIn("installedAt", metadata)
 
+    @patch("commands.ota_client.report_software_snapshot", return_value=True)
+    @patch("commands.ota_client.get_install_session_id", return_value="session-1")
     @patch("commands.ota_client._download_package_blob", return_value=True)
     @patch("commands.ota_client._fetch_archive_manifest")
-    def test_download_all_from_archive(self, mock_manifest, mock_blob):
+    def test_download_all_from_archive(
+        self, mock_manifest, mock_blob, _session_id, mock_report_snapshot
+    ):
         """Download all packages from an archive."""
         packages = [
             {
@@ -1342,6 +1515,23 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         self.assertEqual(metadata["archiveVersion"], "v2024.01")
         self.assertEqual(metadata["packageId"], "p1")
         self.assertEqual(metadata["manifestHash"], "a" * 64)
+        self.assertEqual(metadata["installSessionId"], "session-1")
+        self.assertEqual(result["pkg1"]["otaMetadata"]["installSessionId"], "session-1")
+
+        mock_report_snapshot.assert_called_once()
+        report_kwargs = mock_report_snapshot.call_args.kwargs
+        self.assertEqual(report_kwargs["archive_id"], "arch-1")
+        self.assertEqual(report_kwargs["archive_name"], "raisin-robot")
+        self.assertEqual(report_kwargs["archive_version"], "v2024.01")
+        self.assertEqual(report_kwargs["platform_str"], "linux-22.04-x86_64")
+        self.assertEqual(report_kwargs["install_session_id"], "session-1")
+        self.assertCountEqual(
+            report_kwargs["packages"],
+            [
+                {"packageId": "p1", "packageName": "pkg1", "version": "1.0.0"},
+                {"packageId": "p2", "packageName": "pkg2", "version": "2.0.0"},
+            ],
+        )
 
     @patch(
         "commands.ota_client._fetch_archive_manifest",

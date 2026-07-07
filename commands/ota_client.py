@@ -20,6 +20,7 @@ import struct
 import subprocess
 import tempfile
 import time
+import uuid
 import zipfile
 
 import requests
@@ -42,6 +43,10 @@ _auth_failed = False
 # Key: (archive_name, platform_str) → Value: (packages_list, archive_id, archive_version)
 _archive_cache = {}
 
+# Correlates all OTA package downloads and the final software snapshot from
+# one CLI process.
+_install_session_id = None
+
 # Default archive name prefix (build_type is appended for debug)
 DEFAULT_ARCHIVE_NAME = "raisin-robot"
 
@@ -53,6 +58,14 @@ _TOKEN_CACHE_FILE = ".ota_token_cache.json"
 
 # Per-install metadata file written after OTA extraction
 _INSTALL_METADATA_FILE = "ota-install.json"
+
+# Robot API key configuration. The key file is intentionally outside the repo.
+_ROBOT_API_KEY_FILE = "robot-api-key"  # pragma: allowlist secret
+_ROBOT_API_KEY_ENV = "RAISIN_ROBOT_API_KEY"  # pragma: allowlist secret
+_ROBOT_API_KEY_FILE_ENV = "RAISIN_ROBOT_API_KEY_FILE"  # pragma: allowlist secret
+
+# Client identity attached to robot OTA audit/history records.
+DEFAULT_CLIENT_VERSION = "raisin-cli"
 
 
 # ============================================================================
@@ -90,6 +103,90 @@ def get_ssh_key_path() -> Path:
 
     # 3. Default fallback
     return ssh_dir / "id_ed25519"
+
+
+def get_robot_api_key_path() -> Path:
+    """Get the local robot API key path.
+
+    Resolution order:
+        1. RAISIN_ROBOT_API_KEY_FILE environment variable
+        2. ~/.config/raisin/robot-api-key
+    """
+    env_path = os.environ.get(_ROBOT_API_KEY_FILE_ENV, "").strip()
+    if env_path:
+        return Path(env_path).expanduser()
+    return Path.home() / ".config" / "raisin" / _ROBOT_API_KEY_FILE
+
+
+def save_robot_api_key(api_key: str, path: Optional[Path] = None) -> Path:
+    """Persist a robot API key with owner-only file permissions."""
+    key = (api_key or "").strip()
+    if not key:
+        raise ValueError("Robot API key cannot be empty")
+
+    target = Path(path).expanduser() if path else get_robot_api_key_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(target.parent, 0o700)
+    except OSError:
+        pass
+
+    temp_path = target.with_name(f".{target.name}.tmp")
+    temp_path.write_text(key + "\n", encoding="utf-8")
+    try:
+        os.chmod(temp_path, 0o600)
+    except OSError:
+        pass
+    temp_path.replace(target)
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+    return target
+
+
+def get_robot_api_key() -> Optional[str]:
+    """Read the robot API key from env or the local key file.
+
+    Env var is useful for CI/tests. The file path is ignored on POSIX systems
+    if group/other permissions are enabled.
+    """
+    env_key = os.environ.get(_ROBOT_API_KEY_ENV, "").strip()
+    if env_key:
+        return env_key
+
+    key_path = get_robot_api_key_path()
+    try:
+        if not key_path.is_file():
+            return None
+        if os.name == "posix" and (key_path.stat().st_mode & 0o077):
+            print(
+                "⚠️ Ignoring robot API key file with insecure permissions: "
+                f"{key_path} (run: chmod 600 {key_path})"
+            )
+            return None
+        key = key_path.read_text(encoding="utf-8").strip()
+        return key or None
+    except OSError as e:
+        print(f"⚠️ Failed to read robot API key file '{key_path}': {e}")
+        return None
+
+
+def get_client_version() -> str:
+    """Return the OTA client identity used in robot audit/history records."""
+    for env_name in ("RAISIN_OTA_CLIENT_VERSION", "RAISIN_CLIENT_VERSION"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return DEFAULT_CLIENT_VERSION
+
+
+def get_install_session_id() -> str:
+    """Return a stable install session id for this CLI process."""
+    global _install_session_id
+    if not _install_session_id:
+        _install_session_id = str(uuid.uuid4())
+    return _install_session_id
 
 
 def get_archive_name(build_type: str, archive_name: Optional[str] = None) -> str:
@@ -811,13 +908,81 @@ def _stream_download(url: str, download_path: Path, error_context: str = "") -> 
         return False
 
 
+def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[dict]:
+    """Build robot-authenticated headers, or return None when unconfigured."""
+    api_key = get_robot_api_key()
+    if not api_key:
+        return None
+
+    session_id = install_session_id or get_install_session_id()
+    return {
+        "Authorization": f"Robot {api_key}",
+        "X-Client-Version": get_client_version(),
+        "X-Install-Session-Id": session_id,
+    }
+
+
+def _stream_robot_package_download(
+    package_id: str,
+    package_name: str,
+    archive_name: str,
+    archive_version: str,
+    platform_str: str,
+    download_path: Path,
+    headers: dict,
+) -> bool:
+    """Download a package through the robot-authenticated by-key endpoint."""
+    base = get_ota_endpoint().rstrip("/")
+    url = f"{base}/robots/me/archives/by-key/packages/{package_id}/download"
+    params = {
+        "name": archive_name,
+        "platform": platform_str,
+        "version": archive_version.lstrip("vV"),
+    }
+
+    try:
+        download_path.parent.mkdir(parents=True, exist_ok=True)
+        with requests.get(
+            url, headers=headers, params=params, stream=True, timeout=60
+        ) as resp:
+            resp.raise_for_status()
+            with open(download_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        return True
+    except requests.RequestException as e:
+        if download_path.exists():
+            try:
+                download_path.unlink()
+            except OSError:
+                pass
+        print(f"⚠️ Robot OTA download failed for '{package_name}': {e}")
+        return False
+
+
 def _download_package_blob(
     archive_id: str,
     package_id: str,
     package_name: str,
     download_path: Path,
+    archive_name: Optional[str] = None,
+    archive_version: Optional[str] = None,
+    platform_str: Optional[str] = None,
+    install_session_id: Optional[str] = None,
 ) -> bool:
     """Download a single package blob from an archive."""
+    robot_headers = _robot_auth_headers(install_session_id)
+    if robot_headers and archive_name and archive_version and platform_str:
+        return _stream_robot_package_download(
+            package_id=package_id,
+            package_name=package_name,
+            archive_name=archive_name,
+            archive_version=archive_version,
+            platform_str=platform_str,
+            download_path=download_path,
+            headers=robot_headers,
+        )
+
     base = get_ota_endpoint().rstrip("/")
     url = f"{base}/archives/{archive_id}/packages/{package_id}/download"
     return _stream_download(url, download_path, package_name)
@@ -880,7 +1045,10 @@ def _extract_and_read_deps(
             release_info = yaml.safe_load(f) or {}
             dependencies = release_info.get("dependencies", [])
 
-    return {"version": version, "dependencies": dependencies}
+    result = {"version": version, "dependencies": dependencies}
+    if install_metadata:
+        result["otaMetadata"] = install_metadata
+    return result
 
 
 def _build_archive_install_metadata(
@@ -896,6 +1064,7 @@ def _build_archive_install_metadata(
     requested_archive_version: Optional[str],
     manifest_hash: Optional[str],
     blob_hash: Optional[str],
+    install_session_id: Optional[str] = None,
 ) -> dict:
     """Build install metadata for archive-based OTA downloads."""
     return {
@@ -909,6 +1078,7 @@ def _build_archive_install_metadata(
         "archiveId": archive_id,
         "archiveVersion": actual_version,
         "requestedArchiveVersion": requested_archive_version,
+        "installSessionId": install_session_id,
         "packageName": package_name,
         "packageId": package_id,
         "packageVersion": version,
@@ -916,6 +1086,135 @@ def _build_archive_install_metadata(
         "manifestHash": manifest_hash,
         "blobHash": blob_hash,
     }
+
+
+def _snapshot_package_from_metadata(metadata: dict) -> Optional[dict]:
+    """Convert one ota-install.json document into a snapshot package item."""
+    package_id = str(metadata.get("packageId") or "").strip()
+    package_name = str(metadata.get("packageName") or "").strip()
+    version = str(metadata.get("packageVersion") or "").strip().lstrip("vV")
+    if not package_id or not package_name or not version:
+        return None
+    return {
+        "packageId": package_id,
+        "packageName": package_name,
+        "version": version,
+    }
+
+
+def _collect_archive_snapshot_packages(
+    install_base_path: Path,
+    archive_id: str,
+    platform_str: str,
+    build_type: str,
+) -> list:
+    """Collect currently installed package metadata for an archive."""
+    metadata_pattern = (
+        f"*/{g.os_type}/{g.os_version}/{g.architecture}/{build_type}/"
+        f"{_INSTALL_METADATA_FILE}"
+    )
+    packages_by_id = {}
+    for metadata_path in sorted(install_base_path.glob(metadata_pattern)):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        if metadata.get("source") != "archive":
+            continue
+        if metadata.get("archiveId") != archive_id:
+            continue
+        if metadata.get("platform") != platform_str:
+            continue
+        if metadata.get("buildType") != build_type:
+            continue
+
+        package = _snapshot_package_from_metadata(metadata)
+        if package:
+            packages_by_id[package["packageId"]] = package
+
+    return list(packages_by_id.values())
+
+
+def report_software_snapshot(
+    archive_id: str,
+    archive_name: Optional[str],
+    archive_version: Optional[str],
+    platform_str: str,
+    packages: list,
+    install_session_id: Optional[str] = None,
+) -> bool:
+    """Report the robot's installed software snapshot to the OTA server."""
+    if not packages:
+        return False
+
+    headers = _robot_auth_headers(install_session_id)
+    if not headers:
+        return False
+
+    session_id = install_session_id or get_install_session_id()
+    payload = {
+        "archiveId": archive_id,
+        "packages": packages,
+        "installSessionId": session_id,
+        "clientVersion": get_client_version(),
+    }
+    if archive_name:
+        payload["name"] = archive_name
+    if archive_version:
+        payload["version"] = archive_version.lstrip("vV")
+    if platform_str:
+        payload["platform"] = platform_str
+
+    request_headers = dict(headers)
+    request_headers["Content-Type"] = "application/json"
+    base = get_ota_endpoint().rstrip("/")
+    try:
+        resp = requests.post(
+            f"{base}/robots/me/software-snapshot",
+            headers=request_headers,
+            json=payload,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        print(f"⚠️ Failed to report OTA software snapshot: {e}")
+        return False
+
+
+def _report_snapshot_from_install_metadata(
+    install_base_path: Path,
+    archive_id: str,
+    archive_name: str,
+    archive_version: Optional[str],
+    platform_str: str,
+    build_type: str,
+    install_session_id: str,
+) -> bool:
+    packages = _collect_archive_snapshot_packages(
+        install_base_path=install_base_path,
+        archive_id=archive_id,
+        platform_str=platform_str,
+        build_type=build_type,
+    )
+    if not packages:
+        return False
+
+    if report_software_snapshot(
+        archive_id=archive_id,
+        archive_name=archive_name,
+        archive_version=archive_version,
+        platform_str=platform_str,
+        packages=packages,
+        install_session_id=install_session_id,
+    ):
+        print(
+            "🛰️  Reported OTA software snapshot "
+            f"({len(packages)} packages, session {install_session_id})."
+        )
+        return True
+    return False
 
 
 def download_package(
@@ -1024,8 +1323,19 @@ def download_package(
         Path(g.script_directory) / "install" / f"{package_name}-ota-{version}.zip"
     )
 
+    install_session_id = get_install_session_id()
+
     print(f"⬇️  Downloading '{package_name}' v{version} from OTA server...")
-    if not _download_package_blob(archive_id, pkg_id, package_name, download_file):
+    if not _download_package_blob(
+        archive_id,
+        pkg_id,
+        package_name,
+        download_file,
+        archive_name=archive_name,
+        archive_version=actual_version,
+        platform_str=platform_str,
+        install_session_id=install_session_id,
+    ):
         return None
 
     install_metadata = _build_archive_install_metadata(
@@ -1041,15 +1351,27 @@ def download_package(
         requested_archive_version=archive_version,
         manifest_hash=best_pkg.get("manifestHash"),
         blob_hash=best_pkg.get("blobHash"),
+        install_session_id=install_session_id,
     )
 
-    return _extract_and_read_deps(
+    result = _extract_and_read_deps(
         download_file,
         install_dir,
         package_name,
         version,
         install_metadata=install_metadata,
     )
+    if result:
+        _report_snapshot_from_install_metadata(
+            install_base_path=install_base_path,
+            archive_id=archive_id,
+            archive_name=archive_name,
+            archive_version=actual_version,
+            platform_str=platform_str,
+            build_type=build_type,
+            install_session_id=install_session_id,
+        )
+    return result
 
 
 def download_all_from_archive(
@@ -1110,6 +1432,7 @@ def download_all_from_archive(
         return {}
 
     print(f"📦 Using archive: {archive_name} v{actual_version or 'latest'}")
+    install_session_id = get_install_session_id()
 
     results = {}
     for pkg in packages:
@@ -1140,7 +1463,16 @@ def download_all_from_archive(
         )
 
         print(f"⬇️  Downloading '{name}' v{version} from OTA server...")
-        if not _download_package_blob(archive_id, pkg_id, name, download_file):
+        if not _download_package_blob(
+            archive_id,
+            pkg_id,
+            name,
+            download_file,
+            archive_name=archive_name,
+            archive_version=actual_version,
+            platform_str=platform_str,
+            install_session_id=install_session_id,
+        ):
             continue
 
         install_metadata = _build_archive_install_metadata(
@@ -1156,6 +1488,7 @@ def download_all_from_archive(
             requested_archive_version=archive_version,
             manifest_hash=pkg.get("manifestHash"),
             blob_hash=pkg.get("blobHash"),
+            install_session_id=install_session_id,
         )
 
         result = _extract_and_read_deps(
@@ -1167,6 +1500,17 @@ def download_all_from_archive(
         )
         if result:
             results[name] = result
+
+    if results:
+        _report_snapshot_from_install_metadata(
+            install_base_path=install_base_path,
+            archive_id=archive_id,
+            archive_name=archive_name,
+            archive_version=actual_version,
+            platform_str=platform_str,
+            build_type=build_type,
+            install_session_id=install_session_id,
+        )
 
     return results
 
