@@ -132,11 +132,9 @@ def save_robot_api_key(api_key: str, path: Optional[Path] = None) -> Path:
         pass
 
     temp_path = target.with_name(f".{target.name}.tmp")
-    temp_path.write_text(key + "\n", encoding="utf-8")
-    try:
-        os.chmod(temp_path, 0o600)
-    except OSError:
-        pass
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(key + "\n")
     temp_path.replace(target)
     try:
         os.chmod(target, 0o600)
@@ -902,7 +900,7 @@ def _stream_download(url: str, download_path: Path, error_context: str = "") -> 
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
         return True
-    except requests.RequestException as e:
+    except (requests.RequestException, OSError) as e:
         context = f" for '{error_context}'" if error_context else ""
         print(f"⚠️ OTA download failed{context}: {e}")
         return False
@@ -950,7 +948,7 @@ def _stream_robot_package_download(
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
         return True
-    except requests.RequestException as e:
+    except (requests.RequestException, OSError) as e:
         if download_path.exists():
             try:
                 download_path.unlink()
@@ -1117,7 +1115,9 @@ def _collect_archive_snapshot_packages(
     for metadata_path in sorted(install_base_path.glob(metadata_pattern)):
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            if not isinstance(metadata, dict):
+                continue
+        except (OSError, ValueError):
             continue
 
         if metadata.get("source") != "archive":

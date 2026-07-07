@@ -1071,6 +1071,30 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(call_args.kwargs["json"]["installSessionId"], "session-1")
         self.assertEqual(call_args.kwargs["json"]["clientVersion"], "raisin-cli-test")
 
+    def test_collect_archive_snapshot_packages_ignores_non_object_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            install_base = Path(tmpdir) / "release" / "install"
+            metadata_path = (
+                install_base
+                / "mypkg"
+                / "linux"
+                / "22.04"
+                / "x86_64"
+                / "release"
+                / ota._INSTALL_METADATA_FILE
+            )
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            metadata_path.write_text("[]", encoding="utf-8")
+
+            packages = ota._collect_archive_snapshot_packages(
+                install_base,
+                "arch-1",
+                "linux-22.04-x86_64",
+                "release",
+            )
+
+        self.assertEqual(packages, [])
+
     @patch("commands.ota_client._fetch_archive_by_tag")
     @patch("commands.ota_client._download_package_blob")
     def test_download_all_uses_tag_when_provided(self, mock_dl, mock_fetch_by_tag):
