@@ -132,10 +132,17 @@ def save_robot_api_key(api_key: str, path: Optional[Path] = None) -> Path:
         pass
 
     temp_path = target.with_name(f".{target.name}.tmp")
-    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(key + "\n")
-    temp_path.replace(target)
+    try:
+        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(key + "\n")
+        temp_path.replace(target)
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
     try:
         os.chmod(target, 0o600)
     except OSError:
