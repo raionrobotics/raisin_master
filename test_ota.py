@@ -663,6 +663,7 @@ class TestDownload(unittest.TestCase):
         ota._auth_failed = False
         ota._archive_cache.clear()
         ota._install_session_id = None
+        ota._pending_snapshot_reports.clear()
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
@@ -676,6 +677,7 @@ class TestDownload(unittest.TestCase):
         ota._auth_failed = False
         ota._archive_cache.clear()
         ota._install_session_id = None
+        ota._pending_snapshot_reports.clear()
         g.os_type = self._orig_os_type
         g.os_version = self._orig_os_version
         g.architecture = self._orig_architecture
@@ -1000,6 +1002,25 @@ class TestDownload(unittest.TestCase):
             call_args.kwargs["headers"]["X-Install-Session-Id"], "session-1"
         )
 
+    @patch("commands.ota_client._get_auth_context", return_value=("tok", {}))
+    @patch("commands.ota_client.requests.get")
+    def test_stream_download_removes_partial_file_on_failure(self, mock_get, _auth):
+        def chunks():
+            yield b"partial"
+            raise ota.requests.ConnectionError("connection lost")
+
+        mock_get.return_value = _mock_response(iter_content=chunks())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_path = Path(tmpdir) / "pkg.zip"
+
+            result = ota._stream_download(
+                "https://ota.example.com/pkg.zip", download_path, "mypkg"
+            )
+
+            self.assertFalse(result)
+            self.assertFalse(download_path.exists())
+
     @patch("commands.ota_client._stream_download", return_value=True)
     @patch(
         "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
@@ -1287,6 +1308,78 @@ class TestDownload(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["version"], "1.5.0")
 
+    @patch("commands.ota_client._queue_snapshot_report")
+    @patch("commands.ota_client.get_install_session_id", return_value="session-1")
+    @patch("commands.ota_client._download_package_blob", return_value=True)
+    @patch("commands.ota_client._fetch_archive_manifest")
+    def test_download_package_defers_snapshot_report(
+        self, mock_manifest, mock_blob, _session_id, mock_queue
+    ):
+        packages = [
+            {
+                "packageName": "mypkg",
+                "tagName": "v1.2.0",
+                "packageId": "p1",
+                "manifestHash": "a" * 64,
+            }
+        ]
+        mock_manifest.return_value = (packages, "arch-1", "v2024.01")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            install_base = Path(tmpdir) / "release" / "install"
+            install_base.mkdir(parents=True)
+            download_file = Path(tmpdir) / "install" / "mypkg-ota-1.2.0.zip"
+            download_file.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(download_file, "w") as zf:
+                zf.writestr("release.yaml", "version: 1.2.0\n")
+
+            result = ota.download_package(
+                "mypkg", "", "release", install_base, tag=None
+            )
+
+        self.assertIsNotNone(result)
+        mock_queue.assert_called_once()
+        self.assertEqual(mock_queue.call_args.kwargs["archive_id"], "arch-1")
+        self.assertEqual(mock_queue.call_args.kwargs["install_session_id"], "session-1")
+
+    @patch("commands.ota_client._report_snapshot_from_install_metadata")
+    def test_pending_snapshot_reports_are_deduplicated_until_flush(self, mock_report):
+        install_base = Path("/tmp/install-base")
+
+        ota._queue_snapshot_report(
+            install_base_path=install_base,
+            archive_id="arch-1",
+            archive_name="dso",
+            archive_version="v1.0.3",
+            platform_str="linux-22.04-x86_64",
+            build_type="release",
+            install_session_id="session-1",
+        )
+        ota._queue_snapshot_report(
+            install_base_path=install_base,
+            archive_id="arch-1",
+            archive_name="dso",
+            archive_version="v1.0.3",
+            platform_str="linux-22.04-x86_64",
+            build_type="release",
+            install_session_id="session-1",
+        )
+
+        mock_report.assert_not_called()
+        ota.flush_pending_snapshot_reports()
+
+        mock_report.assert_called_once_with(
+            install_base_path=install_base,
+            archive_id="arch-1",
+            archive_name="dso",
+            archive_version="v1.0.3",
+            platform_str="linux-22.04-x86_64",
+            build_type="release",
+            install_session_id="session-1",
+        )
+        self.assertEqual(ota._pending_snapshot_reports, {})
+
     @patch("commands.ota_client._fetch_archive_manifest")
     def test_download_package_not_in_archive(self, mock_manifest):
         packages = [
@@ -1377,6 +1470,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._auth_failed = False
         ota._archive_cache.clear()
         ota._install_session_id = None
+        ota._pending_snapshot_reports.clear()
         g.os_type = self._orig_os_type
         g.os_version = self._orig_os_version
         g.architecture = self._orig_architecture

@@ -25,7 +25,11 @@ from packaging.specifiers import SpecifierSet
 from commands import globals as g
 from commands.utils import load_configuration, parse_version_specifier
 
-from commands.ota_client import download_package_at_timestamp, download_all_from_archive
+from commands.ota_client import (
+    download_package_at_timestamp,
+    download_all_from_archive,
+    flush_pending_snapshot_reports,
+)
 
 
 def _default_tag_for_user_type(user_type: Optional[str]) -> str:
@@ -624,6 +628,8 @@ def install_cli_command(
         )
         if not succeeded:
             overall_success = False
+
+    flush_pending_snapshot_reports()
 
     if not overall_success:
         raise click.exceptions.Exit(code=1)

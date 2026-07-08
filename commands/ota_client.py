@@ -10,6 +10,7 @@ Uses DEFAULT_OTA_ENDPOINT by default. Override with RAISIN_OTA_ENDPOINT env var.
 All operations fail gracefully — OTA is supplementary, never blocks existing flows.
 """
 
+import atexit
 import base64
 import json
 import os
@@ -46,6 +47,11 @@ _archive_cache = {}
 # Correlates all OTA package downloads and the final software snapshot from
 # one CLI process.
 _install_session_id = None
+
+# Debounces per-package installs into one software snapshot report per archive
+# at the end of the CLI process.
+_pending_snapshot_reports = {}
+_pending_snapshot_report_registered = False
 
 # Default archive name prefix (build_type is appended for debug)
 DEFAULT_ARCHIVE_NAME = "raisin-robot"
@@ -139,7 +145,7 @@ def save_robot_api_key(api_key: str, path: Optional[Path] = None) -> Path:
         temp_path.replace(target)
     finally:
         try:
-            temp_path.unlink()
+            temp_path.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -908,6 +914,11 @@ def _stream_download(url: str, download_path: Path, error_context: str = "") -> 
                     f.write(chunk)
         return True
     except (requests.RequestException, OSError) as e:
+        if download_path.exists():
+            try:
+                download_path.unlink()
+            except OSError:
+                pass
         context = f" for '{error_context}'" if error_context else ""
         print(f"⚠️ OTA download failed{context}: {e}")
         return False
@@ -1190,6 +1201,43 @@ def report_software_snapshot(
         return False
 
 
+def _register_pending_snapshot_flush() -> None:
+    global _pending_snapshot_report_registered
+    if _pending_snapshot_report_registered:
+        return
+    atexit.register(flush_pending_snapshot_reports)
+    _pending_snapshot_report_registered = True
+
+
+def _queue_snapshot_report(
+    install_base_path: Path,
+    archive_id: str,
+    archive_name: str,
+    archive_version: Optional[str],
+    platform_str: str,
+    build_type: str,
+    install_session_id: str,
+) -> None:
+    key = (archive_id, platform_str, build_type, install_session_id)
+    _pending_snapshot_reports[key] = {
+        "install_base_path": install_base_path,
+        "archive_id": archive_id,
+        "archive_name": archive_name,
+        "archive_version": archive_version,
+        "platform_str": platform_str,
+        "build_type": build_type,
+        "install_session_id": install_session_id,
+    }
+    _register_pending_snapshot_flush()
+
+
+def flush_pending_snapshot_reports() -> None:
+    reports = list(_pending_snapshot_reports.values())
+    _pending_snapshot_reports.clear()
+    for report in reports:
+        _report_snapshot_from_install_metadata(**report)
+
+
 def _report_snapshot_from_install_metadata(
     install_base_path: Path,
     archive_id: str,
@@ -1369,7 +1417,7 @@ def download_package(
         install_metadata=install_metadata,
     )
     if result:
-        _report_snapshot_from_install_metadata(
+        _queue_snapshot_report(
             install_base_path=install_base_path,
             archive_id=archive_id,
             archive_name=archive_name,
