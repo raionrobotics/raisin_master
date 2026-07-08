@@ -142,7 +142,8 @@ def save_robot_api_key(api_key: str, path: Optional[Path] = None) -> Path:
         temp_path.replace(target)
     finally:
         try:
-            temp_path.unlink(missing_ok=True)
+            if temp_path.exists():
+                temp_path.unlink()
         except OSError:
             pass
 
@@ -1157,10 +1158,7 @@ def _collect_archive_snapshot_packages(
     build_type: str,
 ) -> list:
     """Collect currently installed package metadata for an archive."""
-    metadata_pattern = (
-        f"*/{g.os_type}/{g.os_version}/{g.architecture}/{build_type}/"
-        f"{_INSTALL_METADATA_FILE}"
-    )
+    metadata_pattern = f"*/*/*/*/{build_type}/{_INSTALL_METADATA_FILE}"
     packages_by_id = {}
     for metadata_path in sorted(install_base_path.glob(metadata_pattern)):
         try:
