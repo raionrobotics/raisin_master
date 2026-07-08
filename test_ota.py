@@ -165,6 +165,7 @@ class TestConfiguration(unittest.TestCase):
                 if os.name == "posix":
                     self.assertEqual(saved_path.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(ota.get_robot_api_key(), "robot-key")
+                self.assertEqual(ota._robot_api_key_cache[key_path][1], "robot-key")
 
     @unittest.skipIf(os.name != "posix", "POSIX file permission check")
     def test_insecure_robot_api_key_file_is_ignored(self):
@@ -178,6 +179,22 @@ class TestConfiguration(unittest.TestCase):
                 clear=True,
             ):
                 self.assertIsNone(ota.get_robot_api_key())
+
+    @unittest.skipIf(os.name != "posix", "POSIX file permission check")
+    def test_insecure_robot_api_key_file_warning_is_cached(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            key_path = Path(tmpdir) / "robot-api-key"
+            key_path.write_text("robot-key\n", encoding="utf-8")
+            os.chmod(key_path, 0o644)
+            with patch.dict(
+                os.environ,
+                {"RAISIN_ROBOT_API_KEY_FILE": str(key_path)},
+                clear=True,
+            ), patch("builtins.print") as mock_print:
+                self.assertIsNone(ota.get_robot_api_key())
+                self.assertIsNone(ota.get_robot_api_key())
+
+            mock_print.assert_called_once()
 
 
 # ============================================================================
@@ -663,6 +680,7 @@ class TestDownload(unittest.TestCase):
         ota._auth_failed = False
         ota._archive_cache.clear()
         ota._install_session_id = None
+        ota._robot_api_key_cache.clear()
         ota._pending_snapshot_reports.clear()
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version

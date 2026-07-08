@@ -10,7 +10,6 @@ Uses DEFAULT_OTA_ENDPOINT by default. Override with RAISIN_OTA_ENDPOINT env var.
 All operations fail gracefully — OTA is supplementary, never blocks existing flows.
 """
 
-import atexit
 import base64
 import json
 import os
@@ -51,7 +50,9 @@ _install_session_id = None
 # Debounces per-package installs into one software snapshot report per archive
 # at the end of the CLI process.
 _pending_snapshot_reports = {}
-_pending_snapshot_report_registered = False
+
+# Caches file-backed robot API keys by path and file stat metadata.
+_robot_api_key_cache = {}
 
 # Default archive name prefix (build_type is appended for debug)
 DEFAULT_ARCHIVE_NAME = "raisin-robot"
@@ -132,10 +133,6 @@ def save_robot_api_key(api_key: str, path: Optional[Path] = None) -> Path:
 
     target = Path(path).expanduser() if path else get_robot_api_key_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(target.parent, 0o700)
-    except OSError:
-        pass
 
     temp_path = target.with_name(f".{target.name}.tmp")
     try:
@@ -153,7 +150,25 @@ def save_robot_api_key(api_key: str, path: Optional[Path] = None) -> Path:
         os.chmod(target, 0o600)
     except OSError:
         pass
+    _cache_robot_api_key(target, key)
     return target
+
+
+def _api_key_cache_token(stat_result) -> tuple:
+    return (
+        stat_result.st_mtime_ns,
+        stat_result.st_size,
+        stat_result.st_mode & 0o777,
+    )
+
+
+def _cache_robot_api_key(key_path: Path, api_key: Optional[str]) -> None:
+    try:
+        stat_result = key_path.stat()
+    except OSError:
+        _robot_api_key_cache.pop(key_path, None)
+        return
+    _robot_api_key_cache[key_path] = (_api_key_cache_token(stat_result), api_key)
 
 
 def get_robot_api_key() -> Optional[str]:
@@ -168,19 +183,36 @@ def get_robot_api_key() -> Optional[str]:
 
     key_path = get_robot_api_key_path()
     try:
-        if not key_path.is_file():
-            return None
-        if os.name == "posix" and (key_path.stat().st_mode & 0o077):
-            print(
-                "⚠️ Ignoring robot API key file with insecure permissions: "
-                f"{key_path} (run: chmod 600 {key_path})"
-            )
-            return None
-        key = key_path.read_text(encoding="utf-8").strip()
-        return key or None
+        stat_result = key_path.stat()
+    except FileNotFoundError:
+        _robot_api_key_cache.pop(key_path, None)
+        return None
     except OSError as e:
         print(f"⚠️ Failed to read robot API key file '{key_path}': {e}")
         return None
+
+    cache_token = _api_key_cache_token(stat_result)
+    cached = _robot_api_key_cache.get(key_path)
+    if cached and cached[0] == cache_token:
+        return cached[1]
+
+    if os.name == "posix" and (stat_result.st_mode & 0o077):
+        print(
+            "⚠️ Ignoring robot API key file with insecure permissions: "
+            f"{key_path} (run: chmod 600 {key_path})"
+        )
+        _robot_api_key_cache[key_path] = (cache_token, None)
+        return None
+
+    try:
+        key = key_path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        print(f"⚠️ Failed to read robot API key file '{key_path}': {e}")
+        return None
+
+    cached_key = key or None
+    _robot_api_key_cache[key_path] = (cache_token, cached_key)
+    return cached_key
 
 
 def get_client_version() -> str:
@@ -1201,14 +1233,6 @@ def report_software_snapshot(
         return False
 
 
-def _register_pending_snapshot_flush() -> None:
-    global _pending_snapshot_report_registered
-    if _pending_snapshot_report_registered:
-        return
-    atexit.register(flush_pending_snapshot_reports)
-    _pending_snapshot_report_registered = True
-
-
 def _queue_snapshot_report(
     install_base_path: Path,
     archive_id: str,
@@ -1228,7 +1252,6 @@ def _queue_snapshot_report(
         "build_type": build_type,
         "install_session_id": install_session_id,
     }
-    _register_pending_snapshot_flush()
 
 
 def flush_pending_snapshot_reports() -> None:
