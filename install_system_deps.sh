@@ -3,7 +3,7 @@
 # ----------------------
 # Purpose  : Install system-level development tools required for RAISIN.
 #            This includes: Python3, pip, venv, clang-format, ninja, pre-commit,
-#            GitHub CLI (gh), and CMake.
+#            GitHub CLI (gh), CMake, Git LFS, and vcstool.
 # Usage    : Called by `./raisin --install` or run manually with sudo.
 # Platform : Linux (apt, dnf, pacman) and macOS (Homebrew)
 
@@ -274,6 +274,98 @@ else
         fi
     else
         echo -e "${RED}❌ Automatic CMake installation is not supported on this OS. Please install manually.${NC}"
+    fi
+fi
+
+echo "-------------------------------------------------"
+
+# --- 6. Check and Install Git LFS ---
+echo "Checking for Git LFS..."
+if command -v git-lfs &> /dev/null; then
+    echo -e "${GREEN}✅ Git LFS is already installed.${NC}"
+else
+    echo "Git LFS not found. Attempting installation..."
+    if [[ "$(uname)" == "Linux" ]]; then
+        if command -v apt-get &> /dev/null; then
+            echo "Attempting to install with apt..."
+            $SUDO apt-get update > /dev/null && $SUDO apt-get install -y git-lfs
+            echo -e "${GREEN}✅ Git LFS installed via apt.${NC}"
+        elif command -v dnf &> /dev/null; then
+            echo "Attempting to install with dnf..."
+            $SUDO dnf install -y git-lfs
+            echo -e "${GREEN}✅ Git LFS installed via dnf.${NC}"
+        elif command -v pacman &> /dev/null; then
+            echo "Attempting to install with pacman..."
+            $SUDO pacman -S --noconfirm git-lfs
+            echo -e "${GREEN}✅ Git LFS installed via pacman.${NC}"
+        else
+            echo -e "${RED}❌ Could not find a supported package manager (apt, dnf, pacman). Please install Git LFS manually.${NC}"
+        fi
+    elif [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &> /dev/null; then
+            echo "Attempting to install with Homebrew..."
+            brew install git-lfs
+            echo -e "${GREEN}✅ Git LFS installed via Homebrew.${NC}"
+        else
+            echo -e "${RED}❌ Homebrew not found. Please install Homebrew first, then install Git LFS manually ('brew install git-lfs').${NC}"
+        fi
+    else
+        echo -e "${RED}❌ Automatic Git LFS installation is not supported on this OS. Please install manually.${NC}"
+    fi
+fi
+
+# Register Git LFS filters (system-wide on Linux root; user global on macOS to avoid sudo)
+if command -v git-lfs &> /dev/null; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        git lfs install --skip-repo &> /dev/null || true
+    else
+        $SUDO git lfs install --system --skip-repo &> /dev/null || git lfs install --skip-repo &> /dev/null || true
+    fi
+fi
+
+echo "-------------------------------------------------"
+
+# --- 7. Check and Install vcstool ---
+echo "Checking for vcstool..."
+if command -v vcs &> /dev/null; then
+    echo -e "${GREEN}✅ vcstool is already installed.${NC}"
+else
+    echo "vcstool not found. Attempting installation..."
+    if [[ "$(uname)" == "Linux" ]]; then
+        installed=false
+        if command -v apt-get &> /dev/null; then
+            echo "Attempting to install with apt..."
+            if $SUDO apt-get update > /dev/null && $SUDO apt-get install -y python3-vcstool; then
+                echo -e "${GREEN}✅ vcstool installed via apt.${NC}"
+                installed=true
+            fi
+        elif command -v dnf &> /dev/null; then
+            echo "Attempting to install with dnf..."
+            if $SUDO dnf install -y python3-vcstool; then
+                echo -e "${GREEN}✅ vcstool installed via dnf.${NC}"
+                installed=true
+            fi
+        fi
+        if [[ "$installed" == "false" ]]; then
+            echo "Attempting to install with pip..."
+            if $SUDO /usr/bin/python3 -m pip install $PIP_FLAGS vcstool 2>/dev/null \
+               || $SUDO /usr/bin/python3 -m pip install --break-system-packages vcstool 2>/dev/null \
+               || $SUDO /usr/bin/python3 -m pip install vcstool; then
+                echo -e "${GREEN}✅ vcstool installed via pip.${NC}"
+            else
+                echo -e "${RED}❌ Could not install vcstool automatically. Please install python3-vcstool manually.${NC}"
+            fi
+        fi
+    elif [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &> /dev/null; then
+            echo "Attempting to install with Homebrew..."
+            brew install vcstool
+            echo -e "${GREEN}✅ vcstool installed via Homebrew.${NC}"
+        else
+            echo -e "${RED}❌ Homebrew not found. Please install Homebrew first, then install vcstool manually ('brew install vcstool').${NC}"
+        fi
+    else
+        echo -e "${RED}❌ Automatic vcstool installation is not supported on this OS. Please install manually.${NC}"
     fi
 fi
 
