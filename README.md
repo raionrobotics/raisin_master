@@ -97,11 +97,12 @@ If `RAISIN_SSH_KEY` is not set, RAISIN auto-detects existing keys in `~/.ssh/` i
 
 ### 4. Add Source Packages
 
-Create a directory named `src` in the root of the repository. Clone any source code packages you are developing or contributing to inside this `src` directory.
+Clone the RAISIN manifest repository into the `src` directory at the root of the workspace, check out the branch you want, and run its setup script.
 ```bash
-mkdir src
-cd src
-git clone <your-package-repository>
+git clone https://github.com/raionrobotics/raisin-manifest.git /path/to/raisin_master/src
+cd /path/to/raisin_master/src
+git checkout <branch-name>
+./setup.sh
 ```
 
 ### 5. Install Release Packages
@@ -379,8 +380,10 @@ cp configuration_setting_example.yaml configuration_setting.yaml
 export RAISIN_OTA_ENDPOINT="https://your-ota-server.com/api"
 
 # 4. Clone source packages
-mkdir -p src && cd src
-git clone <your-package-repository>
+git clone https://github.com/raionrobotics/raisin-manifest.git /path/to/raisin_master/src
+cd /path/to/raisin_master/src
+git checkout <branch-name>
+./setup.sh
 cd ..
 
 # 5. Download release packages

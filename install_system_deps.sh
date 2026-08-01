@@ -3,7 +3,7 @@
 # ----------------------
 # Purpose  : Install system-level development tools required for RAISIN.
 #            This includes: Python3, pip, venv, clang-format, ninja, pre-commit,
-#            GitHub CLI (gh), CMake, Git LFS, and vcstool.
+#            GitHub CLI (gh), CMake, Git LFS, vcstool, cppcheck, and gcovr.
 # Usage    : Called by `./raisin --install` or run manually with sudo.
 # Platform : Linux (apt, dnf, pacman) and macOS (Homebrew)
 
@@ -366,6 +366,106 @@ else
         fi
     else
         echo -e "${RED}❌ Automatic vcstool installation is not supported on this OS. Please install manually.${NC}"
+    fi
+fi
+
+echo "-------------------------------------------------"
+
+# --- 8. Check and Install cppcheck ---
+echo "Checking for cppcheck..."
+if command -v cppcheck &> /dev/null; then
+    echo -e "${GREEN}✅ cppcheck is already installed.${NC}"
+else
+    echo "cppcheck not found. Attempting installation..."
+    if [[ "$(uname)" == "Linux" ]]; then
+        if command -v apt-get &> /dev/null; then
+            echo "Attempting to install with apt..."
+            $SUDO apt-get update > /dev/null && $SUDO apt-get install -y cppcheck
+            echo -e "${GREEN}✅ cppcheck installed via apt.${NC}"
+        elif command -v dnf &> /dev/null; then
+            echo "Attempting to install with dnf..."
+            $SUDO dnf install -y cppcheck
+            echo -e "${GREEN}✅ cppcheck installed via dnf.${NC}"
+        elif command -v pacman &> /dev/null; then
+            echo "Attempting to install with pacman..."
+            $SUDO pacman -S --noconfirm cppcheck
+            echo -e "${GREEN}✅ cppcheck installed via pacman.${NC}"
+        else
+            echo -e "${RED}❌ Could not find a supported package manager (apt, dnf, pacman). Please install cppcheck manually.${NC}"
+        fi
+    elif [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &> /dev/null; then
+            echo "Attempting to install with Homebrew..."
+            brew install cppcheck
+            echo -e "${GREEN}✅ cppcheck installed via Homebrew.${NC}"
+        else
+            echo -e "${RED}❌ Homebrew not found. Please install Homebrew first, then install cppcheck manually ('brew install cppcheck').${NC}"
+        fi
+    else
+        echo -e "${RED}❌ Automatic cppcheck installation is not supported on this OS. Please install manually.${NC}"
+    fi
+fi
+
+# `raisin cppcheck` renders its HTML report with cppcheck-htmlreport, which some
+# distributions ship in a separate package.
+if command -v cppcheck &> /dev/null && ! command -v cppcheck-htmlreport &> /dev/null; then
+    if command -v apt-get &> /dev/null; then
+        $SUDO apt-get install -y cppcheck-htmlreport 2>/dev/null || true
+    fi
+    if ! command -v cppcheck-htmlreport &> /dev/null; then
+        echo -e "${YELLOW}⚠️ cppcheck-htmlreport not found. HTML cppcheck reports will be skipped.${NC}"
+    fi
+fi
+
+echo "-------------------------------------------------"
+
+# --- 9. Check and Install gcovr ---
+echo "Checking for gcovr..."
+if command -v gcovr &> /dev/null; then
+    echo -e "${GREEN}✅ gcovr is already installed.${NC}"
+else
+    echo "gcovr not found. Attempting installation..."
+    if [[ "$(uname)" == "Linux" ]]; then
+        installed=false
+        if command -v apt-get &> /dev/null; then
+            echo "Attempting to install with apt..."
+            if $SUDO apt-get update > /dev/null && $SUDO apt-get install -y gcovr; then
+                echo -e "${GREEN}✅ gcovr installed via apt.${NC}"
+                installed=true
+            fi
+        elif command -v dnf &> /dev/null; then
+            echo "Attempting to install with dnf..."
+            if $SUDO dnf install -y gcovr; then
+                echo -e "${GREEN}✅ gcovr installed via dnf.${NC}"
+                installed=true
+            fi
+        elif command -v pacman &> /dev/null; then
+            echo "Attempting to install with pacman..."
+            if $SUDO pacman -S --noconfirm gcovr; then
+                echo -e "${GREEN}✅ gcovr installed via pacman.${NC}"
+                installed=true
+            fi
+        fi
+        if [[ "$installed" == "false" ]]; then
+            echo "Attempting to install with pip..."
+            if $SUDO /usr/bin/python3 -m pip install $PIP_FLAGS gcovr 2>/dev/null \
+               || $SUDO /usr/bin/python3 -m pip install --break-system-packages gcovr 2>/dev/null \
+               || $SUDO /usr/bin/python3 -m pip install gcovr; then
+                echo -e "${GREEN}✅ gcovr installed via pip.${NC}"
+            else
+                echo -e "${RED}❌ Could not install gcovr automatically. Please install it manually.${NC}"
+            fi
+        fi
+    elif [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &> /dev/null; then
+            echo "Attempting to install with Homebrew..."
+            brew install gcovr
+            echo -e "${GREEN}✅ gcovr installed via Homebrew.${NC}"
+        else
+            echo -e "${RED}❌ Homebrew not found. Please install Homebrew first, then install gcovr manually ('brew install gcovr').${NC}"
+        fi
+    else
+        echo -e "${RED}❌ Automatic gcovr installation is not supported on this OS. Please install manually.${NC}"
     fi
 fi
 
