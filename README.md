@@ -66,6 +66,8 @@ cp configuration_setting_example.yaml configuration_setting.yaml
 Next, open **`configuration_setting.yaml`** and edit the following fields:
 * **`gh_tokens`**: (Optional) GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`). Only needed for GitHub fallback or publishing to GitHub.
 * **`user_type`**: Set to `"user"` for stable releases or `"devel"` for development builds.
+* **`robot.api_key`**: (Optional) Robot API key for robot-authenticated OTA downloads. Prefer `RAISIN_ROBOT_API_KEY` for deployments.
+* **`robot.node`**: (Required when using a robot API key) Robot-local node key registered on the OTA server, e.g. `"jetson"` or `"primary"`.
 * **`packages_to_ignore`**: (Optional) List of packages to exclude from the build process.
 * **`repos_to_ignore`**: (Optional) List of repositories to exclude (uses prebuilt binaries instead).
 
@@ -82,6 +84,10 @@ export RAISIN_SSH_KEY="~/.ssh/my_key"
 
 # (Optional) Custom archive name prefix (default: raisin-robot)
 export RAISIN_ARCHIVE_NAME="raisin-robot"
+
+# (Optional) Robot-authenticated OTA downloads and snapshot reporting
+export RAISIN_ROBOT_API_KEY="rk_..."  # pragma: allowlist secret
+export RAISIN_ROBOT_NODE="jetson"
 ```
 
 #### SSH Key Authentication

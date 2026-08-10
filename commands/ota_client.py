@@ -70,6 +70,10 @@ _INSTALL_METADATA_FILE = "ota-install.json"
 _ROBOT_API_KEY_FILE = "robot-api-key"  # pragma: allowlist secret
 _ROBOT_API_KEY_ENV = "RAISIN_ROBOT_API_KEY"  # pragma: allowlist secret
 _ROBOT_API_KEY_FILE_ENV = "RAISIN_ROBOT_API_KEY_FILE"  # pragma: allowlist secret
+_ROBOT_NODE_ENV = "RAISIN_ROBOT_NODE"
+_ROBOT_NODE_KEY_ENV = "RAISIN_ROBOT_NODE_KEY"
+_ROBOT_CONFIG_FILES = ("configuration_setting.yaml", "secrets.yaml")
+_robot_auth_warning_keys = set()
 
 # Client identity attached to robot OTA audit/history records.
 DEFAULT_CLIENT_VERSION = "raisin-cli"
@@ -110,6 +114,50 @@ def get_ssh_key_path() -> Path:
 
     # 3. Default fallback
     return ssh_dir / "id_ed25519"
+
+
+def _normalize_optional_string(value) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if not value or value.lower() in {"none", "null"}:
+        return None
+    return value
+
+
+def _load_local_config() -> dict:
+    """Best-effort read of local configuration without enforcing full config validity."""
+    script_dir_path = Path(g.script_directory)
+    for filename in _ROBOT_CONFIG_FILES:
+        config_path = script_dir_path / filename
+        if not config_path.is_file():
+            continue
+        try:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return {}
+        return config if isinstance(config, dict) else {}
+    return {}
+
+
+def _get_nested_config_value(config: dict, path: tuple) -> Optional[str]:
+    current = config
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return _normalize_optional_string(current)
+
+
+def _get_local_config_value(paths: tuple) -> Optional[str]:
+    config = _load_local_config()
+    for path in paths:
+        value = _get_nested_config_value(config, path)
+        if value:
+            return value
+    return None
 
 
 def get_robot_api_key_path() -> Path:
@@ -172,17 +220,7 @@ def _cache_robot_api_key(key_path: Path, api_key: Optional[str]) -> None:
     _robot_api_key_cache[key_path] = (_api_key_cache_token(stat_result), api_key)
 
 
-def get_robot_api_key() -> Optional[str]:
-    """Read the robot API key from env or the local key file.
-
-    Env var is useful for CI/tests. The file path is ignored on POSIX systems
-    if group/other permissions are enabled.
-    """
-    env_key = os.environ.get(_ROBOT_API_KEY_ENV, "").strip()
-    if env_key:
-        return env_key
-
-    key_path = get_robot_api_key_path()
+def _read_robot_api_key_file(key_path: Path) -> Optional[str]:
     try:
         stat_result = key_path.stat()
     except FileNotFoundError:
@@ -214,6 +252,66 @@ def get_robot_api_key() -> Optional[str]:
     cached_key = key or None
     _robot_api_key_cache[key_path] = (cache_token, cached_key)
     return cached_key
+
+
+def get_robot_api_key() -> Optional[str]:
+    """Read the robot API key from env or the local key file.
+
+    Resolution order:
+        1. RAISIN_ROBOT_API_KEY
+        2. RAISIN_ROBOT_API_KEY_FILE
+        3. configuration_setting.yaml/secrets.yaml robot.api_key
+        4. ~/.config/raisin/robot-api-key
+
+    File-backed keys are ignored on POSIX systems if group/other permissions
+    are enabled.
+    """
+    env_key = os.environ.get(_ROBOT_API_KEY_ENV, "").strip()
+    if env_key:
+        return env_key
+
+    env_key_file = os.environ.get(_ROBOT_API_KEY_FILE_ENV, "").strip()
+    if env_key_file:
+        return _read_robot_api_key_file(Path(env_key_file).expanduser())
+
+    config_key = _get_local_config_value(
+        (
+            ("robot", "api_key"),
+            ("robot", "apiKey"),
+            ("ota", "robot_api_key"),
+            ("robot_api_key",),
+        )
+    )
+    if config_key:
+        return config_key
+
+    return _read_robot_api_key_file(get_robot_api_key_path())
+
+
+def get_robot_node_key() -> Optional[str]:
+    """Read the robot-local node key required by robot-authenticated endpoints."""
+    for env_name in (_ROBOT_NODE_ENV, _ROBOT_NODE_KEY_ENV):
+        env_value = _normalize_optional_string(os.environ.get(env_name))
+        if env_value:
+            return env_value
+
+    return _get_local_config_value(
+        (
+            ("robot", "node"),
+            ("robot", "node_key"),
+            ("robot", "nodeKey"),
+            ("ota", "robot_node"),
+            ("robot_node",),
+            ("robot_node_key",),
+        )
+    )
+
+
+def _warn_robot_auth_config_once(key: str, message: str) -> None:
+    if key in _robot_auth_warning_keys:
+        return
+    _robot_auth_warning_keys.add(key)
+    print(message)
 
 
 def get_client_version() -> str:
@@ -962,12 +1060,22 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
     api_key = get_robot_api_key()
     if not api_key:
         return None
+    node_key = get_robot_node_key()
+    if not node_key:
+        _warn_robot_auth_config_once(
+            "missing_robot_node",
+            "⚠️ Robot API key is configured but robot node is missing "
+            "(set RAISIN_ROBOT_NODE or configuration_setting.yaml robot.node). "
+            "Using legacy OTA authentication instead.",
+        )
+        return None
 
     session_id = install_session_id or get_install_session_id()
     return {
         "Authorization": f"Robot {api_key}",
         "X-Client-Version": get_client_version(),
         "X-Install-Session-Id": session_id,
+        "X-Robot-Node": node_key,
     }
 
 
@@ -1142,12 +1250,14 @@ def _snapshot_package_from_metadata(metadata: dict) -> Optional[dict]:
     package_id = str(metadata.get("packageId") or "").strip()
     package_name = str(metadata.get("packageName") or "").strip()
     version = str(metadata.get("packageVersion") or "").strip().lstrip("vV")
-    if not package_id or not package_name or not version:
+    manifest_hash = str(metadata.get("manifestHash") or "").strip()
+    if not package_id or not package_name or not version or not manifest_hash:
         return None
     return {
         "packageId": package_id,
         "packageName": package_name,
         "version": version,
+        "manifestHash": manifest_hash,
     }
 
 
@@ -1203,7 +1313,7 @@ def report_software_snapshot(
     session_id = install_session_id or get_install_session_id()
     payload = {
         "archiveId": archive_id,
-        "packages": packages,
+        "archivePackages": packages,
         "installSessionId": session_id,
         "clientVersion": get_client_version(),
     }

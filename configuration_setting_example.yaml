@@ -11,6 +11,14 @@ user_type: "user"
 gh_tokens:
   "raionrobotics": "ghp_mytoken_code"
 
+# Robot-authenticated OTA downloads and software snapshot reporting.
+# Environment variables override these values:
+# - RAISIN_ROBOT_API_KEY
+# - RAISIN_ROBOT_NODE
+robot:
+  api_key: ""  # Optional. Keep this local; do not commit real robot keys.
+  node: ""     # Required for robot API key auth, e.g. "jetson" or "primary".
+
 # Packages to ignore during build process(doesn't make add_subdirectory in cmakelist)
 packages_to_ignore:
   - sample_ignore_pkg  # Example package to ignore

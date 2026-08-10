@@ -106,6 +106,19 @@ def _make_sshsig_pem(raw_sig=None):
 class TestConfiguration(unittest.TestCase):
     """Verify env-var-based configuration helpers."""
 
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._orig_script_directory = g.script_directory
+        g.script_directory = self._tmpdir.name
+        ota._robot_api_key_cache.clear()
+        ota._robot_auth_warning_keys.clear()
+
+    def tearDown(self):
+        ota._robot_api_key_cache.clear()
+        ota._robot_auth_warning_keys.clear()
+        g.script_directory = self._orig_script_directory
+        self._tmpdir.cleanup()
+
     def test_get_ota_endpoint_returns_default_when_unset(self):
         """Should return default endpoint when env var is not set."""
         with patch.dict(os.environ, {}, clear=True):
@@ -151,6 +164,46 @@ class TestConfiguration(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(ota.get_robot_api_key(), "robot-key")
+
+    def test_get_robot_api_key_from_config_yaml(self):
+        config_path = Path(g.script_directory) / "configuration_setting.yaml"
+        config_path.write_text(
+            "user_type: user\nrobot:\n  api_key: config-robot-key\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ota.get_robot_api_key(), "config-robot-key")
+
+    def test_get_robot_api_key_env_overrides_config_yaml(self):
+        config_path = Path(g.script_directory) / "configuration_setting.yaml"
+        config_path.write_text(
+            "user_type: user\nrobot:\n  api_key: config-robot-key\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "env-robot-key",  # pragma: allowlist secret
+            },
+            clear=True,
+        ):
+            self.assertEqual(ota.get_robot_api_key(), "env-robot-key")
+
+    def test_get_robot_node_key_from_env(self):
+        with patch.dict(os.environ, {"RAISIN_ROBOT_NODE": " jetson "}, clear=True):
+            self.assertEqual(ota.get_robot_node_key(), "jetson")
+
+    def test_get_robot_node_key_from_config_yaml(self):
+        config_path = Path(g.script_directory) / "configuration_setting.yaml"
+        config_path.write_text(
+            "user_type: user\nrobot:\n  node: vision\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ota.get_robot_node_key(), "vision")
 
     def test_save_and_read_robot_api_key_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -682,13 +735,16 @@ class TestDownload(unittest.TestCase):
         ota._install_session_id = None
         ota._robot_api_key_cache.clear()
         ota._pending_snapshot_reports.clear()
+        ota._robot_auth_warning_keys.clear()
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
         self._orig_script_directory = g.script_directory
+        self._tmp_script_dir = tempfile.TemporaryDirectory()
         g.os_type = "linux"
         g.os_version = "22.04"
         g.architecture = "x86_64"
+        g.script_directory = self._tmp_script_dir.name
 
     def tearDown(self):
         ota._cached_token = None
@@ -696,10 +752,12 @@ class TestDownload(unittest.TestCase):
         ota._archive_cache.clear()
         ota._install_session_id = None
         ota._pending_snapshot_reports.clear()
+        ota._robot_auth_warning_keys.clear()
         g.os_type = self._orig_os_type
         g.os_version = self._orig_os_version
         g.architecture = self._orig_architecture
         g.script_directory = self._orig_script_directory
+        self._tmp_script_dir.cleanup()
 
     @patch("commands.ota_client.authenticate", return_value="tok")
     @patch(
@@ -978,6 +1036,7 @@ class TestDownload(unittest.TestCase):
                 os.environ,
                 {
                     "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                    "RAISIN_ROBOT_NODE": "jetson",
                     "RAISIN_OTA_CLIENT_VERSION": "raisin-cli-test",
                 },
                 clear=True,
@@ -1019,6 +1078,38 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(
             call_args.kwargs["headers"]["X-Install-Session-Id"], "session-1"
         )
+        self.assertEqual(call_args.kwargs["headers"]["X-Robot-Node"], "jetson")
+
+    @patch("commands.ota_client._stream_download", return_value=True)
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    def test_download_package_blob_falls_back_without_robot_node(
+        self, _ep, mock_stream
+    ):
+        with patch.dict(
+            os.environ,
+            {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
+            clear=True,
+        ), patch("builtins.print") as mock_print:
+            result = ota._download_package_blob(
+                "arch-1",
+                "pkg-1",
+                "mypkg",
+                Path("/tmp/pkg.zip"),
+                archive_name="dso",
+                archive_version="1.0.3",
+                platform_str="ubuntu-24.04-arm64",
+                install_session_id="session-1",
+            )
+
+        self.assertTrue(result)
+        mock_stream.assert_called_once_with(
+            "https://ota.example.com/archives/arch-1/packages/pkg-1/download",
+            Path("/tmp/pkg.zip"),
+            "mypkg",
+        )
+        mock_print.assert_called_once()
 
     @patch("commands.ota_client._get_auth_context", return_value=("tok", {}))
     @patch("commands.ota_client.requests.get")
@@ -1071,12 +1162,20 @@ class TestDownload(unittest.TestCase):
     @patch("commands.ota_client.requests.post")
     def test_report_software_snapshot_posts_robot_payload(self, mock_post, _ep):
         mock_post.return_value = _mock_response()
-        packages = [{"packageId": "pkg-1", "packageName": "mypkg", "version": "1.2.0"}]
+        packages = [
+            {
+                "packageId": "00000000-0000-4000-8000-000000000201",
+                "packageName": "mypkg",
+                "version": "1.2.0",
+                "manifestHash": "a" * 64,
+            }
+        ]
 
         with patch.dict(
             os.environ,
             {
                 "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
                 "RAISIN_CLIENT_VERSION": "raisin-cli-test",
             },
             clear=True,
@@ -1102,11 +1201,13 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(
             call_args.kwargs["headers"]["X-Install-Session-Id"], "session-1"
         )
+        self.assertEqual(call_args.kwargs["headers"]["X-Robot-Node"], "jetson")
         self.assertEqual(call_args.kwargs["json"]["archiveId"], "arch-1")
         self.assertEqual(call_args.kwargs["json"]["name"], "dso")
         self.assertEqual(call_args.kwargs["json"]["version"], "1.0.3")
         self.assertEqual(call_args.kwargs["json"]["platform"], "ubuntu-24.04-arm64")
-        self.assertEqual(call_args.kwargs["json"]["packages"], packages)
+        self.assertEqual(call_args.kwargs["json"]["archivePackages"], packages)
+        self.assertNotIn("packages", call_args.kwargs["json"])
         self.assertEqual(call_args.kwargs["json"]["installSessionId"], "session-1")
         self.assertEqual(call_args.kwargs["json"]["clientVersion"], "raisin-cli-test")
 
@@ -1475,13 +1576,17 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._auth_failed = False
         ota._archive_cache.clear()
         ota._install_session_id = None
+        ota._robot_api_key_cache.clear()
+        ota._robot_auth_warning_keys.clear()
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
         self._orig_script_directory = g.script_directory
+        self._tmp_script_dir = tempfile.TemporaryDirectory()
         g.os_type = "linux"
         g.os_version = "22.04"
         g.architecture = "x86_64"
+        g.script_directory = self._tmp_script_dir.name
 
     def tearDown(self):
         ota._cached_token = None
@@ -1489,10 +1594,13 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._archive_cache.clear()
         ota._install_session_id = None
         ota._pending_snapshot_reports.clear()
+        ota._robot_api_key_cache.clear()
+        ota._robot_auth_warning_keys.clear()
         g.os_type = self._orig_os_type
         g.os_version = self._orig_os_version
         g.architecture = self._orig_architecture
         g.script_directory = self._orig_script_directory
+        self._tmp_script_dir.cleanup()
         # Clear env var if set
         if "RAISIN_ARCHIVE_NAME" in os.environ:
             del os.environ["RAISIN_ARCHIVE_NAME"]
@@ -1664,8 +1772,18 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         self.assertCountEqual(
             report_kwargs["packages"],
             [
-                {"packageId": "p1", "packageName": "pkg1", "version": "1.0.0"},
-                {"packageId": "p2", "packageName": "pkg2", "version": "2.0.0"},
+                {
+                    "packageId": "p1",
+                    "packageName": "pkg1",
+                    "version": "1.0.0",
+                    "manifestHash": "a" * 64,
+                },
+                {
+                    "packageId": "p2",
+                    "packageName": "pkg2",
+                    "version": "2.0.0",
+                    "manifestHash": "b" * 64,
+                },
             ],
         )
 
