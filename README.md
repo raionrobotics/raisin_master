@@ -101,6 +101,21 @@ If `RAISIN_SSH_KEY` is not set, RAISIN auto-detects existing keys in `~/.ssh/` i
 
 > **Note:** Ensure your SSH public key is registered with the OTA server before using OTA features.
 
+#### Robot API Key Authentication
+
+A robot registered on the OTA server can be issued an API key (`rk_<uuid>_<secret>`). When both `RAISIN_ROBOT_API_KEY` and `RAISIN_ROBOT_NODE` are set — or `robot.api_key` and `robot.node` in `configuration_setting.yaml` — the install flow additionally:
+
+- downloads package blobs through the robot-authenticated endpoint, so downloads are attributed to this robot and node;
+- verifies each download against the server's `X-Content-Hash` and aborts on a mismatch;
+- asks the server for this node's **desired state**, honouring an assigned archive target and stopping the install entirely when a halt is in effect;
+- reports an installed-software snapshot after the install so the fleet view reflects what the robot is actually running.
+
+An archive name or version passed explicitly (`--archive-version`, `RAISIN_ARCHIVE_NAME`) is treated as a deliberate pin and takes precedence over the server's desired state.
+
+> **Limitation:** enumerating an archive's packages still requires SSH authentication — the robot-authenticated API exposes no manifest listing for manifest-only archives. A robot provisioned with *only* an API key cannot yet resolve an archive, and will fall back to GitHub releases. Register an SSH key alongside the API key until the server adds a robot-facing manifest endpoint.
+
+The key is read in this order: `RAISIN_ROBOT_API_KEY`, `RAISIN_ROBOT_API_KEY_FILE`, `configuration_setting.yaml`/`secrets.yaml`, then `~/.config/raisin/robot-api-key`. File-backed keys are ignored on POSIX systems unless they are `chmod 600`.
+
 ### 4. Add Source Packages
 
 Create a directory named `src` in the root of the repository. Clone any source code packages you are developing or contributing to inside this `src` directory.

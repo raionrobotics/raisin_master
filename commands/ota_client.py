@@ -16,6 +16,7 @@ import os
 import re
 import hashlib
 import shutil
+import stat
 import struct
 import subprocess
 import tempfile
@@ -75,6 +76,9 @@ _ROBOT_NODE_KEY_ENV = "RAISIN_ROBOT_NODE_KEY"
 _ROBOT_CONFIG_FILES = ("configuration_setting.yaml", "secrets.yaml")
 _robot_auth_warning_keys = set()
 
+# Caches parsed local config by path and file stat metadata.
+_local_config_cache = {}
+
 # Client identity attached to robot OTA audit/history records.
 DEFAULT_CLIENT_VERSION = "raisin-cli"
 
@@ -128,17 +132,34 @@ def _normalize_optional_string(value) -> Optional[str]:
 
 
 def _load_local_config() -> dict:
-    """Best-effort read of local configuration without enforcing full config validity."""
+    """Best-effort read of local configuration without enforcing full config validity.
+
+    Cached on file stat metadata: robot auth headers are rebuilt for every
+    package download, and each rebuild resolves both the API key and the node
+    key, so an uncached read re-parses the YAML twice per package.
+    """
     script_dir_path = Path(g.script_directory)
     for filename in _ROBOT_CONFIG_FILES:
         config_path = script_dir_path / filename
-        if not config_path.is_file():
+        try:
+            stat_result = config_path.stat()
+        except OSError:
             continue
+        if not stat.S_ISREG(stat_result.st_mode):
+            continue
+
+        cache_token = (stat_result.st_mtime_ns, stat_result.st_size)
+        cached = _local_config_cache.get(config_path)
+        if cached and cached[0] == cache_token:
+            return cached[1]
+
         try:
             config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
             return {}
-        return config if isinstance(config, dict) else {}
+        config = config if isinstance(config, dict) else {}
+        _local_config_cache[config_path] = (cache_token, config)
+        return config
     return {}
 
 
@@ -217,41 +238,56 @@ def _cache_robot_api_key(key_path: Path, api_key: Optional[str]) -> None:
     except OSError:
         _robot_api_key_cache.pop(key_path, None)
         return
-    _robot_api_key_cache[key_path] = (_api_key_cache_token(stat_result), api_key)
+    _robot_api_key_cache[key_path] = (
+        _api_key_cache_token(stat_result),
+        api_key,
+        False,
+    )
 
 
-def _read_robot_api_key_file(key_path: Path) -> Optional[str]:
+def _read_robot_api_key_file_detailed(key_path: Path) -> tuple:
+    """Read a key file, reporting whether a failure was already explained.
+
+    Returns (key, explained). `explained` is True when the reason the key is
+    unusable has already been printed — either by this call or by the earlier
+    call that cached the result — so callers do not stack a second, vaguer
+    warning on top of a specific one.
+    """
     try:
         stat_result = key_path.stat()
     except FileNotFoundError:
         _robot_api_key_cache.pop(key_path, None)
-        return None
+        return (None, False)
     except OSError as e:
         print(f"⚠️ Failed to read robot API key file '{key_path}': {e}")
-        return None
+        return (None, True)
 
     cache_token = _api_key_cache_token(stat_result)
     cached = _robot_api_key_cache.get(key_path)
     if cached and cached[0] == cache_token:
-        return cached[1]
+        return (cached[1], cached[2])
 
     if os.name == "posix" and (stat_result.st_mode & 0o077):
         print(
             "⚠️ Ignoring robot API key file with insecure permissions: "
             f"{key_path} (run: chmod 600 {key_path})"
         )
-        _robot_api_key_cache[key_path] = (cache_token, None)
-        return None
+        _robot_api_key_cache[key_path] = (cache_token, None, True)
+        return (None, True)
 
     try:
         key = key_path.read_text(encoding="utf-8").strip()
     except OSError as e:
         print(f"⚠️ Failed to read robot API key file '{key_path}': {e}")
-        return None
+        return (None, True)
 
     cached_key = key or None
-    _robot_api_key_cache[key_path] = (cache_token, cached_key)
-    return cached_key
+    _robot_api_key_cache[key_path] = (cache_token, cached_key, False)
+    return (cached_key, False)
+
+
+def _read_robot_api_key_file(key_path: Path) -> Optional[str]:
+    return _read_robot_api_key_file_detailed(key_path)[0]
 
 
 def get_robot_api_key() -> Optional[str]:
@@ -272,7 +308,20 @@ def get_robot_api_key() -> Optional[str]:
 
     env_key_file = os.environ.get(_ROBOT_API_KEY_FILE_ENV, "").strip()
     if env_key_file:
-        return _read_robot_api_key_file(Path(env_key_file).expanduser())
+        # An explicitly pinned path is a deliberate choice. Do not fall through
+        # to the config file or the default path when it does not resolve —
+        # say so instead, or the robot quietly downloads as an anonymous client.
+        key, explained = _read_robot_api_key_file_detailed(
+            Path(env_key_file).expanduser()
+        )
+        if not key and not explained:
+            _warn_robot_auth_config_once(
+                f"unreadable_key_file:{env_key_file}",
+                f"⚠️ {_ROBOT_API_KEY_FILE_ENV} points at '{env_key_file}' but no "
+                "robot API key could be read from it. Using legacy OTA "
+                "authentication instead.",
+            )
+        return key
 
     config_key = _get_local_config_value(
         (
@@ -1079,6 +1128,97 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
     }
 
 
+def fetch_robot_desired_state() -> Optional[dict]:
+    """Ask the OTA server what this robot node is supposed to be running.
+
+    Returns the resolved desired-state document, or None when robot auth is
+    not configured or the server cannot answer. Never raises: desired state is
+    an optional refinement of the caller's own archive selection.
+    """
+    headers = _robot_auth_headers()
+    if not headers:
+        return None
+
+    base = get_ota_endpoint().rstrip("/")
+    try:
+        resp = requests.get(
+            f"{base}/robots/me/desired-state", headers=headers, timeout=10
+        )
+        if resp.status_code == 404:
+            # Either the node is not registered or the server predates the
+            # endpoint. Both mean "no opinion", not "install nothing".
+            return None
+        resp.raise_for_status()
+        state = _unwrap_response(resp.json())
+        return state if isinstance(state, dict) else None
+    except (requests.RequestException, ValueError) as e:
+        print(f"⚠️ Failed to fetch OTA desired state: {e}")
+        return None
+
+
+def _resolve_desired_state(platform_str: str) -> tuple:
+    """Fold the server's desired state into an archive selection.
+
+    Returns (halted, archive_name, archive_version). Name and version are None
+    whenever the server has no usable opinion, leaving the caller's own
+    selection untouched.
+    """
+    state = fetch_robot_desired_state()
+    if not state:
+        return (False, None, None)
+
+    if state.get("halt"):
+        sources = ", ".join(state.get("haltSources") or []) or "an unknown scope"
+        print(f"⛔ OTA installs are halted for this node by: {sources}.")
+        return (True, None, None)
+
+    target = state.get("target")
+    if not isinstance(target, dict):
+        if state.get("reason") == "target_unresolved":
+            detail = state.get("unresolvedDetail") or "no detail given"
+            print(
+                "⚠️ The OTA server has an archive assigned to this node but "
+                f"could not resolve it: {detail}."
+            )
+        return (False, None, None)
+
+    target_platform = _normalize_optional_string(target.get("platform"))
+    if target_platform and target_platform != platform_str:
+        print(
+            f"⚠️ OTA desired state targets '{target_platform}' but this node "
+            f"is '{platform_str}'. Ignoring it."
+        )
+        return (False, None, None)
+
+    name = _normalize_optional_string(target.get("name"))
+    version = _normalize_optional_string(target.get("version"))
+    if not name or not version:
+        return (False, None, None)
+
+    print(
+        f"🛰️  OTA desired state ({state.get('reason')}): "
+        f"{name} v{version} on {target_platform or platform_str}"
+    )
+    return (False, name, version)
+
+
+def _expected_content_hash(response_headers) -> Optional[str]:
+    """Extract the sha256 the server claims for a download body.
+
+    The by-key endpoints send the blob digest as `X-Content-Hash` and reuse it
+    as the ETag, so fall back to the ETag when the explicit header is absent.
+    """
+    for header in ("X-Content-Hash", "ETag"):
+        raw = response_headers.get(header)
+        if not isinstance(raw, str):
+            continue
+        candidate = raw.strip().removeprefix("W/").strip('"')
+        candidate = candidate.removeprefix("sha256:").lower()
+        if re.fullmatch(r"[a-f0-9]{64}", candidate):
+            return candidate
+    return None
+
+
 def _stream_robot_package_download(
     package_id: str,
     package_name: str,
@@ -1103,9 +1243,26 @@ def _stream_robot_package_download(
             url, headers=headers, params=params, stream=True, timeout=60
         ) as resp:
             resp.raise_for_status()
+            digest = hashlib.sha256()
             with open(download_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=8192):
+                    digest.update(chunk)
                     f.write(chunk)
+            expected = _expected_content_hash(resp.headers)
+
+        # Nobody is watching an unattended robot install, so a truncated or
+        # corrupted body has to fail here rather than surface later as a
+        # confusing "not a zip file" during extraction.
+        if expected and digest.hexdigest() != expected:
+            raise OSError(
+                f"content hash mismatch (expected {expected}, "
+                f"got {digest.hexdigest()})"
+            )
+        if not expected:
+            print(
+                f"⚠️ OTA server sent no content hash for '{package_name}'; "
+                "download integrity was not verified."
+            )
         return True
     except (requests.RequestException, OSError) as e:
         if download_path.exists():
@@ -1245,14 +1402,56 @@ def _build_archive_install_metadata(
     }
 
 
-def _snapshot_package_from_metadata(metadata: dict) -> Optional[dict]:
-    """Convert one ota-install.json document into a snapshot package item."""
+def manifest_hashes_by_package_id(packages: Optional[list]) -> dict:
+    """Map packageId → manifestHash from an archive manifest package list."""
+    hashes_by_id = {}
+    for pkg in packages or []:
+        if not isinstance(pkg, dict):
+            continue
+        pkg_id = str(pkg.get("packageId") or pkg.get("id") or "").strip()
+        manifest_hash = str(pkg.get("manifestHash") or "").strip()
+        if pkg_id and manifest_hash:
+            hashes_by_id[pkg_id] = manifest_hash
+    return hashes_by_id
+
+
+def _snapshot_package_from_metadata(
+    metadata: dict, manifest_hashes: Optional[dict] = None
+) -> Optional[dict]:
+    """Convert one ota-install.json document into a snapshot package item.
+
+    `manifestHash` is required by the server for archive packages and must
+    match the archive manifest exactly. Installs recorded before the field was
+    written lack it, so recover it from the archive manifest rather than
+    dropping the package: the server clears and replaces the node's whole
+    package set on every snapshot, so an omission is recorded as "not
+    installed" rather than "unknown".
+    """
     package_id = str(metadata.get("packageId") or "").strip()
     package_name = str(metadata.get("packageName") or "").strip()
     version = str(metadata.get("packageVersion") or "").strip().lstrip("vV")
     manifest_hash = str(metadata.get("manifestHash") or "").strip()
-    if not package_id or not package_name or not version or not manifest_hash:
+    if not package_id or not package_name or not version:
         return None
+
+    if not manifest_hash:
+        manifest_hash = (manifest_hashes or {}).get(package_id, "")
+        if manifest_hash:
+            print(
+                f"ℹ️  '{package_name}' has no recorded manifest hash; "
+                "recovered it from the archive manifest for snapshot reporting."
+            )
+
+    if not manifest_hash:
+        # Reporting it as a custom package is not an option: the server rejects
+        # customPackages entries whose packageId is in the archive manifest.
+        print(
+            f"⚠️ Excluding '{package_name}=={version}' from the OTA software "
+            "snapshot: no manifest hash on disk or in the archive manifest. "
+            "The server will not show it as installed on this node."
+        )
+        return None
+
     return {
         "packageId": package_id,
         "packageName": package_name,
@@ -1266,6 +1465,7 @@ def _collect_archive_snapshot_packages(
     archive_id: str,
     platform_str: str,
     build_type: str,
+    manifest_hashes: Optional[dict] = None,
 ) -> list:
     """Collect currently installed package metadata for an archive."""
     metadata_pattern = f"*/*/*/*/{build_type}/{_INSTALL_METADATA_FILE}"
@@ -1287,7 +1487,7 @@ def _collect_archive_snapshot_packages(
         if metadata.get("buildType") != build_type:
             continue
 
-        package = _snapshot_package_from_metadata(metadata)
+        package = _snapshot_package_from_metadata(metadata, manifest_hashes)
         if package:
             packages_by_id[package["packageId"]] = package
 
@@ -1349,8 +1549,15 @@ def _queue_snapshot_report(
     platform_str: str,
     build_type: str,
     install_session_id: str,
+    manifest_hashes: Optional[dict] = None,
 ) -> None:
     key = (archive_id, platform_str, build_type, install_session_id)
+    pending = _pending_snapshot_reports.get(key)
+    # Successive single-package installs each contribute the slice of the
+    # archive manifest they resolved; keep the union so the deferred report can
+    # still backfill hashes for packages installed earlier in this process.
+    merged_hashes = dict(pending["manifest_hashes"]) if pending else {}
+    merged_hashes.update(manifest_hashes or {})
     _pending_snapshot_reports[key] = {
         "install_base_path": install_base_path,
         "archive_id": archive_id,
@@ -1359,6 +1566,7 @@ def _queue_snapshot_report(
         "platform_str": platform_str,
         "build_type": build_type,
         "install_session_id": install_session_id,
+        "manifest_hashes": merged_hashes,
     }
 
 
@@ -1377,12 +1585,14 @@ def _report_snapshot_from_install_metadata(
     platform_str: str,
     build_type: str,
     install_session_id: str,
+    manifest_hashes: Optional[dict] = None,
 ) -> bool:
     packages = _collect_archive_snapshot_packages(
         install_base_path=install_base_path,
         archive_id=archive_id,
         platform_str=platform_str,
         build_type=build_type,
+        manifest_hashes=manifest_hashes,
     )
     if not packages:
         return False
@@ -1556,6 +1766,7 @@ def download_package(
             platform_str=platform_str,
             build_type=build_type,
             install_session_id=install_session_id,
+            manifest_hashes=manifest_hashes_by_package_id(packages),
         )
     return result
 
@@ -1589,7 +1800,19 @@ def download_all_from_archive(
         for successfully downloaded packages. Empty dict on complete failure.
     """
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+
+    # An explicit name or version from the caller is a deliberate pin and
+    # outranks whatever the fleet has assigned. Only ask the server what to run
+    # when the caller expressed no preference.
+    caller_pinned_archive = bool(archive_name) or bool(archive_version)
     archive_name = get_archive_name(build_type, archive_name)
+
+    if not caller_pinned_archive:
+        halted, desired_name, desired_version = _resolve_desired_state(platform_str)
+        if halted:
+            return {}
+        if desired_name and desired_version:
+            archive_name, archive_version = desired_name, desired_version
 
     # Selection priority: archive_version > tag > legacy latest.
     if archive_version:
@@ -1696,6 +1919,7 @@ def download_all_from_archive(
             platform_str=platform_str,
             build_type=build_type,
             install_session_id=install_session_id,
+            manifest_hashes=manifest_hashes_by_package_id(packages),
         )
 
     return results

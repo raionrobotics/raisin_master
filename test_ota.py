@@ -35,11 +35,16 @@ from commands import globals as g
 
 
 def _mock_response(
-    status_code=200, json_data=None, raise_for_status=None, iter_content=None
+    status_code=200,
+    json_data=None,
+    raise_for_status=None,
+    iter_content=None,
+    headers=None,
 ):
     """Build a MagicMock that behaves like a requests.Response."""
     resp = MagicMock()
     resp.status_code = status_code
+    resp.headers = {} if headers is None else headers
     resp.json.return_value = json_data or {}
     if raise_for_status:
         resp.raise_for_status.side_effect = raise_for_status
@@ -112,10 +117,12 @@ class TestConfiguration(unittest.TestCase):
         g.script_directory = self._tmpdir.name
         ota._robot_api_key_cache.clear()
         ota._robot_auth_warning_keys.clear()
+        ota._local_config_cache.clear()
 
     def tearDown(self):
         ota._robot_api_key_cache.clear()
         ota._robot_auth_warning_keys.clear()
+        ota._local_config_cache.clear()
         g.script_directory = self._orig_script_directory
         self._tmpdir.cleanup()
 
@@ -219,6 +226,44 @@ class TestConfiguration(unittest.TestCase):
                     self.assertEqual(saved_path.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(ota.get_robot_api_key(), "robot-key")
                 self.assertEqual(ota._robot_api_key_cache[key_path][1], "robot-key")
+
+    def test_missing_pinned_robot_api_key_file_warns(self):
+        """An explicitly pinned path that yields nothing must not fail quietly."""
+        missing = Path(self._tmpdir.name) / "no-such-key"
+        with patch.dict(
+            os.environ,
+            {"RAISIN_ROBOT_API_KEY_FILE": str(missing)},
+            clear=True,
+        ), patch("builtins.print") as mock_print:
+            self.assertIsNone(ota.get_robot_api_key())
+
+        self.assertTrue(
+            any(
+                "RAISIN_ROBOT_API_KEY_FILE points at" in str(c)
+                for c in mock_print.call_args_list
+            )
+        )
+
+    def test_local_config_is_parsed_once_per_file_revision(self):
+        """Auth headers are rebuilt per package; re-parsing YAML each time is waste."""
+        config_path = Path(g.script_directory) / "configuration_setting.yaml"
+        config_path.write_text(
+            "robot:\n  api_key: cfg-key\n  node: primary\n", encoding="utf-8"
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            first = ota._load_local_config()
+            for _ in range(4):
+                ota._load_local_config()
+            self.assertEqual(first.get("robot", {}).get("api_key"), "cfg-key")
+            self.assertEqual(len(ota._local_config_cache), 1)
+
+            # A rewrite must invalidate the cache rather than serve stale values.
+            os.utime(config_path, (0, 0))
+            config_path.write_text(
+                "robot:\n  api_key: rotated-key\n  node: primary\n", encoding="utf-8"
+            )
+            self.assertEqual(ota.get_robot_api_key(), "rotated-key")
 
     @unittest.skipIf(os.name != "posix", "POSIX file permission check")
     def test_insecure_robot_api_key_file_is_ignored(self):
@@ -736,6 +781,7 @@ class TestDownload(unittest.TestCase):
         ota._robot_api_key_cache.clear()
         ota._pending_snapshot_reports.clear()
         ota._robot_auth_warning_keys.clear()
+        ota._local_config_cache.clear()
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
@@ -753,6 +799,7 @@ class TestDownload(unittest.TestCase):
         ota._install_session_id = None
         ota._pending_snapshot_reports.clear()
         ota._robot_auth_warning_keys.clear()
+        ota._local_config_cache.clear()
         g.os_type = self._orig_os_type
         g.os_version = self._orig_os_version
         g.architecture = self._orig_architecture
@@ -1496,6 +1543,7 @@ class TestDownload(unittest.TestCase):
             platform_str="linux-22.04-x86_64",
             build_type="release",
             install_session_id="session-1",
+            manifest_hashes={},
         )
         self.assertEqual(ota._pending_snapshot_reports, {})
 
@@ -1567,6 +1615,306 @@ class TestDownload(unittest.TestCase):
         called_tags = [call.args[2] for call in mock_fetch_by_tag.call_args_list]
         self.assertEqual(called_tags, ["latest", "stable"])
 
+    # ------------------------------------------------------------------
+    # Robot download integrity
+    # ------------------------------------------------------------------
+
+    # The body the mocked robot download streams, and the digest the server
+    # would advertise for it.
+    _ABC_SHA256 = hashlib.sha256(b"abc").hexdigest()
+
+    def _robot_download(self, headers, target):
+        """Run a robot-authenticated download of b'abc' with the given headers."""
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.get",
+            return_value=_mock_response(iter_content=[b"abc"], headers=headers),
+        ), patch(
+            "builtins.print"
+        ) as mock_print:
+            ok = ota._download_package_blob(
+                "arch-1",
+                "pkg-1",
+                "mypkg",
+                target,
+                archive_name="dso",
+                archive_version="1.0.3",
+                platform_str="ubuntu-24.04-arm64",
+                install_session_id="session-1",
+            )
+        return ok, mock_print
+
+    def test_robot_download_accepts_matching_content_hash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "pkg.zip"
+            ok, _ = self._robot_download({"X-Content-Hash": self._ABC_SHA256}, target)
+
+        self.assertTrue(ok)
+
+    def test_robot_download_rejects_content_hash_mismatch(self):
+        """A truncated or corrupted body must fail here, not during extraction."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "pkg.zip"
+            ok, mock_print = self._robot_download({"X-Content-Hash": "f" * 64}, target)
+            self.assertFalse(target.exists())
+
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("content hash mismatch" in str(c) for c in mock_print.call_args_list)
+        )
+
+    def test_robot_download_verifies_against_etag_when_no_explicit_header(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "pkg.zip"
+            ok, _ = self._robot_download({"ETag": f'"{self._ABC_SHA256}"'}, target)
+
+        self.assertTrue(ok)
+
+    def test_robot_download_warns_when_server_sends_no_hash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "pkg.zip"
+            ok, mock_print = self._robot_download({}, target)
+
+        self.assertTrue(ok)
+        self.assertTrue(
+            any(
+                "integrity was not verified" in str(c)
+                for c in mock_print.call_args_list
+            )
+        )
+
+    def test_expected_content_hash_normalizes_server_formats(self):
+        self.assertEqual(
+            ota._expected_content_hash({"X-Content-Hash": self._ABC_SHA256.upper()}),
+            self._ABC_SHA256,
+        )
+        self.assertEqual(
+            ota._expected_content_hash({"ETag": f'W/"sha256:{self._ABC_SHA256}"'}),
+            self._ABC_SHA256,
+        )
+        self.assertIsNone(ota._expected_content_hash({"ETag": "not-a-hash"}))
+        self.assertIsNone(ota._expected_content_hash({}))
+
+    # ------------------------------------------------------------------
+    # Snapshot manifest-hash backfill
+    # ------------------------------------------------------------------
+
+    def _write_install_metadata(self, base, package_name, package_id, manifest_hash):
+        install_dir = base / package_name / "linux" / "22.04" / "x86_64" / "release"
+        install_dir.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            "source": "archive",
+            "archiveId": "arch-1",
+            "platform": "linux-22.04-x86_64",
+            "buildType": "release",
+            "packageName": package_name,
+            "packageId": package_id,
+            "packageVersion": "1.0.0",
+        }
+        if manifest_hash:
+            metadata["manifestHash"] = manifest_hash
+        (install_dir / "ota-install.json").write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+
+    def test_snapshot_backfills_manifest_hash_from_archive_manifest(self):
+        """Installs recorded before manifestHash existed must still be reported.
+
+        The server clears and replaces the node's package set on every
+        snapshot, so omitting a package records it as uninstalled.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            self._write_install_metadata(base, "pkg1", "p1", "a" * 64)
+            self._write_install_metadata(base, "pkg2", "p2", None)
+
+            hashes = ota.manifest_hashes_by_package_id(
+                [
+                    {"packageId": "p1", "manifestHash": "a" * 64},
+                    {"packageId": "p2", "manifestHash": "b" * 64},
+                ]
+            )
+            packages = ota._collect_archive_snapshot_packages(
+                base, "arch-1", "linux-22.04-x86_64", "release", manifest_hashes=hashes
+            )
+
+        self.assertCountEqual(
+            packages,
+            [
+                {
+                    "packageId": "p1",
+                    "packageName": "pkg1",
+                    "version": "1.0.0",
+                    "manifestHash": "a" * 64,
+                },
+                {
+                    "packageId": "p2",
+                    "packageName": "pkg2",
+                    "version": "1.0.0",
+                    "manifestHash": "b" * 64,
+                },
+            ],
+        )
+
+    def test_snapshot_excludes_unrecoverable_package_with_warning(self):
+        """A package absent from the manifest cannot be reported either way.
+
+        The server rejects customPackages entries whose packageId belongs to
+        the archive manifest, so there is no fallback route — say so instead of
+        dropping it silently.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            self._write_install_metadata(base, "pkg1", "p1", "a" * 64)
+            self._write_install_metadata(base, "ghost", "p9", None)
+
+            with patch("builtins.print") as mock_print:
+                packages = ota._collect_archive_snapshot_packages(
+                    base,
+                    "arch-1",
+                    "linux-22.04-x86_64",
+                    "release",
+                    manifest_hashes={"p1": "a" * 64},
+                )
+
+        self.assertEqual([p["packageName"] for p in packages], ["pkg1"])
+        self.assertTrue(
+            any("Excluding 'ghost" in str(c) for c in mock_print.call_args_list)
+        )
+
+    def test_queued_snapshot_reports_merge_manifest_hashes(self):
+        """Each single-package install contributes its slice of the manifest."""
+        ota._queue_snapshot_report(
+            install_base_path=Path("/tmp/install-base"),
+            archive_id="arch-1",
+            archive_name="dso",
+            archive_version="1.0.3",
+            platform_str="linux-22.04-x86_64",
+            build_type="release",
+            install_session_id="session-1",
+            manifest_hashes={"p1": "a" * 64},
+        )
+        ota._queue_snapshot_report(
+            install_base_path=Path("/tmp/install-base"),
+            archive_id="arch-1",
+            archive_name="dso",
+            archive_version="1.0.3",
+            platform_str="linux-22.04-x86_64",
+            build_type="release",
+            install_session_id="session-1",
+            manifest_hashes={"p2": "b" * 64},
+        )
+
+        pending = list(ota._pending_snapshot_reports.values())
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(
+            pending[0]["manifest_hashes"], {"p1": "a" * 64, "p2": "b" * 64}
+        )
+
+    # ------------------------------------------------------------------
+    # Desired state
+    # ------------------------------------------------------------------
+
+    def _desired_state(self, payload, platform="ubuntu-24.04-arm64"):
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.get",
+            return_value=_mock_response(json_data={"success": True, "data": payload}),
+        ), patch(
+            "builtins.print"
+        ):
+            return ota._resolve_desired_state(platform)
+
+    def test_resolve_desired_state_returns_assigned_target(self):
+        halted, name, version = self._desired_state(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "archiveId": "arch-1",
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-24.04-arm64",
+                },
+            }
+        )
+
+        self.assertEqual((halted, name, version), (False, "raisin-robot", "2026.1.0"))
+
+    def test_resolve_desired_state_honours_halt(self):
+        halted, name, version = self._desired_state(
+            {"halt": True, "haltSources": ["tenant"], "reason": "node_pin"}
+        )
+
+        self.assertEqual((halted, name, version), (True, None, None))
+
+    def test_resolve_desired_state_ignores_target_for_other_platform(self):
+        halted, name, _ = self._desired_state(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-22.04-x86_64",
+                },
+            }
+        )
+
+        self.assertFalse(halted)
+        self.assertIsNone(name)
+
+    def test_resolve_desired_state_without_robot_auth_is_inert(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                ota._resolve_desired_state("ubuntu-24.04-arm64"), (False, None, None)
+            )
+
+    @patch("commands.ota_client._fetch_archive_with_stable_fallback")
+    @patch("commands.ota_client._resolve_desired_state")
+    def test_download_all_from_archive_aborts_when_halted(
+        self, mock_desired, mock_fetch
+    ):
+        mock_desired.return_value = (True, None, None)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = ota.download_all_from_archive("release", Path(tmpdir))
+
+        self.assertEqual(result, {})
+        mock_fetch.assert_not_called()
+
+    @patch("commands.ota_client._fetch_archive_manifest", return_value=None)
+    @patch("commands.ota_client._resolve_desired_state")
+    def test_caller_pinned_archive_outranks_desired_state(
+        self, mock_desired, mock_fetch
+    ):
+        """An explicit pin is a deliberate choice; the fleet must not override it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ota.download_all_from_archive(
+                "release", Path(tmpdir), archive_version="1.2.3"
+            )
+
+        mock_desired.assert_not_called()
+        self.assertEqual(mock_fetch.call_args.args[2], "1.2.3")
+
 
 class TestArchiveNameAndTimestamp(unittest.TestCase):
     """Test archive name derivation and timestamp-based downloads."""
@@ -1578,6 +1926,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._install_session_id = None
         ota._robot_api_key_cache.clear()
         ota._robot_auth_warning_keys.clear()
+        ota._local_config_cache.clear()
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
@@ -1596,6 +1945,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._pending_snapshot_reports.clear()
         ota._robot_api_key_cache.clear()
         ota._robot_auth_warning_keys.clear()
+        ota._local_config_cache.clear()
         g.os_type = self._orig_os_type
         g.os_version = self._orig_os_version
         g.architecture = self._orig_architecture
