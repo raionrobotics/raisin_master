@@ -80,6 +80,10 @@ _INSTALL_SESSION_TTL_SECONDS = 24 * 60 * 60
 _INSTALL_EVENT_QUEUE_FILE = ".ota-install-events.jsonl"
 _INSTALL_EVENT_STATE_FILE = ".ota-install-events.state.json"
 _INSTALL_EVENT_BATCH_LIMIT = 100
+
+# An offline robot buffers indefinitely, so the queue needs a ceiling. Newest
+# events are kept: they describe the state the fleet still needs to know about.
+_MAX_BUFFERED_INSTALL_EVENTS = 1000
 _TERMINAL_EVENT_TYPES = frozenset({"succeeded", "failed", "rolled_back"})
 
 # First failure of the current attempt. A terminal event means the attempt
@@ -563,6 +567,16 @@ def _mark_install_event(session_id: str, marker: str) -> None:
         pass
 
 
+def robot_reporting_enabled() -> bool:
+    """Whether this machine has a robot identity to attribute reports to.
+
+    `raisin_master` also runs on developer workstations, which have no robot
+    credential. Buffering install events there would grow a file that can never
+    be flushed, so nothing is recorded in the first place.
+    """
+    return bool(get_robot_api_key() and get_robot_node_key())
+
+
 def note_install_failure(
     stage: str, error_code: Optional[str], message: Optional[str] = None
 ) -> None:
@@ -593,7 +607,7 @@ def install_attempt_started() -> bool:
     return _install_event_marker_seen(get_install_session_id(), "started")
 
 
-def report_install_outcome(overall_success: bool) -> Optional[dict]:
+def report_install_outcome(overall_success: bool) -> Optional[dict]:  # noqa: C901
     """Close the attempt with exactly one terminal event.
 
     Only the caller knows whether the run as a whole worked, and a noted
@@ -639,6 +653,9 @@ def record_install_event(
 
     Returns the event, or None when the guard suppressed it.
     """
+    if not robot_reporting_enabled():
+        return None
+
     session_id = install_session_id or get_install_session_id()
     marker = "terminal" if event_type in _TERMINAL_EVENT_TYPES else event_type
     if marker in ("started", "terminal") and _install_event_marker_seen(
@@ -716,6 +733,15 @@ def flush_install_events() -> bool:
             break
 
         remaining = [e for e in remaining if e.get("eventId") not in acked]
+
+    dropped = len(remaining) - _MAX_BUFFERED_INSTALL_EVENTS
+    if dropped > 0:
+        # Keep the newest: they describe where the robot actually ended up.
+        remaining = remaining[-_MAX_BUFFERED_INSTALL_EVENTS:]
+        print(
+            f"⚠️ OTA install-event buffer is full; discarded {dropped} of the "
+            "oldest event(s)."
+        )
 
     _write_install_event_queue(remaining)
     if remaining:

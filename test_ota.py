@@ -63,6 +63,23 @@ def _mock_response(
     return resp
 
 
+def _as_robot(testcase):
+    """Give a test the robot identity that install-event recording requires.
+
+    `raisin_master` also runs on developer workstations, which have none — and
+    there it records nothing at all.
+    """
+    env = patch.dict(
+        os.environ,
+        {
+            "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+            "RAISIN_ROBOT_NODE": "jetson",
+        },
+    )
+    env.start()
+    testcase.addCleanup(env.stop)
+
+
 def _make_sshsig(raw_sig=None):
     """Build a minimal SSHSIG container and return (sshsig_bytes, sig_wire_blob).
 
@@ -847,6 +864,7 @@ class TestInstallEventQueue(unittest.TestCase):
         g.script_directory = self._tmp.name
         ota._install_session_id = "session-29"
         ota.clear_pending_install_failure()
+        _as_robot(self)
 
     def tearDown(self):
         ota._install_session_id = None
@@ -1026,6 +1044,60 @@ class TestInstallEventQueue(unittest.TestCase):
         self.assertEqual(posted, [ota._INSTALL_EVENT_BATCH_LIMIT, 5])
         self.assertEqual(self._queued(), [])
 
+    def test_no_robot_identity_records_nothing(self):
+        """A developer PC has no robot to attribute install events to.
+
+        Buffering them there grows a file that can never be flushed.
+        """
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(ota.record_install_event("started"))
+            self.assertIsNone(ota.report_install_outcome(True))
+
+        self.assertEqual(self._queued(), [])
+        self.assertFalse(ota._install_event_queue_path().exists())
+
+    def test_api_key_without_a_node_records_nothing(self):
+        """Half-configured is not configured: the reports would be rejected."""
+        with patch.dict(
+            os.environ,
+            {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
+            clear=True,
+        ), patch("builtins.print"):
+            ota.record_install_event("started")
+
+        self.assertEqual(self._queued(), [])
+
+    def test_queue_is_capped_so_a_long_outage_cannot_grow_it_forever(self):
+        cap = ota._MAX_BUFFERED_INSTALL_EVENTS
+        for i in range(cap + 25):
+            ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.post",
+            side_effect=requests.ConnectionError("offline"),
+        ), patch(
+            "builtins.print"
+        ) as mock_print:
+            ota.flush_install_events()
+
+        remaining = self._queued()
+        self.assertEqual(len(remaining), cap)
+        # The newest events are the ones worth keeping.
+        self.assertEqual(remaining[-1]["eventId"], f"e{cap + 24}")
+        self.assertTrue(
+            any("discard" in str(c).lower() for c in mock_print.call_args_list)
+        )
+
     def test_flush_without_robot_auth_is_a_noop_that_keeps_the_queue(self):
         ota.record_install_event("started")
 
@@ -1052,6 +1124,7 @@ class TestInstallEventEmission(unittest.TestCase):
         ota._install_session_id = "session-emit"
         ota._archive_cache.clear()
         ota.clear_pending_install_failure()
+        _as_robot(self)
 
     def tearDown(self):
         ota._install_session_id = None
@@ -1227,6 +1300,7 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         ota._install_session_id = "session-tx"
         ota._archive_cache.clear()
         ota.clear_pending_install_failure()
+        _as_robot(self)
         self.release = Path(self._tmp.name) / "release"
         self.release.mkdir(parents=True)
         self.live = self.release / "install"
@@ -3290,6 +3364,7 @@ class TestInstallOutcomeDecision(unittest.TestCase):
         g.script_directory = self._tmp.name
         ota._install_session_id = "session-outcome"
         ota.clear_pending_install_failure()
+        _as_robot(self)
 
     def tearDown(self):
         ota._install_session_id = None
