@@ -30,6 +30,8 @@ from commands.ota_client import (
     download_all_from_archive,
     flush_pending_snapshot_reports,
     clear_install_session,
+    record_install_event,
+    flush_install_events,
 )
 
 
@@ -631,6 +633,14 @@ def install_cli_command(
             overall_success = False
 
     flush_pending_snapshot_reports()
+
+    # Only the CLI knows the attempt as a whole succeeded; a failure has
+    # already emitted its terminal event where it happened.
+    if overall_success:
+        record_install_event("succeeded")
+
+    # Flush either way — a failed attempt is exactly what needs reporting.
+    flush_install_events()
 
     # Keep the session on failure so a retry resumes it; retire it on success.
     if not overall_success:

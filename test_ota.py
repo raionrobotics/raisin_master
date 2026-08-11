@@ -832,6 +832,319 @@ class TestDownloadErrorClassification(unittest.TestCase):
         self.assertFalse(ota.is_retryable_error_code("unknown"))
 
 
+class TestInstallEventQueue(unittest.TestCase):
+    """On-disk install-event queue: buffering, replay safety, ordering.
+
+    Contract: docs/ota-install-event-contract.md. Events are append-only
+    observations of one attempt; `eventId` makes a replayed batch idempotent.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_script_directory = g.script_directory
+        g.script_directory = self._tmp.name
+        ota._install_session_id = "session-29"
+
+    def tearDown(self):
+        ota._install_session_id = None
+        g.script_directory = self._orig_script_directory
+        self._tmp.cleanup()
+
+    def _queued(self):
+        return ota._read_install_event_queue()
+
+    def test_recorded_event_carries_the_contract_fields(self):
+        ota.record_install_event("started", archive_name="dso")
+        (event,) = self._queued()
+
+        self.assertEqual(event["eventType"], "started")
+        self.assertEqual(event["installSessionId"], "session-29")
+        self.assertEqual(event["archiveName"], "dso")
+        self.assertTrue(event["eventId"])
+        self.assertTrue(event["occurredAt"].endswith("Z"))
+
+    def test_queue_survives_a_process_restart(self):
+        ota.record_install_event("started")
+        ota._install_session_id = "session-29"  # new process, same session
+
+        self.assertEqual(len(self._queued()), 1)
+
+    def test_started_is_emitted_once_per_session(self):
+        ota.record_install_event("started")
+        ota.record_install_event("started")
+
+        self.assertEqual(len(self._queued()), 1)
+
+    def test_only_one_terminal_event_per_session(self):
+        """An attempt emits exactly one terminal event, per the contract."""
+        ota.record_install_event("started")
+        ota.record_install_event("failed", error_code="network")
+        ota.record_install_event("succeeded")
+
+        types = [e["eventType"] for e in self._queued()]
+        self.assertEqual(types, ["started", "failed"])
+
+    def test_a_new_session_may_emit_its_own_terminal(self):
+        ota.record_install_event("started")
+        ota.record_install_event("succeeded")
+        ota.clear_install_session()
+        ota._install_session_id = "session-30"
+
+        ota.record_install_event("started")
+        ota.record_install_event("succeeded")
+
+        self.assertEqual(len(self._queued()), 4)
+
+    def test_flush_posts_the_batch_and_clears_acked_events(self):
+        ota.record_install_event("started")
+        ota.record_install_event("succeeded")
+        queued = self._queued()
+        acks = [{"eventId": e["eventId"], "status": "created"} for e in queued]
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.post",
+            return_value=_mock_response(
+                json_data={"success": True, "data": {"created": 2, "acks": acks}}
+            ),
+        ) as mock_post:
+            ok = ota.flush_install_events()
+
+        self.assertTrue(ok)
+        self.assertEqual(self._queued(), [])
+        body = mock_post.call_args.kwargs["json"]
+        self.assertEqual(len(body["events"]), 2)
+        self.assertEqual(
+            mock_post.call_args.kwargs["headers"]["X-Robot-Node"], "jetson"
+        )
+
+    def test_offline_flush_keeps_the_queue_for_later(self):
+        ota.record_install_event("started")
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.post",
+            side_effect=requests.ConnectionError("offline"),
+        ):
+            ok = ota.flush_install_events()
+
+        self.assertFalse(ok)
+        self.assertEqual(len(self._queued()), 1)
+
+    def test_replayed_batch_keeps_the_same_event_ids(self):
+        """The server dedups on eventId, so a retry must not re-mint them."""
+        ota.record_install_event("started")
+        first = [e["eventId"] for e in self._queued()]
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.post",
+            side_effect=requests.ConnectionError("offline"),
+        ):
+            ota.flush_install_events()
+
+        self.assertEqual([e["eventId"] for e in self._queued()], first)
+
+    def test_delayed_flush_preserves_occurred_at_ordering(self):
+        with patch("commands.ota_client.time.time", side_effect=[100.5, 300.25]), patch(
+            "commands.ota_client.time.gmtime", side_effect=time.gmtime
+        ):
+            ota.record_install_event("started")
+            ota.record_install_event("succeeded")
+
+        stamps = [e["occurredAt"] for e in self._queued()]
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertNotEqual(stamps[0], stamps[1])
+
+    def test_batches_are_capped_at_the_server_limit(self):
+        for i in range(ota._INSTALL_EVENT_BATCH_LIMIT + 5):
+            ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
+
+        posted = []
+
+        def capture(*a, **kw):
+            events = kw["json"]["events"]
+            posted.append(len(events))
+            return _mock_response(
+                json_data={
+                    "success": True,
+                    "data": {
+                        "acks": [
+                            {"eventId": e["eventId"], "status": "created"}
+                            for e in events
+                        ]
+                    },
+                }
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.post", side_effect=capture
+        ):
+            ota.flush_install_events()
+
+        self.assertEqual(posted, [ota._INSTALL_EVENT_BATCH_LIMIT, 5])
+        self.assertEqual(self._queued(), [])
+
+    def test_flush_without_robot_auth_is_a_noop_that_keeps_the_queue(self):
+        ota.record_install_event("started")
+
+        with patch.dict(os.environ, {}, clear=True):
+            ok = ota.flush_install_events()
+
+        self.assertFalse(ok)
+        self.assertEqual(len(self._queued()), 1)
+
+
+class TestInstallEventEmission(unittest.TestCase):
+    """The install flow emits the events, not just the plumbing."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = (
+            g.script_directory,
+            g.os_type,
+            g.os_version,
+            g.architecture,
+        )
+        g.script_directory = self._tmp.name
+        g.os_type, g.os_version, g.architecture = "linux", "22.04", "x86_64"
+        ota._install_session_id = "session-emit"
+        ota._archive_cache.clear()
+
+    def tearDown(self):
+        ota._install_session_id = None
+        ota._archive_cache.clear()
+        (
+            g.script_directory,
+            g.os_type,
+            g.os_version,
+            g.architecture,
+        ) = self._orig
+        self._tmp.cleanup()
+
+    MANIFEST = (
+        [{"packageName": "pkg1", "packageId": "p1", "tagName": "1.0.0"}],
+        "arch-1",
+        "2026.1.0",
+    )
+
+    def _events(self):
+        return ota._read_install_event_queue()
+
+    @patch("commands.ota_client._extract_and_read_deps")
+    @patch("commands.ota_client._download_package_blob")
+    @patch("commands.ota_client._fetch_archive_manifest")
+    def test_started_event_names_the_archive(self, mock_manifest, mock_blob, mock_x):
+        mock_manifest.return_value = self.MANIFEST
+        mock_blob.return_value = (True, None)
+        mock_x.return_value = {"version": "1.0.0", "dependencies": []}
+
+        ota.download_all_from_archive(
+            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+        )
+
+        started = [e for e in self._events() if e["eventType"] == "started"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["archiveId"], "arch-1")
+        self.assertEqual(started[0]["archiveVersion"], "2026.1.0")
+        self.assertEqual(started[0]["platform"], "linux-22.04-x86_64")
+
+    @patch("commands.ota_client._download_package_blob")
+    @patch("commands.ota_client._fetch_archive_manifest")
+    def test_download_failure_emits_failed_with_stage_and_code(
+        self, mock_manifest, mock_blob
+    ):
+        mock_manifest.return_value = self.MANIFEST
+        mock_blob.return_value = (False, "disk_full")
+
+        ota.download_all_from_archive(
+            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+        )
+
+        failed = [e for e in self._events() if e["eventType"] == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["stage"], "download")
+        self.assertEqual(failed[0]["errorCode"], "disk_full")
+
+    @patch("commands.ota_client._extract_and_read_deps", return_value=None)
+    @patch("commands.ota_client._download_package_blob")
+    @patch("commands.ota_client._fetch_archive_manifest")
+    def test_extract_failure_emits_failed_at_unpack(
+        self, mock_manifest, mock_blob, _mock_x
+    ):
+        mock_manifest.return_value = self.MANIFEST
+        mock_blob.return_value = (True, None)
+
+        ota.download_all_from_archive(
+            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+        )
+
+        failed = [e for e in self._events() if e["eventType"] == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["stage"], "unpack")
+        self.assertEqual(failed[0]["errorCode"], "unpack_failed")
+
+    @patch("commands.ota_client._extract_and_read_deps")
+    @patch("commands.ota_client._download_package_blob")
+    @patch("commands.ota_client._fetch_archive_manifest")
+    def test_success_is_reported_by_the_cli_not_the_download_layer(
+        self, mock_manifest, mock_blob, mock_x
+    ):
+        """The download layer cannot know the install as a whole succeeded."""
+        mock_manifest.return_value = self.MANIFEST
+        mock_blob.return_value = (True, None)
+        mock_x.return_value = {"version": "1.0.0", "dependencies": []}
+
+        ota.download_all_from_archive(
+            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+        )
+
+        types = [e["eventType"] for e in self._events()]
+        self.assertEqual(types, ["started"])
+
+        ota.record_install_event("succeeded")
+        self.assertEqual(
+            [e["eventType"] for e in self._events()], ["started", "succeeded"]
+        )
+
+
 class TestInstallSessionPersistence(unittest.TestCase):
     """A resumed install must keep its session id.
 
@@ -2611,6 +2924,50 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
 # ============================================================================
 # 6. Integration: install.py
 # ============================================================================
+
+
+class TestInstallCliEventReporting(unittest.TestCase):
+    """The CLI closes the attempt: terminal event, then flush."""
+
+    def _run_cli(self, overall_success):
+        """Drive install_cli_command past the per-package work to its tail."""
+        import click
+
+        from commands import install as install_mod
+
+        with patch.object(
+            install_mod, "install_command", return_value=overall_success
+        ), patch.object(
+            install_mod, "record_install_event"
+        ) as mock_event, patch.object(
+            install_mod, "flush_install_events"
+        ) as mock_flush, patch.object(
+            install_mod, "flush_pending_snapshot_reports"
+        ), patch.object(
+            install_mod, "clear_install_session"
+        ):
+            try:
+                # It is a click Command; call the underlying function.
+                install_mod.install_cli_command.callback(
+                    ["mypkg"], "release", False, None, None, None, False, "stable"
+                )
+            except click.exceptions.Exit:
+                pass
+        return mock_event, mock_flush
+
+    def test_successful_run_reports_succeeded_then_flushes(self):
+        mock_event, mock_flush = self._run_cli(overall_success=True)
+
+        mock_event.assert_called_once()
+        self.assertEqual(mock_event.call_args.args[0], "succeeded")
+        mock_flush.assert_called_once()
+
+    def test_failed_run_still_flushes_what_was_buffered(self):
+        """A failed attempt already emitted its terminal event downstream."""
+        mock_event, mock_flush = self._run_cli(overall_success=False)
+
+        mock_event.assert_not_called()
+        mock_flush.assert_called_once()
 
 
 class TestInstallIntegration(unittest.TestCase):
