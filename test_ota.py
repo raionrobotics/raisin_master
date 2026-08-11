@@ -844,9 +844,11 @@ class TestInstallEventQueue(unittest.TestCase):
         self._orig_script_directory = g.script_directory
         g.script_directory = self._tmp.name
         ota._install_session_id = "session-29"
+        ota.clear_pending_install_failure()
 
     def tearDown(self):
         ota._install_session_id = None
+        ota.clear_pending_install_failure()
         g.script_directory = self._orig_script_directory
         self._tmp.cleanup()
 
@@ -1047,10 +1049,12 @@ class TestInstallEventEmission(unittest.TestCase):
         g.os_type, g.os_version, g.architecture = "linux", "22.04", "x86_64"
         ota._install_session_id = "session-emit"
         ota._archive_cache.clear()
+        ota.clear_pending_install_failure()
 
     def tearDown(self):
         ota._install_session_id = None
         ota._archive_cache.clear()
+        ota.clear_pending_install_failure()
         (
             g.script_directory,
             g.os_type,
@@ -1088,9 +1092,10 @@ class TestInstallEventEmission(unittest.TestCase):
 
     @patch("commands.ota_client._download_package_blob")
     @patch("commands.ota_client._fetch_archive_manifest")
-    def test_download_failure_emits_failed_with_stage_and_code(
+    def test_download_failure_is_noted_but_not_terminal_yet(
         self, mock_manifest, mock_blob
     ):
+        """A terminal event means the attempt finished — the loop has not."""
         mock_manifest.return_value = self.MANIFEST
         mock_blob.return_value = (False, "disk_full")
 
@@ -1098,15 +1103,13 @@ class TestInstallEventEmission(unittest.TestCase):
             "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
         )
 
-        failed = [e for e in self._events() if e["eventType"] == "failed"]
-        self.assertEqual(len(failed), 1)
-        self.assertEqual(failed[0]["stage"], "download")
-        self.assertEqual(failed[0]["errorCode"], "disk_full")
+        self.assertEqual([e["eventType"] for e in self._events()], ["started"])
+        self.assertEqual(ota.pending_install_failure(), ("download", "disk_full"))
 
     @patch("commands.ota_client._extract_and_read_deps", return_value=None)
     @patch("commands.ota_client._download_package_blob")
     @patch("commands.ota_client._fetch_archive_manifest")
-    def test_extract_failure_emits_failed_at_unpack(
+    def test_extract_failure_is_noted_at_the_unpack_stage(
         self, mock_manifest, mock_blob, _mock_x
     ):
         mock_manifest.return_value = self.MANIFEST
@@ -1116,10 +1119,62 @@ class TestInstallEventEmission(unittest.TestCase):
             "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
         )
 
-        failed = [e for e in self._events() if e["eventType"] == "failed"]
-        self.assertEqual(len(failed), 1)
-        self.assertEqual(failed[0]["stage"], "unpack")
-        self.assertEqual(failed[0]["errorCode"], "unpack_failed")
+        self.assertEqual([e["eventType"] for e in self._events()], ["started"])
+        self.assertEqual(ota.pending_install_failure(), ("unpack", "unpack_failed"))
+
+    @patch("commands.ota_client._extract_and_read_deps")
+    @patch("commands.ota_client._download_package_blob")
+    @patch("commands.ota_client._fetch_archive_manifest")
+    def test_first_failure_wins_when_several_packages_fail(
+        self, mock_manifest, mock_blob, mock_x
+    ):
+        """One terminal event per attempt, so the first cause is the reported one."""
+        mock_manifest.return_value = (
+            [
+                {"packageName": "pkg1", "packageId": "p1", "tagName": "1.0.0"},
+                {"packageName": "pkg2", "packageId": "p2", "tagName": "1.0.0"},
+            ],
+            "arch-1",
+            "2026.1.0",
+        )
+        mock_blob.side_effect = [(False, "server_error"), (True, None)]
+        mock_x.return_value = None
+
+        ota.download_all_from_archive(
+            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+        )
+
+        self.assertEqual(ota.pending_install_failure(), ("download", "server_error"))
+
+    @patch("commands.ota_client._extract_and_read_deps")
+    @patch("commands.ota_client._download_package_blob")
+    @patch("commands.ota_client._fetch_archive_manifest")
+    def test_partial_archive_install_is_not_a_success(
+        self, mock_manifest, mock_blob, mock_x
+    ):
+        """4-of-5 installed is not a completed archive install.
+
+        install_command returns True when *any* package landed, so without the
+        noted failure the attempt would report `succeeded` while the server was
+        told a package never arrived.
+        """
+        mock_manifest.return_value = (
+            [
+                {"packageName": "pkg1", "packageId": "p1", "tagName": "1.0.0"},
+                {"packageName": "pkg2", "packageId": "p2", "tagName": "1.0.0"},
+            ],
+            "arch-1",
+            "2026.1.0",
+        )
+        mock_blob.side_effect = [(False, "network"), (True, None)]
+        mock_x.return_value = {"version": "1.0.0", "dependencies": []}
+
+        results = ota.download_all_from_archive(
+            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+        )
+
+        self.assertEqual(list(results), ["pkg2"])  # partial success
+        self.assertIsNotNone(ota.pending_install_failure())
 
     @patch("commands.ota_client._extract_and_read_deps")
     @patch("commands.ota_client._download_package_blob")
@@ -1138,6 +1193,7 @@ class TestInstallEventEmission(unittest.TestCase):
 
         types = [e["eventType"] for e in self._events()]
         self.assertEqual(types, ["started"])
+        self.assertIsNone(ota.pending_install_failure())
 
         ota.record_install_event("succeeded")
         self.assertEqual(
@@ -1367,6 +1423,34 @@ class TestResumableDownload(unittest.TestCase):
         self.assertEqual(sent["If-Range"], f'"{self.digest}"')
         self.assertTrue(ok)
         self.assertEqual(self.dest.read_bytes(), self.BODY)
+
+    def test_206_at_the_wrong_offset_is_rejected(self):
+        """Appending a slice that does not start where we asked corrupts the file.
+
+        The hash check would eventually catch it, but only after a full
+        re-download and while reporting a misleading hash_mismatch.
+        """
+        self.part.write_bytes(self.BODY[:8])
+        ota._write_part_state(self.part, self.digest)
+
+        resp = _mock_response(
+            status_code=206,
+            iter_content=[self.BODY[4:]],
+            headers={
+                "X-Content-Hash": self.digest,
+                "Content-Range": f"bytes 4-{len(self.BODY) - 1}/{len(self.BODY)}",
+            },
+        )
+        with patch("commands.ota_client.requests.get", return_value=resp), patch(
+            "commands.ota_client.time.sleep"
+        ):
+            ok, code = ota._download_to_path(
+                "https://ota.example.com/x", self.dest, max_attempts=1
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "network")
+        self.assertFalse(self.dest.exists())
 
     def test_server_ignoring_range_restarts_cleanly(self):
         """A 200 answer to a Range request means the object changed."""
@@ -2927,10 +3011,9 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
 
 
 class TestInstallCliEventReporting(unittest.TestCase):
-    """The CLI closes the attempt: terminal event, then flush."""
+    """The CLI closes the attempt, then flushes."""
 
     def _run_cli(self, overall_success):
-        """Drive install_cli_command past the per-package work to its tail."""
         import click
 
         from commands import install as install_mod
@@ -2938,8 +3021,8 @@ class TestInstallCliEventReporting(unittest.TestCase):
         with patch.object(
             install_mod, "install_command", return_value=overall_success
         ), patch.object(
-            install_mod, "record_install_event"
-        ) as mock_event, patch.object(
+            install_mod, "report_install_outcome"
+        ) as mock_outcome, patch.object(
             install_mod, "flush_install_events"
         ) as mock_flush, patch.object(
             install_mod, "flush_pending_snapshot_reports"
@@ -2953,21 +3036,75 @@ class TestInstallCliEventReporting(unittest.TestCase):
                 )
             except click.exceptions.Exit:
                 pass
-        return mock_event, mock_flush
+        return mock_outcome, mock_flush
 
-    def test_successful_run_reports_succeeded_then_flushes(self):
-        mock_event, mock_flush = self._run_cli(overall_success=True)
+    def test_successful_run_closes_the_attempt_then_flushes(self):
+        mock_outcome, mock_flush = self._run_cli(overall_success=True)
 
-        mock_event.assert_called_once()
-        self.assertEqual(mock_event.call_args.args[0], "succeeded")
+        mock_outcome.assert_called_once_with(True)
         mock_flush.assert_called_once()
 
-    def test_failed_run_still_flushes_what_was_buffered(self):
-        """A failed attempt already emitted its terminal event downstream."""
-        mock_event, mock_flush = self._run_cli(overall_success=False)
+    def test_failed_run_still_closes_and_flushes(self):
+        """A failed attempt is exactly the one that needs reporting."""
+        mock_outcome, mock_flush = self._run_cli(overall_success=False)
 
-        mock_event.assert_not_called()
+        mock_outcome.assert_called_once_with(False)
         mock_flush.assert_called_once()
+
+
+class TestInstallOutcomeDecision(unittest.TestCase):
+    """`report_install_outcome` picks the single terminal event."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        ota._install_session_id = "session-outcome"
+        ota.clear_pending_install_failure()
+
+    def tearDown(self):
+        ota._install_session_id = None
+        ota.clear_pending_install_failure()
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _events(self):
+        return ota._read_install_event_queue()
+
+    def test_nothing_is_reported_when_ota_never_started(self):
+        self.assertIsNone(ota.report_install_outcome(True))
+        self.assertEqual(self._events(), [])
+
+    def test_clean_run_reports_succeeded(self):
+        ota.record_install_event("started")
+
+        ota.report_install_outcome(True)
+
+        self.assertEqual(
+            [e["eventType"] for e in self._events()], ["started", "succeeded"]
+        )
+
+    def test_noted_failure_outranks_an_overall_success(self):
+        """The partial-archive case: install_command returns True anyway."""
+        ota.record_install_event("started")
+        ota.note_install_failure("download", "network", "pkg3 never arrived")
+
+        ota.report_install_outcome(True)
+
+        terminal = self._events()[-1]
+        self.assertEqual(terminal["eventType"], "failed")
+        self.assertEqual(terminal["stage"], "download")
+        self.assertEqual(terminal["errorCode"], "network")
+
+    def test_failure_with_nothing_noted_still_closes_the_session(self):
+        """An open session would otherwise be read as 'stale in progress'."""
+        ota.record_install_event("started")
+
+        ota.report_install_outcome(False)
+
+        terminal = self._events()[-1]
+        self.assertEqual(terminal["eventType"], "failed")
+        self.assertEqual(terminal["errorCode"], "unknown")
 
 
 class TestInstallIntegration(unittest.TestCase):

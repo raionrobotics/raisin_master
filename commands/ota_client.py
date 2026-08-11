@@ -81,6 +81,11 @@ _INSTALL_EVENT_STATE_FILE = ".ota-install-events.state.json"
 _INSTALL_EVENT_BATCH_LIMIT = 100
 _TERMINAL_EVENT_TYPES = frozenset({"succeeded", "failed", "rolled_back"})
 
+# First failure of the current attempt. A terminal event means the attempt
+# finished, so the decision is deferred to the end of the run instead of being
+# emitted from inside the package loop while downloads are still going.
+_pending_install_failure = None
+
 # Robot API key configuration. The key file is intentionally outside the repo.
 _ROBOT_API_KEY_FILE = "robot-api-key"  # pragma: allowlist secret
 _ROBOT_API_KEY_ENV = "RAISIN_ROBOT_API_KEY"  # pragma: allowlist secret
@@ -523,6 +528,61 @@ def _mark_install_event(session_id: str, marker: str) -> None:
         pass
 
 
+def note_install_failure(
+    stage: str, error_code: Optional[str], message: Optional[str] = None
+) -> None:
+    """Remember why this attempt is going to fail, without ending it yet.
+
+    The first cause wins: an attempt reports one terminal event, and the first
+    failure is what explains the rest.
+    """
+    global _pending_install_failure
+    if _pending_install_failure is None:
+        _pending_install_failure = (stage, error_code or ERROR_UNKNOWN, message)
+
+
+def pending_install_failure() -> Optional[tuple]:
+    """(stage, error_code) of this attempt's first failure, if any."""
+    if _pending_install_failure is None:
+        return None
+    return (_pending_install_failure[0], _pending_install_failure[1])
+
+
+def clear_pending_install_failure() -> None:
+    global _pending_install_failure
+    _pending_install_failure = None
+
+
+def install_attempt_started() -> bool:
+    """Whether this session already reported a `started` event."""
+    return _install_event_marker_seen(get_install_session_id(), "started")
+
+
+def report_install_outcome(overall_success: bool) -> Optional[dict]:
+    """Close the attempt with exactly one terminal event.
+
+    Only the caller knows whether the run as a whole worked, and a noted
+    failure outranks it: `install_command` returns True when *any* package
+    landed, so a partial archive install would otherwise report success.
+    """
+    if not install_attempt_started():
+        return None
+
+    failure = _pending_install_failure
+    if failure is not None:
+        stage, error_code, message = failure
+        return record_install_event(
+            "failed", stage=stage, error_code=error_code, error_message=message
+        )
+    if overall_success:
+        return record_install_event("succeeded")
+    return record_install_event(
+        "failed",
+        error_code=ERROR_UNKNOWN,
+        error_message="install did not complete",
+    )
+
+
 def record_install_event(
     event_type: str,
     stage: Optional[str] = None,
@@ -631,6 +691,7 @@ def flush_install_events() -> bool:
 def clear_install_session() -> None:
     """Retire the session so the next install starts a fresh one."""
     global _install_session_id
+    clear_pending_install_failure()
     retired = _install_session_id
     _install_session_id = None
     try:
@@ -1569,6 +1630,15 @@ def _digest_of_prefix(path: Path, length: int):
     return digest
 
 
+def _content_range_start(response_headers) -> Optional[int]:
+    """First byte offset of a 206 slice, per `Content-Range: bytes <s>-<e>/<t>`."""
+    raw = response_headers.get("Content-Range")
+    if not isinstance(raw, str):
+        return None
+    match = re.match(r"\s*bytes\s+(\d+)-", raw)
+    return int(match.group(1)) if match else None
+
+
 def _announced_body_length(response_headers) -> Optional[int]:
     """Bytes the server says this response body carries, if it says."""
     try:
@@ -1633,6 +1703,17 @@ def _attempt_download(
         if resume_from and resp.status_code != 206:
             _discard_part(part_path)
             resume_from = 0
+
+        # A slice that does not begin where we asked would be appended at the
+        # wrong offset; the hash check catches it only after the whole body has
+        # been written, and blames the wrong thing.
+        if resume_from:
+            start = _content_range_start(resp.headers)
+            if start is not None and start != resume_from:
+                _discard_part(part_path)
+                raise requests.ConnectionError(
+                    f"server resumed at byte {start}, expected {resume_from}"
+                )
 
         expected = _expected_content_hash(resp.headers)
         if not expected:
@@ -2203,6 +2284,14 @@ def download_package(
     )
 
     install_session_id = get_install_session_id()
+    record_install_event(
+        "started",
+        archive_id=archive_id,
+        archive_name=archive_name,
+        archive_version=actual_version,
+        platform=platform_str,
+        install_session_id=install_session_id,
+    )
 
     print(f"⬇️  Downloading '{package_name}' v{version} from OTA server...")
     download_ok, _download_error = _download_package_blob(
@@ -2216,6 +2305,9 @@ def download_package(
         install_session_id=install_session_id,
     )
     if not download_ok:
+        note_install_failure(
+            "download", _download_error, f"download of '{package_name}' failed"
+        )
         return None
 
     install_metadata = _build_archive_install_metadata(
@@ -2241,6 +2333,10 @@ def download_package(
         version,
         install_metadata=install_metadata,
     )
+    if not result:
+        note_install_failure(
+            "unpack", "unpack_failed", f"could not unpack '{package_name}'"
+        )
     if result:
         _queue_snapshot_report(
             install_base_path=install_base_path,
@@ -2375,12 +2471,8 @@ def download_all_from_archive(
             install_session_id=install_session_id,
         )
         if not download_ok:
-            record_install_event(
-                "failed",
-                stage="download",
-                error_code=_download_error or ERROR_UNKNOWN,
-                error_message=f"download of '{name}' failed",
-                **event_context,
+            note_install_failure(
+                "download", _download_error, f"download of '{name}' failed"
             )
             continue
 
@@ -2410,12 +2502,8 @@ def download_all_from_archive(
         if result:
             results[name] = result
         else:
-            record_install_event(
-                "failed",
-                stage="unpack",
-                error_code="unpack_failed",
-                error_message=f"could not unpack '{name}'",
-                **event_context,
+            note_install_failure(
+                "unpack", "unpack_failed", f"could not unpack '{name}'"
             )
 
     if results:
