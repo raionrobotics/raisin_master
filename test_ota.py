@@ -12,6 +12,7 @@ Usage:
 """
 
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -21,6 +22,8 @@ import tempfile
 import time
 import unittest
 import zipfile
+
+import requests
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 from click.testing import CliRunner
@@ -766,6 +769,385 @@ class TestUpload(unittest.TestCase):
 
 
 # ============================================================================
+# 4b. Download Failure Classification
+# ============================================================================
+
+
+class TestDownloadErrorClassification(unittest.TestCase):
+    """Map download failures onto the install-event error taxonomy.
+
+    Codes come from the server contract (docs/ota-install-event-contract.md):
+    network, timeout, hash_mismatch, disk_full, server_error, unknown.
+    """
+
+    def test_connection_error_is_network(self):
+        self.assertEqual(
+            ota.classify_download_error(requests.ConnectionError("refused")),
+            "network",
+        )
+
+    def test_read_timeout_is_timeout(self):
+        self.assertEqual(
+            ota.classify_download_error(requests.Timeout("read timed out")),
+            "timeout",
+        )
+
+    def test_server_5xx_is_server_error(self):
+        resp = _mock_response(status_code=503)
+        self.assertEqual(
+            ota.classify_download_error(requests.HTTPError(response=resp)),
+            "server_error",
+        )
+
+    def test_client_4xx_is_not_server_error(self):
+        """A 404 is a real answer, not an outage — retrying it is pointless."""
+        resp = _mock_response(status_code=404)
+        self.assertEqual(
+            ota.classify_download_error(requests.HTTPError(response=resp)),
+            "unknown",
+        )
+
+    def test_enospc_is_disk_full(self):
+        self.assertEqual(
+            ota.classify_download_error(OSError(errno.ENOSPC, "No space left")),
+            "disk_full",
+        )
+
+    def test_hash_mismatch_is_reported_as_such(self):
+        self.assertEqual(
+            ota.classify_download_error(ota.ContentHashMismatch("bad digest")),
+            "hash_mismatch",
+        )
+
+    def test_unrecognised_failure_is_unknown(self):
+        self.assertEqual(ota.classify_download_error(ValueError("?")), "unknown")
+
+    def test_retryable_codes_exclude_permanent_failures(self):
+        """Backoff must not burn attempts on something that cannot improve."""
+        self.assertTrue(ota.is_retryable_error_code("network"))
+        self.assertTrue(ota.is_retryable_error_code("timeout"))
+        self.assertTrue(ota.is_retryable_error_code("server_error"))
+        self.assertTrue(ota.is_retryable_error_code("hash_mismatch"))
+        self.assertFalse(ota.is_retryable_error_code("disk_full"))
+        self.assertFalse(ota.is_retryable_error_code("unknown"))
+
+
+class TestInstallSessionPersistence(unittest.TestCase):
+    """A resumed install must keep its session id.
+
+    #47 pins download authorization to the archive the session resolved to at
+    session start, so a crash-and-retry that invents a new id loses the pin and
+    the partial file it was resuming.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_script_directory = g.script_directory
+        g.script_directory = self._tmp.name
+        ota._install_session_id = None
+
+    def tearDown(self):
+        ota._install_session_id = None
+        g.script_directory = self._orig_script_directory
+        self._tmp.cleanup()
+
+    def _new_process(self):
+        """Simulate a fresh CLI process: module state gone, disk state kept."""
+        ota._install_session_id = None
+
+    def test_session_id_is_stable_within_a_process(self):
+        self.assertEqual(ota.get_install_session_id(), ota.get_install_session_id())
+
+    def test_session_id_survives_a_process_restart(self):
+        first = ota.get_install_session_id()
+        self._new_process()
+
+        self.assertEqual(ota.get_install_session_id(), first)
+
+    def test_clearing_the_session_starts_a_new_one(self):
+        first = ota.get_install_session_id()
+        ota.clear_install_session()
+        self._new_process()
+
+        self.assertNotEqual(ota.get_install_session_id(), first)
+
+    def test_stale_session_is_not_resumed(self):
+        """A session left behind by an install abandoned days ago is not ours."""
+        first = ota.get_install_session_id()
+        path = ota._install_session_path()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["startedAt"] = time.time() - (ota._INSTALL_SESSION_TTL_SECONDS + 60)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        self._new_process()
+
+        self.assertNotEqual(ota.get_install_session_id(), first)
+
+    def test_corrupt_session_file_does_not_break_the_install(self):
+        ota._install_session_path().parent.mkdir(parents=True, exist_ok=True)
+        ota._install_session_path().write_text("{not json", encoding="utf-8")
+        self._new_process()
+
+        self.assertTrue(ota.get_install_session_id())
+
+
+class TestDownloadBlobErrorPropagation(unittest.TestCase):
+    """`_download_package_blob` reports *why* it failed, not just that it did.
+
+    #29 attaches the code to a terminal install event, so it has to survive the
+    trip out of the download layer.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dest = Path(self._tmp.name) / "pkg.zip"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _call(self, **env):
+        with patch.dict(os.environ, env, clear=True), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ):
+            return ota._download_package_blob(
+                "arch-1",
+                "pkg-1",
+                "mypkg",
+                self.dest,
+                archive_name="dso",
+                archive_version="1.0.3",
+                platform_str="ubuntu-24.04-arm64",
+                install_session_id="session-1",
+            )
+
+    def test_success_reports_no_error_code(self):
+        body = b"payload"
+        resp = _mock_response(
+            iter_content=[body],
+            headers={"X-Content-Hash": hashlib.sha256(body).hexdigest()},
+        )
+        with patch("commands.ota_client.requests.get", return_value=resp):
+            ok, code = self._call(
+                RAISIN_ROBOT_API_KEY="robot-key",  # pragma: allowlist secret
+                RAISIN_ROBOT_NODE="jetson",
+            )
+
+        self.assertTrue(ok)
+        self.assertIsNone(code)
+
+    def test_robot_path_propagates_the_taxonomy_code(self):
+        with patch(
+            "commands.ota_client.requests.get",
+            side_effect=requests.ConnectionError("refused"),
+        ), patch("commands.ota_client.time.sleep"):
+            ok, code = self._call(
+                RAISIN_ROBOT_API_KEY="robot-key",  # pragma: allowlist secret
+                RAISIN_ROBOT_NODE="jetson",
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "network")
+
+    @patch("commands.ota_client._get_auth_context", return_value=("tok", {}))
+    def test_legacy_path_propagates_the_taxonomy_code(self, _ctx):
+        resp = _mock_response(status_code=503)
+        with patch(
+            "commands.ota_client.requests.get",
+            side_effect=requests.HTTPError(response=resp),
+        ), patch("commands.ota_client.time.sleep"):
+            ok, code = self._call()
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "server_error")
+
+
+class TestResumableDownload(unittest.TestCase):
+    """`_download_to_path`: atomic rename, resume, disk preflight, backoff."""
+
+    BODY = b"raisin-package-payload"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dest = Path(self._tmp.name) / "pkg.zip"
+        self.part = self.dest.with_name(self.dest.name + ".part")
+        self.digest = hashlib.sha256(self.BODY).hexdigest()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _resp(self, body, status=200, extra_headers=None):
+        headers = {"X-Content-Hash": self.digest, "Content-Length": str(len(body))}
+        headers.update(extra_headers or {})
+        return _mock_response(status_code=status, iter_content=[body], headers=headers)
+
+    def test_successful_download_lands_at_final_path(self):
+        with patch(
+            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+        ):
+            ok, code = ota._download_to_path("https://ota.example.com/x", self.dest)
+
+        self.assertTrue(ok)
+        self.assertIsNone(code)
+        self.assertEqual(self.dest.read_bytes(), self.BODY)
+        self.assertFalse(self.part.exists())
+
+    def test_hash_mismatch_never_leaves_a_file_at_the_final_path(self):
+        """A corrupt body must not be visible where the installer looks."""
+        bad = _mock_response(
+            iter_content=[b"corrupted"],
+            headers={"X-Content-Hash": self.digest, "Content-Length": "9"},
+        )
+        with patch("commands.ota_client.requests.get", return_value=bad), patch(
+            "commands.ota_client.time.sleep"
+        ):
+            ok, code = ota._download_to_path(
+                "https://ota.example.com/x", self.dest, max_attempts=1
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "hash_mismatch")
+        self.assertFalse(self.dest.exists())
+
+    def test_interrupted_download_leaves_only_a_part_file(self):
+        """The partial stays for resume, but never under the final name."""
+
+        def explode():
+            yield self.BODY[:8]
+            raise requests.ConnectionError("reset")
+
+        resp = _mock_response(
+            iter_content=explode(),
+            headers={
+                "X-Content-Hash": self.digest,
+                "Content-Length": str(len(self.BODY)),
+            },
+        )
+        with patch("commands.ota_client.requests.get", return_value=resp), patch(
+            "commands.ota_client.time.sleep"
+        ):
+            ok, code = ota._download_to_path(
+                "https://ota.example.com/x", self.dest, max_attempts=1
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "network")
+        self.assertFalse(self.dest.exists())
+        self.assertEqual(self.part.read_bytes(), self.BODY[:8])
+
+    def test_resume_sends_range_and_if_range_for_an_existing_part(self):
+        self.part.write_bytes(self.BODY[:8])
+        ota._write_part_state(self.part, self.digest)
+
+        resp = _mock_response(
+            status_code=206,
+            iter_content=[self.BODY[8:]],
+            headers={
+                "X-Content-Hash": self.digest,
+                "Content-Range": f"bytes 8-{len(self.BODY) - 1}/{len(self.BODY)}",
+            },
+        )
+        with patch("commands.ota_client.requests.get", return_value=resp) as mock_get:
+            ok, _ = ota._download_to_path("https://ota.example.com/x", self.dest)
+
+        sent = mock_get.call_args.kwargs["headers"]
+        self.assertEqual(sent["Range"], "bytes=8-")
+        self.assertEqual(sent["If-Range"], f'"{self.digest}"')
+        self.assertTrue(ok)
+        self.assertEqual(self.dest.read_bytes(), self.BODY)
+
+    def test_server_ignoring_range_restarts_cleanly(self):
+        """A 200 answer to a Range request means the object changed."""
+        self.part.write_bytes(b"stale-prefix")
+        ota._write_part_state(self.part, "0" * 64)
+
+        with patch(
+            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+        ):
+            ok, _ = ota._download_to_path("https://ota.example.com/x", self.dest)
+
+        self.assertTrue(ok)
+        self.assertEqual(self.dest.read_bytes(), self.BODY)
+
+    def test_insufficient_disk_space_fails_before_writing(self):
+        usage = MagicMock(free=16)
+        with patch("commands.ota_client.shutil.disk_usage", return_value=usage), patch(
+            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+        ):
+            ok, code = ota._download_to_path(
+                "https://ota.example.com/x", self.dest, max_attempts=1
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "disk_full")
+        self.assertFalse(self.dest.exists())
+
+    def test_transient_failure_is_retried_then_succeeds(self):
+        responses = [
+            requests.ConnectionError("reset"),
+            self._resp(self.BODY),
+        ]
+
+        def side_effect(*a, **kw):
+            item = responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with patch("commands.ota_client.requests.get", side_effect=side_effect), patch(
+            "commands.ota_client.time.sleep"
+        ) as mock_sleep:
+            ok, code = ota._download_to_path("https://ota.example.com/x", self.dest)
+
+        self.assertTrue(ok)
+        self.assertIsNone(code)
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    def test_retries_are_capped_and_report_the_last_error(self):
+        with patch(
+            "commands.ota_client.requests.get",
+            side_effect=requests.ConnectionError("reset"),
+        ) as mock_get, patch("commands.ota_client.time.sleep"):
+            ok, code = ota._download_to_path(
+                "https://ota.example.com/x", self.dest, max_attempts=3
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "network")
+        self.assertEqual(mock_get.call_count, 3)
+
+    def test_permanent_failure_is_not_retried(self):
+        usage = MagicMock(free=1)
+        with patch("commands.ota_client.shutil.disk_usage", return_value=usage), patch(
+            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+        ) as mock_get, patch("commands.ota_client.time.sleep"):
+            ok, code = ota._download_to_path(
+                "https://ota.example.com/x", self.dest, max_attempts=5
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "disk_full")
+        self.assertEqual(mock_get.call_count, 1)
+
+    def test_backoff_is_exponential_and_jittered(self):
+        delays = []
+        with patch(
+            "commands.ota_client.requests.get",
+            side_effect=requests.ConnectionError("reset"),
+        ), patch("commands.ota_client.time.sleep", side_effect=delays.append):
+            ota._download_to_path(
+                "https://ota.example.com/x", self.dest, max_attempts=4
+            )
+
+        self.assertEqual(len(delays), 3)
+        # Each window doubles; jitter keeps the delay inside it, so a
+        # synchronised fleet does not retry in lockstep.
+        for i, delay in enumerate(delays):
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, ota._BACKOFF_BASE_SECONDS * (2**i))
+        self.assertNotEqual(len(set(delays)), 1)
+
+
+# ============================================================================
 # 5. Download Tests
 # ============================================================================
 
@@ -1160,21 +1542,28 @@ class TestDownload(unittest.TestCase):
 
     @patch("commands.ota_client._get_auth_context", return_value=("tok", {}))
     @patch("commands.ota_client.requests.get")
-    def test_stream_download_removes_partial_file_on_failure(self, mock_get, _auth):
+    def test_stream_download_never_leaves_a_partial_at_the_final_path(
+        self, mock_get, _auth
+    ):
         def chunks():
             yield b"partial"
             raise ota.requests.ConnectionError("connection lost")
 
-        mock_get.return_value = _mock_response(iter_content=chunks())
+        mock_get.return_value = _mock_response(
+            iter_content=chunks(), headers={"Content-Length": "20"}
+        )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "commands.ota_client.time.sleep"
+        ):
             download_path = Path(tmpdir) / "pkg.zip"
 
-            result = ota._stream_download(
+            ok, code = ota._stream_download(
                 "https://ota.example.com/pkg.zip", download_path, "mypkg"
             )
 
-            self.assertFalse(result)
+            self.assertFalse(ok)
+            self.assertEqual(code, "network")
             self.assertFalse(download_path.exists())
 
     @patch("commands.ota_client._stream_download", return_value=True)
@@ -1290,7 +1679,7 @@ class TestDownload(unittest.TestCase):
             "arch-tagged",
             "v1.0.97",
         )
-        mock_dl.return_value = True
+        mock_dl.return_value = (True, None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             ota.download_all_from_archive("release", Path(tmpdir), tag="stable")
@@ -1312,7 +1701,7 @@ class TestDownload(unittest.TestCase):
             )
         self.assertEqual(result, {})
 
-    @patch("commands.ota_client._download_package_blob", return_value=True)
+    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
     @patch("commands.ota_client._fetch_archive_by_tag")
     def test_download_all_falls_back_to_stable_when_requested_tag_missing(
         self, mock_fetch_by_tag, _mock_dl
@@ -1350,7 +1739,7 @@ class TestDownload(unittest.TestCase):
         self, mock_dl, mock_by_tag, mock_by_version
     ):
         mock_by_version.return_value = ([], "arch-v", "v1.0.97")
-        mock_dl.return_value = True
+        mock_dl.return_value = (True, None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             ota.download_all_from_archive(
@@ -1375,7 +1764,7 @@ class TestDownload(unittest.TestCase):
             },
         ]
         mock_manifest.return_value = (packages, "arch-1", "v2024.01")
-        mock_blob.return_value = True
+        mock_blob.return_value = (True, None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
@@ -1393,7 +1782,7 @@ class TestDownload(unittest.TestCase):
             # Make _download_package_blob write the zip to disk (already done)
             def fake_download(archive_id, pkg_id, name, path, **_kwargs):
                 # File already written above
-                return True
+                return (True, None)
 
             mock_blob.side_effect = fake_download
 
@@ -1426,7 +1815,7 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(metadata["requestedArchiveVersion"], None)
         self.assertIn("installedAt", metadata)
 
-    @patch("commands.ota_client._download_package_blob", return_value=True)
+    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
     @patch("commands.ota_client._fetch_archive_manifest")
     def test_download_package_version_matching(self, mock_manifest, mock_blob):
         packages = [
@@ -1462,7 +1851,7 @@ class TestDownload(unittest.TestCase):
                 zf.writestr("release.yaml", "version: 1.5.0\n")
 
             def fake_download(archive_id, pkg_id, name, path, **_kwargs):
-                return True
+                return (True, None)
 
             mock_blob.side_effect = fake_download
 
@@ -1476,7 +1865,7 @@ class TestDownload(unittest.TestCase):
 
     @patch("commands.ota_client._queue_snapshot_report")
     @patch("commands.ota_client.get_install_session_id", return_value="session-1")
-    @patch("commands.ota_client._download_package_blob", return_value=True)
+    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
     @patch("commands.ota_client._fetch_archive_manifest")
     def test_download_package_defers_snapshot_report(
         self, mock_manifest, mock_blob, _session_id, mock_queue
@@ -1591,9 +1980,15 @@ class TestDownload(unittest.TestCase):
             )
         self.assertIsNone(result)
 
+    # Without this the test reaches the real OTA endpoint; the assertion is
+    # about tag resolution, not about downloading anything.
+    @patch(
+        "commands.ota_client._download_package_blob",
+        return_value=(False, "network"),
+    )
     @patch("commands.ota_client._fetch_archive_by_tag")
     def test_download_package_falls_back_to_stable_when_requested_tag_missing(
-        self, mock_fetch_by_tag
+        self, mock_fetch_by_tag, _mock_blob
     ):
         # latest → None; stable → valid manifest. Expect both tags queried
         # before the package lookup runs against the stable manifest.
@@ -1639,9 +2034,11 @@ class TestDownload(unittest.TestCase):
             "commands.ota_client.requests.get",
             return_value=_mock_response(iter_content=[b"abc"], headers=headers),
         ), patch(
+            "commands.ota_client.time.sleep"
+        ), patch(
             "builtins.print"
         ) as mock_print:
-            ok = ota._download_package_blob(
+            ok, _code = ota._download_package_blob(
                 "arch-1",
                 "pkg-1",
                 "mypkg",
@@ -1669,7 +2066,7 @@ class TestDownload(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertTrue(
-            any("content hash mismatch" in str(c) for c in mock_print.call_args_list)
+            any("hash_mismatch" in str(c) for c in mock_print.call_args_list)
         )
 
     def test_robot_download_verifies_against_etag_when_no_explicit_header(self):
@@ -2049,7 +2446,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
 
     @patch("commands.ota_client.report_software_snapshot", return_value=True)
     @patch("commands.ota_client.get_install_session_id", return_value="session-1")
-    @patch("commands.ota_client._download_package_blob", return_value=True)
+    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
     @patch("commands.ota_client._fetch_archive_manifest")
     def test_download_all_from_archive(
         self, mock_manifest, mock_blob, _session_id, mock_report_snapshot

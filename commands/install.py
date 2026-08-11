@@ -29,6 +29,7 @@ from commands.ota_client import (
     download_package_at_timestamp,
     download_all_from_archive,
     flush_pending_snapshot_reports,
+    clear_install_session,
 )
 
 
@@ -631,5 +632,8 @@ def install_cli_command(
 
     flush_pending_snapshot_reports()
 
+    # Keep the session on failure so a retry resumes it; retire it on success.
     if not overall_success:
         raise click.exceptions.Exit(code=1)
+
+    clear_install_session()
