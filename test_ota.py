@@ -16,6 +16,7 @@ import errno
 import hashlib
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from click.testing import CliRunner
 
 import commands.ota_client as ota
 from commands import globals as g
+from commands import install_tree
 
 
 # ---------------------------------------------------------------------------
@@ -1069,8 +1071,22 @@ class TestInstallEventEmission(unittest.TestCase):
         "2026.1.0",
     )
 
+    def _ota_install_path(self):
+        """release/install — distinct from <script_dir>/install, the build tree."""
+        path = Path(self._tmp.name) / "release" / "install"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _events(self):
         return ota._read_install_event_queue()
+
+    @staticmethod
+    def _real_extract(download_file, install_dir, package_name, version, **kw):
+        install_dir.mkdir(parents=True, exist_ok=True)
+        (install_dir / "release.yaml").write_text(
+            f"version: {version}\n", encoding="utf-8"
+        )
+        return {"version": version, "dependencies": []}
 
     @patch("commands.ota_client._extract_and_read_deps")
     @patch("commands.ota_client._download_package_blob")
@@ -1078,10 +1094,10 @@ class TestInstallEventEmission(unittest.TestCase):
     def test_started_event_names_the_archive(self, mock_manifest, mock_blob, mock_x):
         mock_manifest.return_value = self.MANIFEST
         mock_blob.return_value = (True, None)
-        mock_x.return_value = {"version": "1.0.0", "dependencies": []}
+        mock_x.side_effect = self._real_extract
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         started = [e for e in self._events() if e["eventType"] == "started"]
@@ -1100,7 +1116,7 @@ class TestInstallEventEmission(unittest.TestCase):
         mock_blob.return_value = (False, "disk_full")
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         self.assertEqual([e["eventType"] for e in self._events()], ["started"])
@@ -1116,7 +1132,7 @@ class TestInstallEventEmission(unittest.TestCase):
         mock_blob.return_value = (True, None)
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         self.assertEqual([e["eventType"] for e in self._events()], ["started"])
@@ -1141,7 +1157,7 @@ class TestInstallEventEmission(unittest.TestCase):
         mock_x.return_value = None
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         self.assertEqual(ota.pending_install_failure(), ("download", "server_error"))
@@ -1154,9 +1170,8 @@ class TestInstallEventEmission(unittest.TestCase):
     ):
         """4-of-5 installed is not a completed archive install.
 
-        install_command returns True when *any* package landed, so without the
-        noted failure the attempt would report `succeeded` while the server was
-        told a package never arrived.
+        Nothing is committed, so the previous version keeps running and the
+        attempt reports why rather than claiming success.
         """
         mock_manifest.return_value = (
             [
@@ -1170,10 +1185,10 @@ class TestInstallEventEmission(unittest.TestCase):
         mock_x.return_value = {"version": "1.0.0", "dependencies": []}
 
         results = ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
-        self.assertEqual(list(results), ["pkg2"])  # partial success
+        self.assertEqual(results, {})  # nothing committed
         self.assertIsNotNone(ota.pending_install_failure())
 
     @patch("commands.ota_client._extract_and_read_deps")
@@ -1185,10 +1200,10 @@ class TestInstallEventEmission(unittest.TestCase):
         """The download layer cannot know the install as a whole succeeded."""
         mock_manifest.return_value = self.MANIFEST
         mock_blob.return_value = (True, None)
-        mock_x.return_value = {"version": "1.0.0", "dependencies": []}
+        mock_x.side_effect = self._real_extract
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         types = [e["eventType"] for e in self._events()]
@@ -1199,6 +1214,220 @@ class TestInstallEventEmission(unittest.TestCase):
         self.assertEqual(
             [e["eventType"] for e in self._events()], ["started", "succeeded"]
         )
+
+
+class TestTransactionalArchiveInstall(unittest.TestCase):
+    """An archive install commits all-or-nothing, or not at all."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = (g.script_directory, g.os_type, g.os_version, g.architecture)
+        g.script_directory = self._tmp.name
+        g.os_type, g.os_version, g.architecture = "linux", "22.04", "x86_64"
+        ota._install_session_id = "session-tx"
+        ota._archive_cache.clear()
+        ota.clear_pending_install_failure()
+        self.release = Path(self._tmp.name) / "release"
+        self.release.mkdir(parents=True)
+        self.live = self.release / "install"
+
+    def tearDown(self):
+        ota._install_session_id = None
+        ota._archive_cache.clear()
+        ota.clear_pending_install_failure()
+        (g.script_directory, g.os_type, g.os_version, g.architecture) = self._orig
+        self._tmp.cleanup()
+
+    MANIFEST = (
+        [
+            {"packageName": "pkg1", "packageId": "p1", "tagName": "1.0.0"},
+            {"packageName": "pkg2", "packageId": "p2", "tagName": "1.0.0"},
+        ],
+        "arch-1",
+        "2026.2.0",
+    )
+
+    def _extract_into(self, staging_names):
+        """Stand in for extraction: write each package into the staged tree."""
+
+        def fake(download_file, install_dir, package_name, version, **kw):
+            if package_name not in staging_names:
+                return None
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "release.yaml").write_text(
+                f"version: {version}\n", encoding="utf-8"
+            )
+            return {"version": version, "dependencies": []}
+
+        return fake
+
+    def _run(self, installable, **kwargs):
+        with patch(
+            "commands.ota_client._fetch_archive_manifest", return_value=self.MANIFEST
+        ), patch(
+            "commands.ota_client._download_package_blob", return_value=(True, None)
+        ), patch(
+            "commands.ota_client._extract_and_read_deps",
+            side_effect=self._extract_into(installable),
+        ), patch(
+            "commands.ota_client.report_software_snapshot", return_value=True
+        ):
+            return ota.download_all_from_archive(
+                "release", self.live, archive_version="2026.2.0", **kwargs
+            )
+
+    def test_complete_install_commits_and_goes_live(self):
+        results = self._run({"pkg1", "pkg2"})
+
+        self.assertEqual(sorted(results), ["pkg1", "pkg2"])
+        self.assertTrue(self.live.is_symlink())
+        self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
+        self.assertTrue(
+            (self.live / "pkg2" / "linux" / "22.04" / "x86_64" / "release").is_dir()
+        )
+
+    def test_missing_package_does_not_commit(self):
+        """A partial archive is not an installed archive."""
+        results = self._run({"pkg1"})
+
+        self.assertEqual(results, {})
+        self.assertIsNone(install_tree.current_version(self.release))
+        self.assertIsNotNone(ota.pending_install_failure())
+
+    def test_previous_version_keeps_running_when_an_install_fails(self):
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-2"
+
+        with patch(
+            "commands.ota_client._fetch_archive_manifest",
+            return_value=(self.MANIFEST[0], "arch-2", "2026.3.0"),
+        ), patch(
+            "commands.ota_client._download_package_blob", return_value=(True, None)
+        ), patch(
+            "commands.ota_client._extract_and_read_deps",
+            side_effect=self._extract_into({"pkg1"}),
+        ):
+            ota.download_all_from_archive(
+                "release", self.live, archive_version="2026.3.0"
+            )
+
+        self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
+
+    def test_package_filter_defines_what_must_be_installed(self):
+        """`raisin install pkg1` must not fail because pkg2 is broken."""
+        results = self._run({"pkg1"}, package_filter=["pkg1"])
+
+        self.assertEqual(sorted(results), ["pkg1"])
+        self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
+
+    def test_untouched_packages_survive_a_filtered_install(self):
+        self._run({"pkg1", "pkg2"})
+        ota._install_session_id = "session-tx-3"
+        ota.clear_pending_install_failure()
+
+        with patch(
+            "commands.ota_client._fetch_archive_manifest",
+            return_value=(self.MANIFEST[0], "arch-1", "2026.3.0"),
+        ), patch(
+            "commands.ota_client._download_package_blob", return_value=(True, None)
+        ), patch(
+            "commands.ota_client._extract_and_read_deps",
+            side_effect=self._extract_into({"pkg1"}),
+        ), patch(
+            "commands.ota_client.report_software_snapshot", return_value=True
+        ):
+            ota.download_all_from_archive(
+                "release",
+                self.live,
+                archive_version="2026.3.0",
+                package_filter=["pkg1"],
+            )
+
+        self.assertTrue(
+            (self.live / "pkg2" / "linux" / "22.04" / "x86_64" / "release").is_dir()
+        )
+
+    def _run_with_hollow_extract(self, version):
+        """Extraction claims success but writes nothing — a broken commit."""
+
+        def hollow(download_file, install_dir, package_name, version_, **kw):
+            # Real extraction clears the directory before unpacking; this one
+            # clears it and then writes nothing, while claiming success.
+            if install_dir.exists():
+                shutil.rmtree(install_dir)
+            install_dir.mkdir(parents=True, exist_ok=True)
+            return {"version": version_, "dependencies": []}
+
+        with patch(
+            "commands.ota_client._fetch_archive_manifest",
+            return_value=(self.MANIFEST[0], "arch-1", version),
+        ), patch(
+            "commands.ota_client._download_package_blob", return_value=(True, None)
+        ), patch(
+            "commands.ota_client._extract_and_read_deps", side_effect=hollow
+        ), patch(
+            "commands.ota_client.report_software_snapshot", return_value=True
+        ):
+            return ota.download_all_from_archive(
+                "release", self.live, archive_version=version
+            )
+
+    def test_broken_commit_rolls_back_to_the_previous_version(self):
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-rb"
+
+        results = self._run_with_hollow_extract("2026.3.0")
+
+        self.assertEqual(results, {})
+        self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
+        self.assertTrue(
+            (self.live / "pkg2" / "linux" / "22.04" / "x86_64" / "release").is_dir()
+        )
+
+    def test_rollback_is_reported_as_rolled_back_not_failed(self):
+        """The contract separates the two: one switched and came back, one never did."""
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-rb2"
+
+        self._run_with_hollow_extract("2026.3.0")
+
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-rb2"
+            and e["eventType"] in ("failed", "rolled_back", "succeeded")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["rolled_back"])
+        self.assertEqual(terminal[0]["errorCode"], "health_check_failed")
+
+    def test_broken_first_install_cannot_roll_back_and_says_so(self):
+        """With no previous version there is nothing to restore — that is `failed`."""
+        ota._install_session_id = "session-tx-first"
+
+        self._run_with_hollow_extract("2026.2.0")
+
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-first"
+            and e["eventType"] in ("failed", "rolled_back")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
+
+    def test_a_legacy_directory_is_adopted_before_installing(self):
+        legacy_pkg = self.live / "old_pkg" / "linux" / "22.04" / "x86_64" / "release"
+        legacy_pkg.mkdir(parents=True)
+        (legacy_pkg / "release.yaml").write_text("version: 0.1\n", encoding="utf-8")
+
+        self._run({"pkg1", "pkg2"})
+
+        self.assertTrue(self.live.is_symlink())
+        # The adopted tree is the rollback target, so its packages are still there.
+        previous = install_tree.previous_version(self.release)
+        self.assertEqual(previous, "legacy")
 
 
 class TestInstallSessionPersistence(unittest.TestCase):

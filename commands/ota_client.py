@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from commands import globals as g
+from commands import install_tree
 from commands.utils import parse_version_specifier
 
 # Module-level cached auth token (lives for the CLI session)
@@ -443,6 +444,40 @@ def get_install_session_id() -> str:
     if not resumed:
         _persist_install_session(_install_session_id)
     return _install_session_id
+
+
+def _unusable_packages(install_base_path: Path, requested, build_type: str) -> list:
+    """Requested packages that are not actually present in the live tree.
+
+    This is the post-switch check. There is no process to probe — raisin_master
+    installs software, it does not run it — so what it verifies is that the
+    thing just made live is complete and readable.
+    """
+    broken = []
+    for name in sorted(requested):
+        package_dir = (
+            install_base_path
+            / name
+            / g.os_type
+            / g.os_version
+            / g.architecture
+            / build_type
+        )
+        try:
+            if not package_dir.is_dir() or not any(package_dir.iterdir()):
+                broken.append(name)
+        except OSError:
+            broken.append(name)
+    return broken
+
+
+def _version_retention() -> int:
+    """How many install trees to keep, including the live one."""
+    raw = os.environ.get("RAISIN_INSTALL_KEEP_VERSIONS", "").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
 
 
 def _utc_now_iso() -> str:
@@ -2284,6 +2319,14 @@ def download_package(
     )
 
     install_session_id = get_install_session_id()
+
+    # Keep the live symlink healthy, but note the limitation: this path writes
+    # into the tree that is already live, so a single-package install has no
+    # atomic switch and no rollback. install.py calls it once per package, so
+    # staging here would mint a version per package. Bringing it under the same
+    # transaction as download_all_from_archive is follow-up work.
+    install_tree.ensure_tree(install_tree.release_for(install_base_path))
+
     record_install_event(
         "started",
         archive_id=archive_id,
@@ -2381,6 +2424,11 @@ def download_all_from_archive(
     """
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
 
+    release = install_tree.release_for(install_base_path)
+    repaired = install_tree.ensure_tree(release)
+    if repaired:
+        print(f"🔧 {repaired}")
+
     # An explicit name or version from the caller is a deliberate pin and
     # outranks whatever the fleet has assigned. Only ask the server what to run
     # when the caller expressed no preference.
@@ -2431,6 +2479,16 @@ def download_all_from_archive(
     }
     record_install_event("started", **event_context)
 
+    # Everything below lands in a staging tree cloned from the live one.
+    # Nothing the robot runs changes until commit_version() moves the symlink.
+    staging = install_tree.stage_version(release, actual_version)
+    requested = (
+        set(package_filter)
+        if package_filter
+        else {(pkg.get("packageName") or pkg.get("name", "")) for pkg in packages}
+        - {""}
+    )
+
     results = {}
     for pkg in packages:
         name = pkg.get("packageName") or pkg.get("name", "")
@@ -2446,13 +2504,10 @@ def download_all_from_archive(
         tag = pkg.get("tagName") or pkg.get("version", "")
         version = tag.lstrip("vV") if tag else "0.0.0"
 
+        # _extract_and_read_deps removes this directory before unpacking, which
+        # is what breaks the hardlink shared with the previous version.
         install_dir = (
-            install_base_path
-            / name
-            / g.os_type
-            / g.os_version
-            / g.architecture
-            / build_type
+            staging / name / g.os_type / g.os_version / g.architecture / build_type
         )
 
         download_file = (
@@ -2506,17 +2561,73 @@ def download_all_from_archive(
                 "unpack", "unpack_failed", f"could not unpack '{name}'"
             )
 
-    if results:
-        _report_snapshot_from_install_metadata(
-            install_base_path=install_base_path,
-            archive_id=archive_id,
-            archive_name=archive_name,
-            archive_version=actual_version,
-            platform_str=platform_str,
-            build_type=build_type,
-            install_session_id=install_session_id,
-            manifest_hashes=manifest_hashes_by_package_id(packages),
+    missing = sorted(requested - set(results))
+    if missing:
+        # A partial archive is not an installed archive: leave the previous
+        # version live and report why, rather than committing something the
+        # robot was never asked to run.
+        print(
+            f"⚠️ Not committing '{archive_name}' v{actual_version}: "
+            f"{len(missing)} package(s) missing ({', '.join(missing[:3])}"
+            f"{'…' if len(missing) > 3 else ''})."
         )
+        install_tree.discard_staging(release, actual_version)
+        note_install_failure(
+            *(pending_install_failure() or ("unpack", "unpack_failed")),
+            f"incomplete archive install: missing {', '.join(missing)}",
+        )
+        return {}
+
+    install_tree.commit_version(release, actual_version)
+    print(f"🔀 Switched release/install to {archive_name} v{actual_version}.")
+
+    broken = _unusable_packages(install_base_path, requested, build_type)
+    if broken:
+        restored = install_tree.rollback(release)
+        note_install_failure(
+            "health_check",
+            "health_check_failed",
+            f"unusable after switch: {', '.join(broken)}",
+        )
+        if restored:
+            print(
+                f"↩️  Rolled back to v{restored}: {len(broken)} package(s) "
+                "unusable after the switch."
+            )
+            record_install_event(
+                "rolled_back",
+                stage="health_check",
+                error_code="health_check_failed",
+                error_message=f"unusable after switch: {', '.join(broken)}",
+                **event_context,
+            )
+        else:
+            # Nothing to restore, so this is not a rollback — the contract
+            # reserves `rolled_back` for an attempt that came back.
+            print(
+                f"⚠️ {len(broken)} package(s) unusable after the switch and no "
+                "previous version to restore."
+            )
+            record_install_event(
+                "failed",
+                stage="health_check",
+                error_code="health_check_failed",
+                error_message=f"unusable after switch: {', '.join(broken)}",
+                **event_context,
+            )
+        return {}
+
+    _report_snapshot_from_install_metadata(
+        install_base_path=install_base_path,
+        archive_id=archive_id,
+        archive_name=archive_name,
+        archive_version=actual_version,
+        platform_str=platform_str,
+        build_type=build_type,
+        install_session_id=install_session_id,
+        manifest_hashes=manifest_hashes_by_package_id(packages),
+    )
+    install_tree.prune_versions(release, keep=_version_retention())
 
     return results
 
