@@ -1538,18 +1538,25 @@ def fetch_robot_desired_state() -> Optional[dict]:
 def _resolve_desired_state(platform_str: str) -> tuple:
     """Fold the server's desired state into an archive selection.
 
-    Returns (halted, archive_name, archive_version). Name and version are None
-    whenever the server has no usable opinion, leaving the caller's own
+    Returns (halted, archive_name, archive_version, manifest). Name and version
+    are None whenever the server has no usable opinion, leaving the caller's own
     selection untouched.
+
+    `manifest` is the same `(packages, archive_id, version)` tuple
+    `_fetch_archive_manifest` produces, built from `target.packages`. That field
+    is what lets a robot install with its API key alone: the per-package
+    download endpoint needs a packageId, and every manifest route is closed to a
+    robot credential. A server that does not send it yields None here, and the
+    caller falls back to the JWT route.
     """
     state = fetch_robot_desired_state()
     if not state:
-        return (False, None, None)
+        return (False, None, None, None)
 
     if state.get("halt"):
         sources = ", ".join(state.get("haltSources") or []) or "an unknown scope"
         print(f"⛔ OTA installs are halted for this node by: {sources}.")
-        return (True, None, None)
+        return (True, None, None, None)
 
     target = state.get("target")
     if not isinstance(target, dict):
@@ -1559,7 +1566,7 @@ def _resolve_desired_state(platform_str: str) -> tuple:
                 "⚠️ The OTA server has an archive assigned to this node but "
                 f"could not resolve it: {detail}."
             )
-        return (False, None, None)
+        return (False, None, None, None)
 
     target_platform = _normalize_optional_string(target.get("platform"))
     if target_platform and target_platform != platform_str:
@@ -1567,18 +1574,25 @@ def _resolve_desired_state(platform_str: str) -> tuple:
             f"⚠️ OTA desired state targets '{target_platform}' but this node "
             f"is '{platform_str}'. Ignoring it."
         )
-        return (False, None, None)
+        return (False, None, None, None)
 
     name = _normalize_optional_string(target.get("name"))
     version = _normalize_optional_string(target.get("version"))
     if not name or not version:
-        return (False, None, None)
+        return (False, None, None, None)
 
     print(
         f"🛰️  OTA desired state ({state.get('reason')}): "
         f"{name} v{version} on {target_platform or platform_str}"
     )
-    return (False, name, version)
+
+    manifest = None
+    packages = target.get("packages")
+    archive_id = _normalize_optional_string(target.get("archiveId"))
+    if isinstance(packages, list) and packages and archive_id:
+        manifest = (packages, archive_id, version)
+
+    return (False, name, version, manifest)
 
 
 class ContentHashMismatch(Exception):
@@ -2461,15 +2475,22 @@ def download_all_from_archive(
     caller_pinned_archive = bool(archive_name) or bool(archive_version)
     archive_name = get_archive_name(build_type, archive_name)
 
+    desired_manifest = None
     if not caller_pinned_archive:
-        halted, desired_name, desired_version = _resolve_desired_state(platform_str)
+        halted, desired_name, desired_version, desired_manifest = (
+            _resolve_desired_state(platform_str)
+        )
         if halted:
             return {}
         if desired_name and desired_version:
             archive_name, archive_version = desired_name, desired_version
 
-    # Selection priority: archive_version > tag > legacy latest.
-    if archive_version:
+    # Selection priority: desired state > archive_version > tag > legacy latest.
+    # The desired-state manifest comes first because it is the only route a
+    # robot credential can read; everything below it needs a user token.
+    if desired_manifest:
+        manifest = desired_manifest
+    elif archive_version:
         manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)

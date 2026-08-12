@@ -2940,8 +2940,94 @@ class TestDownload(unittest.TestCase):
         ):
             return ota._resolve_desired_state(platform)
 
+    def test_desired_state_supplies_the_package_manifest(self):
+        """#37: the target carries the package list, so no JWT is needed."""
+        halted, name, version, manifest = self._desired_state(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "archiveId": "arch-1",
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-24.04-arm64",
+                    "packages": [
+                        {
+                            "packageId": "p1",
+                            "packageName": "pkg1",
+                            "manifestHash": "a" * 64,
+                            "tagName": "0.1.0",
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertFalse(halted)
+        self.assertEqual((name, version), ("raisin-robot", "2026.1.0"))
+        packages, archive_id, actual_version = manifest
+        self.assertEqual(archive_id, "arch-1")
+        self.assertEqual(actual_version, "2026.1.0")
+        self.assertEqual(packages[0]["packageId"], "p1")
+
+    def test_target_without_packages_supplies_no_manifest(self):
+        """An older server sends no package list; fall back to the JWT path."""
+        _halted, _name, _version, manifest = self._desired_state(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "archiveId": "arch-1",
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-24.04-arm64",
+                },
+            }
+        )
+
+        self.assertIsNone(manifest)
+
+    @patch("commands.ota_client._extract_and_read_deps")
+    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
+    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("commands.ota_client._resolve_desired_state")
+    def test_install_uses_the_desired_state_manifest_without_jwt(
+        self, mock_desired, mock_fetch, _mock_blob, mock_extract
+    ):
+        """The whole point: an API-key-only robot never touches the JWT route."""
+        packages = [
+            {
+                "packageId": "p1",
+                "packageName": "pkg1",
+                "manifestHash": "a" * 64,
+                "tagName": "0.1.0",
+            }
+        ]
+        mock_desired.return_value = (
+            False,
+            "raisin-robot",
+            "2026.1.0",
+            (packages, "arch-1", "2026.1.0"),
+        )
+
+        def extract(download_file, install_dir, package_name, version, **kw):
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "release.yaml").write_text("version: 0.1.0\n")
+            return {"version": version, "dependencies": []}
+
+        mock_extract.side_effect = extract
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            live = Path(tmpdir) / "release" / "install"
+            live.parent.mkdir(parents=True, exist_ok=True)
+            results = ota.download_all_from_archive("release", live)
+
+        self.assertEqual(sorted(results), ["pkg1"])
+        mock_fetch.assert_not_called()
+
     def test_resolve_desired_state_returns_assigned_target(self):
-        halted, name, version = self._desired_state(
+        halted, name, version, _manifest = self._desired_state(
             {
                 "halt": False,
                 "reason": "node_pin",
@@ -2957,14 +3043,14 @@ class TestDownload(unittest.TestCase):
         self.assertEqual((halted, name, version), (False, "raisin-robot", "2026.1.0"))
 
     def test_resolve_desired_state_honours_halt(self):
-        halted, name, version = self._desired_state(
+        halted, name, version, _manifest = self._desired_state(
             {"halt": True, "haltSources": ["tenant"], "reason": "node_pin"}
         )
 
         self.assertEqual((halted, name, version), (True, None, None))
 
     def test_resolve_desired_state_ignores_target_for_other_platform(self):
-        halted, name, _ = self._desired_state(
+        halted, name, _version, _manifest = self._desired_state(
             {
                 "halt": False,
                 "reason": "node_pin",
@@ -2982,7 +3068,8 @@ class TestDownload(unittest.TestCase):
     def test_resolve_desired_state_without_robot_auth_is_inert(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(
-                ota._resolve_desired_state("ubuntu-24.04-arm64"), (False, None, None)
+                ota._resolve_desired_state("ubuntu-24.04-arm64"),
+                (False, None, None, None),
             )
 
     @patch("commands.ota_client._fetch_archive_with_stable_fallback")
@@ -2990,7 +3077,7 @@ class TestDownload(unittest.TestCase):
     def test_download_all_from_archive_aborts_when_halted(
         self, mock_desired, mock_fetch
     ):
-        mock_desired.return_value = (True, None, None)
+        mock_desired.return_value = (True, None, None, None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             result = ota.download_all_from_archive("release", Path(tmpdir))
