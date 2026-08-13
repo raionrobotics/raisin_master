@@ -851,6 +851,50 @@ class TestDownloadErrorClassification(unittest.TestCase):
         self.assertFalse(ota.is_retryable_error_code("unknown"))
 
 
+class TestMalformedReleaseYaml(unittest.TestCase):
+    """A package's release.yaml is attacker- or accident-supplied content."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.download = Path(self._tmp.name) / "pkg.zip"
+        self.install_dir = Path(self._tmp.name) / "installed"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _extract_with_release_yaml(self, content):
+        with zipfile.ZipFile(self.download, "w") as zf:
+            zf.writestr("release.yaml", content)
+        return ota._extract_and_read_deps(
+            self.download, self.install_dir, "pkg1", "1.0.0"
+        )
+
+    def test_scalar_release_yaml_does_not_crash_the_install(self):
+        """yaml.safe_load returns a str here; `or {}` does not catch it."""
+        result = self._extract_with_release_yaml("just-a-string\n")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["dependencies"], [])
+
+    def test_list_release_yaml_does_not_crash_the_install(self):
+        result = self._extract_with_release_yaml("- a\n- b\n")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["dependencies"], [])
+
+    def test_non_list_dependencies_is_ignored(self):
+        result = self._extract_with_release_yaml("dependencies: oops\n")
+
+        self.assertEqual(result["dependencies"], [])
+
+    def test_well_formed_release_yaml_still_works(self):
+        result = self._extract_with_release_yaml(
+            "version: 1.0.0\ndependencies:\n  - depA\n"
+        )
+
+        self.assertEqual(result["dependencies"], ["depA"])
+
+
 class TestInstallEventQueue(unittest.TestCase):
     """On-disk install-event queue: buffering, replay safety, ordering.
 

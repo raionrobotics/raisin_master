@@ -332,6 +332,60 @@ class TestRollback(InstallTreeTestCase):
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
 
+class TestMultiCommitAttempt(InstallTreeTestCase):
+    """`raisin install --install-all` commits once per build type.
+
+    Both commits belong to one attempt, so the rollback target must stay the
+    state that existed before the attempt began — not the intermediate state
+    the attempt itself produced.
+    """
+
+    def _commit(self, version, session=None, marker=None):
+        self._write_pkg(
+            it.stage_version(self.release, version), "pkg1", marker or version
+        )
+        return it.commit_version(self.release, version, session=session)
+
+    def test_second_commit_of_one_attempt_keeps_the_original_rollback_target(self):
+        self._commit("1.0.0", marker="good")  # the state to return to
+        self._commit("2.0.0-debug", session="s1", marker="debug")
+        self._commit("2.0.0", session="s1", marker="release")
+
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+        self.assertEqual(it.previous_version(self.release), "1.0.0")
+
+    def test_rollback_after_a_two_stage_attempt_restores_the_pre_attempt_tree(self):
+        self._commit("1.0.0", marker="good")
+        self._commit("2.0.0-debug", session="s1", marker="debug")
+        self._commit("2.0.0", session="s1", marker="release")
+
+        it.rollback(self.release)
+
+        content = (
+            self.release
+            / "install"
+            / "pkg1"
+            / "linux"
+            / "22.04"
+            / "x86_64"
+            / "release"
+            / "release.yaml"
+        ).read_text()
+        self.assertIn("good", content)
+
+    def test_a_later_attempt_moves_the_rollback_target_forward(self):
+        self._commit("1.0.0", session="s1", marker="first")
+        self._commit("2.0.0", session="s2", marker="second")
+
+        self.assertEqual(it.previous_version(self.release), "1.0.0")
+
+    def test_commits_without_a_session_behave_as_before(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+
+        self.assertEqual(it.previous_version(self.release), "1.0.0")
+
+
 class TestRetention(InstallTreeTestCase):
     def _commit(self, version):
         self._write_pkg(it.stage_version(self.release, version), "pkg1", version)

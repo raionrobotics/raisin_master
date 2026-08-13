@@ -23,6 +23,7 @@ from typing import List, Optional, Tuple
 _VERSIONS_DIR = "versions"
 _CURRENT_LINK = "install"
 _PREVIOUS_FILE = ".previous-version"
+_SESSION_FILE = ".current-session"
 _LEGACY_VERSION = "legacy"
 
 _GENERATION_RE = re.compile(r"^(\d{4})-(.+)$")
@@ -159,6 +160,27 @@ def _previous_dir_name(release) -> Optional[str]:
     return name
 
 
+def _read_commit_session(release) -> Optional[str]:
+    try:
+        value = (Path(release) / _SESSION_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _write_commit_session(release, session: Optional[str]) -> None:
+    path = Path(release) / _SESSION_FILE
+    try:
+        if session is None:
+            if path.exists():
+                path.unlink()
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(session, encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _write_previous(release, dir_name: Optional[str]) -> None:
     path = _previous_file(release)
     try:
@@ -253,16 +275,30 @@ def _resolve_version_dir(release, version: str) -> Optional[Path]:
     return matches[-1] if matches else None
 
 
-def commit_version(release, version: str) -> Optional[str]:
-    """Make a staged version live. Returns the directory now current."""
+def commit_version(
+    release, version: str, session: Optional[str] = None
+) -> Optional[str]:
+    """Make a staged version live. Returns the directory now current.
+
+    `session` identifies the install attempt. One attempt can commit more than
+    once — `raisin install --install-all` runs the whole flow per build type —
+    and the rollback target must stay the state that existed *before* the
+    attempt, not the intermediate one the attempt itself produced. Rolling back
+    to that intermediate state would restore a tree that was never good: after
+    the debug pass it holds the new debug binaries and the old release ones.
+    """
     target = _resolve_version_dir(release, version)
     if target is None:
         return None
 
     outgoing = _current_dir_name(release)
+    committed_by = _read_commit_session(release)
     _point_current_at(release, target.name)
-    if outgoing and outgoing != target.name:
+
+    replacing_own_work = bool(session) and session == committed_by
+    if outgoing and outgoing != target.name and not replacing_own_work:
         _write_previous(release, outgoing)
+    _write_commit_session(release, session)
     return target.name
 
 

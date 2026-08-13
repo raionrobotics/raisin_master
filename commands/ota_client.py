@@ -1990,13 +1990,33 @@ def _extract_and_read_deps(
     print(f"✅ Successfully installed '{package_name}=={version}' from OTA server.")
     _write_install_metadata(install_dir, install_metadata)
 
-    # Read dependencies from release.yaml
+    # Read dependencies from release.yaml. The file ships inside the package,
+    # so it is not necessarily well formed: `safe_load` happily returns a str
+    # or a list, and `or {}` does not catch either — the install then died on
+    # AttributeError instead of installing.
     dependencies = []
     release_yaml = install_dir / "release.yaml"
     if release_yaml.is_file():
-        with open(release_yaml, "r") as f:
-            release_info = yaml.safe_load(f) or {}
-            dependencies = release_info.get("dependencies", [])
+        try:
+            with open(release_yaml, "r") as f:
+                release_info = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError) as e:
+            print(f"⚠️ Could not read release.yaml for '{package_name}': {e}")
+            release_info = None
+
+        if isinstance(release_info, dict):
+            declared = release_info.get("dependencies", [])
+            if isinstance(declared, list):
+                dependencies = declared
+            elif declared:
+                print(
+                    f"⚠️ Ignoring malformed 'dependencies' in release.yaml for "
+                    f"'{package_name}': expected a list."
+                )
+        elif release_info is not None:
+            print(
+                f"⚠️ Ignoring release.yaml for '{package_name}': expected a " "mapping."
+            )
 
     result = {"version": version, "dependencies": dependencies}
     if install_metadata:
@@ -2625,7 +2645,7 @@ def download_all_from_archive(
         )
         return {}
 
-    install_tree.commit_version(release, actual_version)
+    install_tree.commit_version(release, actual_version, session=install_session_id)
     print(f"🔀 Switched release/install to {archive_name} v{actual_version}.")
 
     broken = _unusable_packages(install_base_path, requested, build_type)
