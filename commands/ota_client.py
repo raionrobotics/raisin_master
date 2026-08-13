@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from commands import globals as g
+from commands import install_tree
 from commands.utils import parse_version_specifier
 
 # Module-level cached auth token (lives for the CLI session)
@@ -79,6 +80,10 @@ _INSTALL_SESSION_TTL_SECONDS = 24 * 60 * 60
 _INSTALL_EVENT_QUEUE_FILE = ".ota-install-events.jsonl"
 _INSTALL_EVENT_STATE_FILE = ".ota-install-events.state.json"
 _INSTALL_EVENT_BATCH_LIMIT = 100
+
+# An offline robot buffers indefinitely, so the queue needs a ceiling. Newest
+# events are kept: they describe the state the fleet still needs to know about.
+_MAX_BUFFERED_INSTALL_EVENTS = 1000
 _TERMINAL_EVENT_TYPES = frozenset({"succeeded", "failed", "rolled_back"})
 
 # First failure of the current attempt. A terminal event means the attempt
@@ -445,6 +450,40 @@ def get_install_session_id() -> str:
     return _install_session_id
 
 
+def _unusable_packages(install_base_path: Path, requested, build_type: str) -> list:
+    """Requested packages that are not actually present in the live tree.
+
+    This is the post-switch check. There is no process to probe — raisin_master
+    installs software, it does not run it — so what it verifies is that the
+    thing just made live is complete and readable.
+    """
+    broken = []
+    for name in sorted(requested):
+        package_dir = (
+            install_base_path
+            / name
+            / g.os_type
+            / g.os_version
+            / g.architecture
+            / build_type
+        )
+        try:
+            if not package_dir.is_dir() or not any(package_dir.iterdir()):
+                broken.append(name)
+        except OSError:
+            broken.append(name)
+    return broken
+
+
+def _version_retention() -> int:
+    """How many install trees to keep, including the live one."""
+    raw = os.environ.get("RAISIN_INSTALL_KEEP_VERSIONS", "").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
 def _utc_now_iso() -> str:
     """Client clock for `occurredAt`, at millisecond resolution.
 
@@ -528,6 +567,16 @@ def _mark_install_event(session_id: str, marker: str) -> None:
         pass
 
 
+def robot_reporting_enabled() -> bool:
+    """Whether this machine has a robot identity to attribute reports to.
+
+    `raisin_master` also runs on developer workstations, which have no robot
+    credential. Buffering install events there would grow a file that can never
+    be flushed, so nothing is recorded in the first place.
+    """
+    return bool(get_robot_api_key() and get_robot_node_key())
+
+
 def note_install_failure(
     stage: str, error_code: Optional[str], message: Optional[str] = None
 ) -> None:
@@ -558,7 +607,7 @@ def install_attempt_started() -> bool:
     return _install_event_marker_seen(get_install_session_id(), "started")
 
 
-def report_install_outcome(overall_success: bool) -> Optional[dict]:
+def report_install_outcome(overall_success: bool) -> Optional[dict]:  # noqa: C901
     """Close the attempt with exactly one terminal event.
 
     Only the caller knows whether the run as a whole worked, and a noted
@@ -604,6 +653,9 @@ def record_install_event(
 
     Returns the event, or None when the guard suppressed it.
     """
+    if not robot_reporting_enabled():
+        return None
+
     session_id = install_session_id or get_install_session_id()
     marker = "terminal" if event_type in _TERMINAL_EVENT_TYPES else event_type
     if marker in ("started", "terminal") and _install_event_marker_seen(
@@ -681,6 +733,15 @@ def flush_install_events() -> bool:
             break
 
         remaining = [e for e in remaining if e.get("eventId") not in acked]
+
+    dropped = len(remaining) - _MAX_BUFFERED_INSTALL_EVENTS
+    if dropped > 0:
+        # Keep the newest: they describe where the robot actually ended up.
+        remaining = remaining[-_MAX_BUFFERED_INSTALL_EVENTS:]
+        print(
+            f"⚠️ OTA install-event buffer is full; discarded {dropped} of the "
+            "oldest event(s)."
+        )
 
     _write_install_event_queue(remaining)
     if remaining:
@@ -1477,18 +1538,25 @@ def fetch_robot_desired_state() -> Optional[dict]:
 def _resolve_desired_state(platform_str: str) -> tuple:
     """Fold the server's desired state into an archive selection.
 
-    Returns (halted, archive_name, archive_version). Name and version are None
-    whenever the server has no usable opinion, leaving the caller's own
+    Returns (halted, archive_name, archive_version, manifest). Name and version
+    are None whenever the server has no usable opinion, leaving the caller's own
     selection untouched.
+
+    `manifest` is the same `(packages, archive_id, version)` tuple
+    `_fetch_archive_manifest` produces, built from `target.packages`. That field
+    is what lets a robot install with its API key alone: the per-package
+    download endpoint needs a packageId, and every manifest route is closed to a
+    robot credential. A server that does not send it yields None here, and the
+    caller falls back to the JWT route.
     """
     state = fetch_robot_desired_state()
     if not state:
-        return (False, None, None)
+        return (False, None, None, None)
 
     if state.get("halt"):
         sources = ", ".join(state.get("haltSources") or []) or "an unknown scope"
         print(f"⛔ OTA installs are halted for this node by: {sources}.")
-        return (True, None, None)
+        return (True, None, None, None)
 
     target = state.get("target")
     if not isinstance(target, dict):
@@ -1498,7 +1566,7 @@ def _resolve_desired_state(platform_str: str) -> tuple:
                 "⚠️ The OTA server has an archive assigned to this node but "
                 f"could not resolve it: {detail}."
             )
-        return (False, None, None)
+        return (False, None, None, None)
 
     target_platform = _normalize_optional_string(target.get("platform"))
     if target_platform and target_platform != platform_str:
@@ -1506,18 +1574,25 @@ def _resolve_desired_state(platform_str: str) -> tuple:
             f"⚠️ OTA desired state targets '{target_platform}' but this node "
             f"is '{platform_str}'. Ignoring it."
         )
-        return (False, None, None)
+        return (False, None, None, None)
 
     name = _normalize_optional_string(target.get("name"))
     version = _normalize_optional_string(target.get("version"))
     if not name or not version:
-        return (False, None, None)
+        return (False, None, None, None)
 
     print(
         f"🛰️  OTA desired state ({state.get('reason')}): "
         f"{name} v{version} on {target_platform or platform_str}"
     )
-    return (False, name, version)
+
+    manifest = None
+    packages = target.get("packages")
+    archive_id = _normalize_optional_string(target.get("archiveId"))
+    if isinstance(packages, list) and packages and archive_id:
+        manifest = (packages, archive_id, version)
+
+    return (False, name, version, manifest)
 
 
 class ContentHashMismatch(Exception):
@@ -1576,6 +1651,10 @@ _MAX_DOWNLOAD_ATTEMPTS = 4
 # Partial downloads live beside the target under this suffix, never at the
 # final path — the installer must never see a half-written archive.
 _PART_SUFFIX = ".part"
+
+# A partial nobody came back for is not worth resuming: the archive may have
+# moved on, and nothing else ever removes it.
+_PART_MAX_AGE_SECONDS = 24 * 60 * 60
 
 # Refuse a download that would leave no room to unpack what it just fetched.
 _DISK_HEADROOM_BYTES = 16 * 1024 * 1024
@@ -1685,6 +1764,15 @@ def _attempt_download(
     if existing and not known_hash:
         _discard_part(part_path)
         existing = 0
+
+    if existing:
+        try:
+            age = time.time() - part_path.stat().st_mtime
+        except OSError:
+            age = 0
+        if age > _PART_MAX_AGE_SECONDS:
+            _discard_part(part_path)
+            existing = 0
 
     request_headers = dict(headers or {})
     if existing:
@@ -1915,13 +2003,33 @@ def _extract_and_read_deps(
     print(f"✅ Successfully installed '{package_name}=={version}' from OTA server.")
     _write_install_metadata(install_dir, install_metadata)
 
-    # Read dependencies from release.yaml
+    # Read dependencies from release.yaml. The file ships inside the package,
+    # so it is not necessarily well formed: `safe_load` happily returns a str
+    # or a list, and `or {}` does not catch either — the install then died on
+    # AttributeError instead of installing.
     dependencies = []
     release_yaml = install_dir / "release.yaml"
     if release_yaml.is_file():
-        with open(release_yaml, "r") as f:
-            release_info = yaml.safe_load(f) or {}
-            dependencies = release_info.get("dependencies", [])
+        try:
+            with open(release_yaml, "r") as f:
+                release_info = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError) as e:
+            print(f"⚠️ Could not read release.yaml for '{package_name}': {e}")
+            release_info = None
+
+        if isinstance(release_info, dict):
+            declared = release_info.get("dependencies", [])
+            if isinstance(declared, list):
+                dependencies = declared
+            elif declared:
+                print(
+                    f"⚠️ Ignoring malformed 'dependencies' in release.yaml for "
+                    f"'{package_name}': expected a list."
+                )
+        elif release_info is not None:
+            print(
+                f"⚠️ Ignoring release.yaml for '{package_name}': expected a " "mapping."
+            )
 
     result = {"version": version, "dependencies": dependencies}
     if install_metadata:
@@ -2284,6 +2392,14 @@ def download_package(
     )
 
     install_session_id = get_install_session_id()
+
+    # Keep the live symlink healthy, but note the limitation: this path writes
+    # into the tree that is already live, so a single-package install has no
+    # atomic switch and no rollback. install.py calls it once per package, so
+    # staging here would mint a version per package. Bringing it under the same
+    # transaction as download_all_from_archive is follow-up work.
+    install_tree.ensure_tree(install_tree.release_for(install_base_path))
+
     record_install_event(
         "started",
         archive_id=archive_id,
@@ -2381,21 +2497,33 @@ def download_all_from_archive(
     """
     platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
 
+    release = install_tree.release_for(install_base_path)
+    repaired = install_tree.ensure_tree(release)
+    if repaired:
+        print(f"🔧 {repaired}")
+
     # An explicit name or version from the caller is a deliberate pin and
     # outranks whatever the fleet has assigned. Only ask the server what to run
     # when the caller expressed no preference.
     caller_pinned_archive = bool(archive_name) or bool(archive_version)
     archive_name = get_archive_name(build_type, archive_name)
 
+    desired_manifest = None
     if not caller_pinned_archive:
-        halted, desired_name, desired_version = _resolve_desired_state(platform_str)
+        halted, desired_name, desired_version, desired_manifest = (
+            _resolve_desired_state(platform_str)
+        )
         if halted:
             return {}
         if desired_name and desired_version:
             archive_name, archive_version = desired_name, desired_version
 
-    # Selection priority: archive_version > tag > legacy latest.
-    if archive_version:
+    # Selection priority: desired state > archive_version > tag > legacy latest.
+    # The desired-state manifest comes first because it is the only route a
+    # robot credential can read; everything below it needs a user token.
+    if desired_manifest:
+        manifest = desired_manifest
+    elif archive_version:
         manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
@@ -2431,6 +2559,16 @@ def download_all_from_archive(
     }
     record_install_event("started", **event_context)
 
+    # Everything below lands in a staging tree cloned from the live one.
+    # Nothing the robot runs changes until commit_version() moves the symlink.
+    staging = install_tree.stage_version(release, actual_version)
+    requested = (
+        set(package_filter)
+        if package_filter
+        else {(pkg.get("packageName") or pkg.get("name", "")) for pkg in packages}
+        - {""}
+    )
+
     results = {}
     for pkg in packages:
         name = pkg.get("packageName") or pkg.get("name", "")
@@ -2446,13 +2584,10 @@ def download_all_from_archive(
         tag = pkg.get("tagName") or pkg.get("version", "")
         version = tag.lstrip("vV") if tag else "0.0.0"
 
+        # _extract_and_read_deps removes this directory before unpacking, which
+        # is what breaks the hardlink shared with the previous version.
         install_dir = (
-            install_base_path
-            / name
-            / g.os_type
-            / g.os_version
-            / g.architecture
-            / build_type
+            staging / name / g.os_type / g.os_version / g.architecture / build_type
         )
 
         download_file = (
@@ -2506,17 +2641,73 @@ def download_all_from_archive(
                 "unpack", "unpack_failed", f"could not unpack '{name}'"
             )
 
-    if results:
-        _report_snapshot_from_install_metadata(
-            install_base_path=install_base_path,
-            archive_id=archive_id,
-            archive_name=archive_name,
-            archive_version=actual_version,
-            platform_str=platform_str,
-            build_type=build_type,
-            install_session_id=install_session_id,
-            manifest_hashes=manifest_hashes_by_package_id(packages),
+    missing = sorted(requested - set(results))
+    if missing:
+        # A partial archive is not an installed archive: leave the previous
+        # version live and report why, rather than committing something the
+        # robot was never asked to run.
+        print(
+            f"⚠️ Not committing '{archive_name}' v{actual_version}: "
+            f"{len(missing)} package(s) missing ({', '.join(missing[:3])}"
+            f"{'…' if len(missing) > 3 else ''})."
         )
+        install_tree.discard_staging(release, actual_version)
+        note_install_failure(
+            *(pending_install_failure() or ("unpack", "unpack_failed")),
+            f"incomplete archive install: missing {', '.join(missing)}",
+        )
+        return {}
+
+    install_tree.commit_version(release, actual_version, session=install_session_id)
+    print(f"🔀 Switched release/install to {archive_name} v{actual_version}.")
+
+    broken = _unusable_packages(install_base_path, requested, build_type)
+    if broken:
+        restored = install_tree.rollback(release)
+        note_install_failure(
+            "health_check",
+            "health_check_failed",
+            f"unusable after switch: {', '.join(broken)}",
+        )
+        if restored:
+            print(
+                f"↩️  Rolled back to v{restored}: {len(broken)} package(s) "
+                "unusable after the switch."
+            )
+            record_install_event(
+                "rolled_back",
+                stage="health_check",
+                error_code="health_check_failed",
+                error_message=f"unusable after switch: {', '.join(broken)}",
+                **event_context,
+            )
+        else:
+            # Nothing to restore, so this is not a rollback — the contract
+            # reserves `rolled_back` for an attempt that came back.
+            print(
+                f"⚠️ {len(broken)} package(s) unusable after the switch and no "
+                "previous version to restore."
+            )
+            record_install_event(
+                "failed",
+                stage="health_check",
+                error_code="health_check_failed",
+                error_message=f"unusable after switch: {', '.join(broken)}",
+                **event_context,
+            )
+        return {}
+
+    _report_snapshot_from_install_metadata(
+        install_base_path=install_base_path,
+        archive_id=archive_id,
+        archive_name=archive_name,
+        archive_version=actual_version,
+        platform_str=platform_str,
+        build_type=build_type,
+        install_session_id=install_session_id,
+        manifest_hashes=manifest_hashes_by_package_id(packages),
+    )
+    install_tree.prune_versions(release, keep=_version_retention())
 
     return results
 

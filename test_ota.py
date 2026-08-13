@@ -16,6 +16,7 @@ import errno
 import hashlib
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from click.testing import CliRunner
 
 import commands.ota_client as ota
 from commands import globals as g
+from commands import install_tree
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +61,23 @@ def _mock_response(
     resp.__enter__ = MagicMock(return_value=resp)
     resp.__exit__ = MagicMock(return_value=False)
     return resp
+
+
+def _as_robot(testcase):
+    """Give a test the robot identity that install-event recording requires.
+
+    `raisin_master` also runs on developer workstations, which have none — and
+    there it records nothing at all.
+    """
+    env = patch.dict(
+        os.environ,
+        {
+            "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+            "RAISIN_ROBOT_NODE": "jetson",
+        },
+    )
+    env.start()
+    testcase.addCleanup(env.stop)
 
 
 def _make_sshsig(raw_sig=None):
@@ -832,6 +851,50 @@ class TestDownloadErrorClassification(unittest.TestCase):
         self.assertFalse(ota.is_retryable_error_code("unknown"))
 
 
+class TestMalformedReleaseYaml(unittest.TestCase):
+    """A package's release.yaml is attacker- or accident-supplied content."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.download = Path(self._tmp.name) / "pkg.zip"
+        self.install_dir = Path(self._tmp.name) / "installed"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _extract_with_release_yaml(self, content):
+        with zipfile.ZipFile(self.download, "w") as zf:
+            zf.writestr("release.yaml", content)
+        return ota._extract_and_read_deps(
+            self.download, self.install_dir, "pkg1", "1.0.0"
+        )
+
+    def test_scalar_release_yaml_does_not_crash_the_install(self):
+        """yaml.safe_load returns a str here; `or {}` does not catch it."""
+        result = self._extract_with_release_yaml("just-a-string\n")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["dependencies"], [])
+
+    def test_list_release_yaml_does_not_crash_the_install(self):
+        result = self._extract_with_release_yaml("- a\n- b\n")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["dependencies"], [])
+
+    def test_non_list_dependencies_is_ignored(self):
+        result = self._extract_with_release_yaml("dependencies: oops\n")
+
+        self.assertEqual(result["dependencies"], [])
+
+    def test_well_formed_release_yaml_still_works(self):
+        result = self._extract_with_release_yaml(
+            "version: 1.0.0\ndependencies:\n  - depA\n"
+        )
+
+        self.assertEqual(result["dependencies"], ["depA"])
+
+
 class TestInstallEventQueue(unittest.TestCase):
     """On-disk install-event queue: buffering, replay safety, ordering.
 
@@ -845,6 +908,7 @@ class TestInstallEventQueue(unittest.TestCase):
         g.script_directory = self._tmp.name
         ota._install_session_id = "session-29"
         ota.clear_pending_install_failure()
+        _as_robot(self)
 
     def tearDown(self):
         ota._install_session_id = None
@@ -1024,6 +1088,60 @@ class TestInstallEventQueue(unittest.TestCase):
         self.assertEqual(posted, [ota._INSTALL_EVENT_BATCH_LIMIT, 5])
         self.assertEqual(self._queued(), [])
 
+    def test_no_robot_identity_records_nothing(self):
+        """A developer PC has no robot to attribute install events to.
+
+        Buffering them there grows a file that can never be flushed.
+        """
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(ota.record_install_event("started"))
+            self.assertIsNone(ota.report_install_outcome(True))
+
+        self.assertEqual(self._queued(), [])
+        self.assertFalse(ota._install_event_queue_path().exists())
+
+    def test_api_key_without_a_node_records_nothing(self):
+        """Half-configured is not configured: the reports would be rejected."""
+        with patch.dict(
+            os.environ,
+            {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
+            clear=True,
+        ), patch("builtins.print"):
+            ota.record_install_event("started")
+
+        self.assertEqual(self._queued(), [])
+
+    def test_queue_is_capped_so_a_long_outage_cannot_grow_it_forever(self):
+        cap = ota._MAX_BUFFERED_INSTALL_EVENTS
+        for i in range(cap + 25):
+            ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.post",
+            side_effect=requests.ConnectionError("offline"),
+        ), patch(
+            "builtins.print"
+        ) as mock_print:
+            ota.flush_install_events()
+
+        remaining = self._queued()
+        self.assertEqual(len(remaining), cap)
+        # The newest events are the ones worth keeping.
+        self.assertEqual(remaining[-1]["eventId"], f"e{cap + 24}")
+        self.assertTrue(
+            any("discard" in str(c).lower() for c in mock_print.call_args_list)
+        )
+
     def test_flush_without_robot_auth_is_a_noop_that_keeps_the_queue(self):
         ota.record_install_event("started")
 
@@ -1050,6 +1168,7 @@ class TestInstallEventEmission(unittest.TestCase):
         ota._install_session_id = "session-emit"
         ota._archive_cache.clear()
         ota.clear_pending_install_failure()
+        _as_robot(self)
 
     def tearDown(self):
         ota._install_session_id = None
@@ -1069,8 +1188,22 @@ class TestInstallEventEmission(unittest.TestCase):
         "2026.1.0",
     )
 
+    def _ota_install_path(self):
+        """release/install — distinct from <script_dir>/install, the build tree."""
+        path = Path(self._tmp.name) / "release" / "install"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _events(self):
         return ota._read_install_event_queue()
+
+    @staticmethod
+    def _real_extract(download_file, install_dir, package_name, version, **kw):
+        install_dir.mkdir(parents=True, exist_ok=True)
+        (install_dir / "release.yaml").write_text(
+            f"version: {version}\n", encoding="utf-8"
+        )
+        return {"version": version, "dependencies": []}
 
     @patch("commands.ota_client._extract_and_read_deps")
     @patch("commands.ota_client._download_package_blob")
@@ -1078,10 +1211,10 @@ class TestInstallEventEmission(unittest.TestCase):
     def test_started_event_names_the_archive(self, mock_manifest, mock_blob, mock_x):
         mock_manifest.return_value = self.MANIFEST
         mock_blob.return_value = (True, None)
-        mock_x.return_value = {"version": "1.0.0", "dependencies": []}
+        mock_x.side_effect = self._real_extract
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         started = [e for e in self._events() if e["eventType"] == "started"]
@@ -1100,7 +1233,7 @@ class TestInstallEventEmission(unittest.TestCase):
         mock_blob.return_value = (False, "disk_full")
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         self.assertEqual([e["eventType"] for e in self._events()], ["started"])
@@ -1116,7 +1249,7 @@ class TestInstallEventEmission(unittest.TestCase):
         mock_blob.return_value = (True, None)
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         self.assertEqual([e["eventType"] for e in self._events()], ["started"])
@@ -1141,7 +1274,7 @@ class TestInstallEventEmission(unittest.TestCase):
         mock_x.return_value = None
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         self.assertEqual(ota.pending_install_failure(), ("download", "server_error"))
@@ -1154,9 +1287,8 @@ class TestInstallEventEmission(unittest.TestCase):
     ):
         """4-of-5 installed is not a completed archive install.
 
-        install_command returns True when *any* package landed, so without the
-        noted failure the attempt would report `succeeded` while the server was
-        told a package never arrived.
+        Nothing is committed, so the previous version keeps running and the
+        attempt reports why rather than claiming success.
         """
         mock_manifest.return_value = (
             [
@@ -1170,10 +1302,10 @@ class TestInstallEventEmission(unittest.TestCase):
         mock_x.return_value = {"version": "1.0.0", "dependencies": []}
 
         results = ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
-        self.assertEqual(list(results), ["pkg2"])  # partial success
+        self.assertEqual(results, {})  # nothing committed
         self.assertIsNotNone(ota.pending_install_failure())
 
     @patch("commands.ota_client._extract_and_read_deps")
@@ -1185,10 +1317,10 @@ class TestInstallEventEmission(unittest.TestCase):
         """The download layer cannot know the install as a whole succeeded."""
         mock_manifest.return_value = self.MANIFEST
         mock_blob.return_value = (True, None)
-        mock_x.return_value = {"version": "1.0.0", "dependencies": []}
+        mock_x.side_effect = self._real_extract
 
         ota.download_all_from_archive(
-            "release", Path(self._tmp.name) / "install", archive_version="2026.1.0"
+            "release", self._ota_install_path(), archive_version="2026.1.0"
         )
 
         types = [e["eventType"] for e in self._events()]
@@ -1199,6 +1331,221 @@ class TestInstallEventEmission(unittest.TestCase):
         self.assertEqual(
             [e["eventType"] for e in self._events()], ["started", "succeeded"]
         )
+
+
+class TestTransactionalArchiveInstall(unittest.TestCase):
+    """An archive install commits all-or-nothing, or not at all."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = (g.script_directory, g.os_type, g.os_version, g.architecture)
+        g.script_directory = self._tmp.name
+        g.os_type, g.os_version, g.architecture = "linux", "22.04", "x86_64"
+        ota._install_session_id = "session-tx"
+        ota._archive_cache.clear()
+        ota.clear_pending_install_failure()
+        _as_robot(self)
+        self.release = Path(self._tmp.name) / "release"
+        self.release.mkdir(parents=True)
+        self.live = self.release / "install"
+
+    def tearDown(self):
+        ota._install_session_id = None
+        ota._archive_cache.clear()
+        ota.clear_pending_install_failure()
+        (g.script_directory, g.os_type, g.os_version, g.architecture) = self._orig
+        self._tmp.cleanup()
+
+    MANIFEST = (
+        [
+            {"packageName": "pkg1", "packageId": "p1", "tagName": "1.0.0"},
+            {"packageName": "pkg2", "packageId": "p2", "tagName": "1.0.0"},
+        ],
+        "arch-1",
+        "2026.2.0",
+    )
+
+    def _extract_into(self, staging_names):
+        """Stand in for extraction: write each package into the staged tree."""
+
+        def fake(download_file, install_dir, package_name, version, **kw):
+            if package_name not in staging_names:
+                return None
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "release.yaml").write_text(
+                f"version: {version}\n", encoding="utf-8"
+            )
+            return {"version": version, "dependencies": []}
+
+        return fake
+
+    def _run(self, installable, **kwargs):
+        with patch(
+            "commands.ota_client._fetch_archive_manifest", return_value=self.MANIFEST
+        ), patch(
+            "commands.ota_client._download_package_blob", return_value=(True, None)
+        ), patch(
+            "commands.ota_client._extract_and_read_deps",
+            side_effect=self._extract_into(installable),
+        ), patch(
+            "commands.ota_client.report_software_snapshot", return_value=True
+        ):
+            return ota.download_all_from_archive(
+                "release", self.live, archive_version="2026.2.0", **kwargs
+            )
+
+    def test_complete_install_commits_and_goes_live(self):
+        results = self._run({"pkg1", "pkg2"})
+
+        self.assertEqual(sorted(results), ["pkg1", "pkg2"])
+        self.assertTrue(self.live.is_symlink())
+        self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
+        self.assertTrue(
+            (self.live / "pkg2" / "linux" / "22.04" / "x86_64" / "release").is_dir()
+        )
+
+    def test_missing_package_does_not_commit(self):
+        """A partial archive is not an installed archive."""
+        results = self._run({"pkg1"})
+
+        self.assertEqual(results, {})
+        self.assertIsNone(install_tree.current_version(self.release))
+        self.assertIsNotNone(ota.pending_install_failure())
+
+    def test_previous_version_keeps_running_when_an_install_fails(self):
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-2"
+
+        with patch(
+            "commands.ota_client._fetch_archive_manifest",
+            return_value=(self.MANIFEST[0], "arch-2", "2026.3.0"),
+        ), patch(
+            "commands.ota_client._download_package_blob", return_value=(True, None)
+        ), patch(
+            "commands.ota_client._extract_and_read_deps",
+            side_effect=self._extract_into({"pkg1"}),
+        ):
+            ota.download_all_from_archive(
+                "release", self.live, archive_version="2026.3.0"
+            )
+
+        self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
+
+    def test_package_filter_defines_what_must_be_installed(self):
+        """`raisin install pkg1` must not fail because pkg2 is broken."""
+        results = self._run({"pkg1"}, package_filter=["pkg1"])
+
+        self.assertEqual(sorted(results), ["pkg1"])
+        self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
+
+    def test_untouched_packages_survive_a_filtered_install(self):
+        self._run({"pkg1", "pkg2"})
+        ota._install_session_id = "session-tx-3"
+        ota.clear_pending_install_failure()
+
+        with patch(
+            "commands.ota_client._fetch_archive_manifest",
+            return_value=(self.MANIFEST[0], "arch-1", "2026.3.0"),
+        ), patch(
+            "commands.ota_client._download_package_blob", return_value=(True, None)
+        ), patch(
+            "commands.ota_client._extract_and_read_deps",
+            side_effect=self._extract_into({"pkg1"}),
+        ), patch(
+            "commands.ota_client.report_software_snapshot", return_value=True
+        ):
+            ota.download_all_from_archive(
+                "release",
+                self.live,
+                archive_version="2026.3.0",
+                package_filter=["pkg1"],
+            )
+
+        self.assertTrue(
+            (self.live / "pkg2" / "linux" / "22.04" / "x86_64" / "release").is_dir()
+        )
+
+    def _run_with_hollow_extract(self, version):
+        """Extraction claims success but writes nothing — a broken commit."""
+
+        def hollow(download_file, install_dir, package_name, version_, **kw):
+            # Real extraction clears the directory before unpacking; this one
+            # clears it and then writes nothing, while claiming success.
+            if install_dir.exists():
+                shutil.rmtree(install_dir)
+            install_dir.mkdir(parents=True, exist_ok=True)
+            return {"version": version_, "dependencies": []}
+
+        with patch(
+            "commands.ota_client._fetch_archive_manifest",
+            return_value=(self.MANIFEST[0], "arch-1", version),
+        ), patch(
+            "commands.ota_client._download_package_blob", return_value=(True, None)
+        ), patch(
+            "commands.ota_client._extract_and_read_deps", side_effect=hollow
+        ), patch(
+            "commands.ota_client.report_software_snapshot", return_value=True
+        ):
+            return ota.download_all_from_archive(
+                "release", self.live, archive_version=version
+            )
+
+    def test_broken_commit_rolls_back_to_the_previous_version(self):
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-rb"
+
+        results = self._run_with_hollow_extract("2026.3.0")
+
+        self.assertEqual(results, {})
+        self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
+        self.assertTrue(
+            (self.live / "pkg2" / "linux" / "22.04" / "x86_64" / "release").is_dir()
+        )
+
+    def test_rollback_is_reported_as_rolled_back_not_failed(self):
+        """The contract separates the two: one switched and came back, one never did."""
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-rb2"
+
+        self._run_with_hollow_extract("2026.3.0")
+
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-rb2"
+            and e["eventType"] in ("failed", "rolled_back", "succeeded")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["rolled_back"])
+        self.assertEqual(terminal[0]["errorCode"], "health_check_failed")
+
+    def test_broken_first_install_cannot_roll_back_and_says_so(self):
+        """With no previous version there is nothing to restore — that is `failed`."""
+        ota._install_session_id = "session-tx-first"
+
+        self._run_with_hollow_extract("2026.2.0")
+
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-first"
+            and e["eventType"] in ("failed", "rolled_back")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
+
+    def test_a_legacy_directory_is_adopted_before_installing(self):
+        legacy_pkg = self.live / "old_pkg" / "linux" / "22.04" / "x86_64" / "release"
+        legacy_pkg.mkdir(parents=True)
+        (legacy_pkg / "release.yaml").write_text("version: 0.1\n", encoding="utf-8")
+
+        self._run({"pkg1", "pkg2"})
+
+        self.assertTrue(self.live.is_symlink())
+        # The adopted tree is the rollback target, so its packages are still there.
+        previous = install_tree.previous_version(self.release)
+        self.assertEqual(previous, "legacy")
 
 
 class TestInstallSessionPersistence(unittest.TestCase):
@@ -1451,6 +1798,22 @@ class TestResumableDownload(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(code, "network")
         self.assertFalse(self.dest.exists())
+
+    def test_a_stale_partial_is_discarded_rather_than_resumed(self):
+        """A .part nobody came back for should not be appended to forever."""
+        self.part.write_bytes(self.BODY[:8])
+        ota._write_part_state(self.part, self.digest)
+        stale = time.time() - (ota._PART_MAX_AGE_SECONDS + 60)
+        os.utime(self.part, (stale, stale))
+
+        with patch(
+            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+        ) as mock_get:
+            ok, _ = ota._download_to_path("https://ota.example.com/x", self.dest)
+
+        self.assertTrue(ok)
+        self.assertEqual(self.dest.read_bytes(), self.BODY)
+        self.assertNotIn("Range", mock_get.call_args.kwargs["headers"])
 
     def test_server_ignoring_range_restarts_cleanly(self):
         """A 200 answer to a Range request means the object changed."""
@@ -2637,8 +3000,94 @@ class TestDownload(unittest.TestCase):
         ):
             return ota._resolve_desired_state(platform)
 
+    def test_desired_state_supplies_the_package_manifest(self):
+        """#37: the target carries the package list, so no JWT is needed."""
+        halted, name, version, manifest = self._desired_state(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "archiveId": "arch-1",
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-24.04-arm64",
+                    "packages": [
+                        {
+                            "packageId": "p1",
+                            "packageName": "pkg1",
+                            "manifestHash": "a" * 64,
+                            "tagName": "0.1.0",
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertFalse(halted)
+        self.assertEqual((name, version), ("raisin-robot", "2026.1.0"))
+        packages, archive_id, actual_version = manifest
+        self.assertEqual(archive_id, "arch-1")
+        self.assertEqual(actual_version, "2026.1.0")
+        self.assertEqual(packages[0]["packageId"], "p1")
+
+    def test_target_without_packages_supplies_no_manifest(self):
+        """An older server sends no package list; fall back to the JWT path."""
+        _halted, _name, _version, manifest = self._desired_state(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "archiveId": "arch-1",
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-24.04-arm64",
+                },
+            }
+        )
+
+        self.assertIsNone(manifest)
+
+    @patch("commands.ota_client._extract_and_read_deps")
+    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
+    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("commands.ota_client._resolve_desired_state")
+    def test_install_uses_the_desired_state_manifest_without_jwt(
+        self, mock_desired, mock_fetch, _mock_blob, mock_extract
+    ):
+        """The whole point: an API-key-only robot never touches the JWT route."""
+        packages = [
+            {
+                "packageId": "p1",
+                "packageName": "pkg1",
+                "manifestHash": "a" * 64,
+                "tagName": "0.1.0",
+            }
+        ]
+        mock_desired.return_value = (
+            False,
+            "raisin-robot",
+            "2026.1.0",
+            (packages, "arch-1", "2026.1.0"),
+        )
+
+        def extract(download_file, install_dir, package_name, version, **kw):
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "release.yaml").write_text("version: 0.1.0\n")
+            return {"version": version, "dependencies": []}
+
+        mock_extract.side_effect = extract
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            live = Path(tmpdir) / "release" / "install"
+            live.parent.mkdir(parents=True, exist_ok=True)
+            results = ota.download_all_from_archive("release", live)
+
+        self.assertEqual(sorted(results), ["pkg1"])
+        mock_fetch.assert_not_called()
+
     def test_resolve_desired_state_returns_assigned_target(self):
-        halted, name, version = self._desired_state(
+        halted, name, version, _manifest = self._desired_state(
             {
                 "halt": False,
                 "reason": "node_pin",
@@ -2654,14 +3103,14 @@ class TestDownload(unittest.TestCase):
         self.assertEqual((halted, name, version), (False, "raisin-robot", "2026.1.0"))
 
     def test_resolve_desired_state_honours_halt(self):
-        halted, name, version = self._desired_state(
+        halted, name, version, _manifest = self._desired_state(
             {"halt": True, "haltSources": ["tenant"], "reason": "node_pin"}
         )
 
         self.assertEqual((halted, name, version), (True, None, None))
 
     def test_resolve_desired_state_ignores_target_for_other_platform(self):
-        halted, name, _ = self._desired_state(
+        halted, name, _version, _manifest = self._desired_state(
             {
                 "halt": False,
                 "reason": "node_pin",
@@ -2679,7 +3128,8 @@ class TestDownload(unittest.TestCase):
     def test_resolve_desired_state_without_robot_auth_is_inert(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(
-                ota._resolve_desired_state("ubuntu-24.04-arm64"), (False, None, None)
+                ota._resolve_desired_state("ubuntu-24.04-arm64"),
+                (False, None, None, None),
             )
 
     @patch("commands.ota_client._fetch_archive_with_stable_fallback")
@@ -2687,7 +3137,7 @@ class TestDownload(unittest.TestCase):
     def test_download_all_from_archive_aborts_when_halted(
         self, mock_desired, mock_fetch
     ):
-        mock_desired.return_value = (True, None, None)
+        mock_desired.return_value = (True, None, None, None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             result = ota.download_all_from_archive("release", Path(tmpdir))
@@ -3032,7 +3482,7 @@ class TestInstallCliEventReporting(unittest.TestCase):
             try:
                 # It is a click Command; call the underlying function.
                 install_mod.install_cli_command.callback(
-                    ["mypkg"], "release", False, None, None, None, False, "stable"
+                    ["mypkg"], "release", None, None, None, False, "stable"
                 )
             except click.exceptions.Exit:
                 pass
@@ -3061,6 +3511,7 @@ class TestInstallOutcomeDecision(unittest.TestCase):
         g.script_directory = self._tmp.name
         ota._install_session_id = "session-outcome"
         ota.clear_pending_install_failure()
+        _as_robot(self)
 
     def tearDown(self):
         ota._install_session_id = None
