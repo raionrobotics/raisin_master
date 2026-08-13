@@ -1652,6 +1652,10 @@ _MAX_DOWNLOAD_ATTEMPTS = 4
 # final path — the installer must never see a half-written archive.
 _PART_SUFFIX = ".part"
 
+# A partial nobody came back for is not worth resuming: the archive may have
+# moved on, and nothing else ever removes it.
+_PART_MAX_AGE_SECONDS = 24 * 60 * 60
+
 # Refuse a download that would leave no room to unpack what it just fetched.
 _DISK_HEADROOM_BYTES = 16 * 1024 * 1024
 
@@ -1760,6 +1764,15 @@ def _attempt_download(
     if existing and not known_hash:
         _discard_part(part_path)
         existing = 0
+
+    if existing:
+        try:
+            age = time.time() - part_path.stat().st_mtime
+        except OSError:
+            age = 0
+        if age > _PART_MAX_AGE_SECONDS:
+            _discard_part(part_path)
+            existing = 0
 
     request_headers = dict(headers or {})
     if existing:

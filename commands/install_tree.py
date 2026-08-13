@@ -24,6 +24,7 @@ _VERSIONS_DIR = "versions"
 _CURRENT_LINK = "install"
 _PREVIOUS_FILE = ".previous-version"
 _SESSION_FILE = ".current-session"
+_STAGING_MARKER = ".staging"
 _LEGACY_VERSION = "legacy"
 
 _GENERATION_RE = re.compile(r"^(\d{4})-(.+)$")
@@ -251,7 +252,18 @@ def stage_version(release, version: str) -> Path:
         _clone_tree(current_dir, staging)
     else:
         staging.mkdir(parents=True, exist_ok=True)
+
+    # Marked until committed, so a tree left behind by a crash is recognisable
+    # as abandoned rather than counted as a version worth retaining.
+    try:
+        (staging / _STAGING_MARKER).write_text("", encoding="utf-8")
+    except OSError:
+        pass
     return staging
+
+
+def _is_staging(version_dir: Path) -> bool:
+    return (version_dir / _STAGING_MARKER).exists()
 
 
 def replace_package_dir(staging: Path, relative: Path) -> Path:
@@ -290,6 +302,11 @@ def commit_version(
     target = _resolve_version_dir(release, version)
     if target is None:
         return None
+
+    try:
+        (target / _STAGING_MARKER).unlink()
+    except OSError:
+        pass
 
     outgoing = _current_dir_name(release)
     committed_by = _read_commit_session(release)
@@ -332,13 +349,27 @@ def discard_staging(release, version: str) -> None:
 
 
 def prune_versions(release, keep: int = 2) -> List[str]:
-    """Drop old generations, never the live one or its rollback target."""
+    """Drop old generations, never the live one or its rollback target.
+
+    Abandoned staging trees are removed outright rather than counted toward
+    `keep`: nothing points at them, and being the newest generations they would
+    otherwise take the slots real versions should hold — so `keep=2` would stop
+    meaning two versions.
+    """
     generations = _generations(release)
     protected = {_current_dir_name(release), _previous_dir_name(release)}
     keep = max(1, keep)
 
     removed = []
-    for _, _, entry in generations[:-keep] if keep < len(generations) else []:
+    committed = []
+    for _, _, entry in generations:
+        if _is_staging(entry) and entry.name not in protected:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed.append(entry.name)
+        else:
+            committed.append(entry)
+
+    for entry in committed[:-keep] if keep < len(committed) else []:
         if entry.name in protected:
             continue
         shutil.rmtree(entry, ignore_errors=True)

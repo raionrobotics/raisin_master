@@ -402,6 +402,25 @@ class TestRetention(InstallTreeTestCase):
         )
         self.assertEqual(kept, ["3.0.0", "4.0.0"])
 
+    def test_abandoned_staging_does_not_consume_retention_slots(self):
+        """A crash between stage and commit leaves a tree nothing points at.
+
+        Counting it toward `keep` makes the retention setting mean something
+        other than what it says, and the orphans are the newest generations so
+        they take the slots real versions should hold.
+        """
+        for v in ("1.0.0", "2.0.0", "3.0.0"):
+            self._commit(v)
+        for i in range(3):
+            it.stage_version(self.release, f"9.9.{i}")  # never committed
+
+        it.prune_versions(self.release, keep=2)
+
+        kept = sorted(
+            p.name.split("-", 1)[1] for p in (self.release / "versions").iterdir()
+        )
+        self.assertEqual(kept, ["2.0.0", "3.0.0"])
+
     def test_pruning_never_removes_the_live_or_previous_version(self):
         self._commit("1.0.0")
         self._commit("2.0.0")

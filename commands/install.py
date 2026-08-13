@@ -522,13 +522,6 @@ def install_command(
     help="Build type to install",
 )
 @click.option(
-    "--all",
-    "-a",
-    "install_all",
-    is_flag=True,
-    help="Install both debug and release builds",
-)
-@click.option(
     "--archive-version",
     "-v",
     "archive_version",
@@ -569,7 +562,6 @@ def install_command(
 def install_cli_command(
     packages,
     build_type,
-    install_all,
     archive_version,
     archive_name,
     at_timestamp,
@@ -585,7 +577,6 @@ def install_cli_command(
         raisin install raisin_network                # Install specific package
         raisin install raisin_network==1.1.0         # Install specific version
         raisin install --type debug                  # Install debug builds
-        raisin install --all                         # Install both debug and release
         raisin install --archive-version v2024.01   # Install from specific archive
         raisin install --archive-name team-robot    # Install from a custom archive name
         raisin install --at 2024-01-15               # Install packages at timestamp
@@ -593,10 +584,7 @@ def install_cli_command(
     """
     packages = list(packages)
 
-    if install_all:
-        build_types = ["debug", "release"]
-    else:
-        build_types = [build_type]
+    build_types = [build_type]
 
     # Run every build_type even if an earlier one fails so the user sees the
     # full picture, then exit non-zero if any of them reported failure. That's

@@ -1799,6 +1799,22 @@ class TestResumableDownload(unittest.TestCase):
         self.assertEqual(code, "network")
         self.assertFalse(self.dest.exists())
 
+    def test_a_stale_partial_is_discarded_rather_than_resumed(self):
+        """A .part nobody came back for should not be appended to forever."""
+        self.part.write_bytes(self.BODY[:8])
+        ota._write_part_state(self.part, self.digest)
+        stale = time.time() - (ota._PART_MAX_AGE_SECONDS + 60)
+        os.utime(self.part, (stale, stale))
+
+        with patch(
+            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+        ) as mock_get:
+            ok, _ = ota._download_to_path("https://ota.example.com/x", self.dest)
+
+        self.assertTrue(ok)
+        self.assertEqual(self.dest.read_bytes(), self.BODY)
+        self.assertNotIn("Range", mock_get.call_args.kwargs["headers"])
+
     def test_server_ignoring_range_restarts_cleanly(self):
         """A 200 answer to a Range request means the object changed."""
         self.part.write_bytes(b"stale-prefix")
@@ -3466,7 +3482,7 @@ class TestInstallCliEventReporting(unittest.TestCase):
             try:
                 # It is a click Command; call the underlying function.
                 install_mod.install_cli_command.callback(
-                    ["mypkg"], "release", False, None, None, None, False, "stable"
+                    ["mypkg"], "release", None, None, None, False, "stable"
                 )
             except click.exceptions.Exit:
                 pass
