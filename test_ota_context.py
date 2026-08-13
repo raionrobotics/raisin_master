@@ -5,9 +5,11 @@ has no CLI, needs different values per deployment, and must not import a module
 whose contract is "the CLI filled this in". These tests pin the boundary.
 """
 
+import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -73,6 +75,85 @@ class TestOtaContext(unittest.TestCase):
 
         self.assertEqual(ota._ctx().platform, "ubuntu-22.04-x86_64")
         self.assertEqual(ota._install_session_path().parent, other / "install")
+
+
+class TestRobotIdentityIsInjected(unittest.TestCase):
+    """The core is told who it is; it does not go looking.
+
+    Resolving a credential means knowing about env vars, config files and a
+    developer's HOME. A robot on a service account and a developer at a shell
+    answer those differently, and the core should not have to care — nor should
+    a human running the tool on a robot be silently attributed to the robot
+    because a key file happened to be on disk.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved = ota._context
+
+    def tearDown(self):
+        ota._context = self._saved
+        self._tmp.cleanup()
+
+    def _configure(self, robot=None):
+        ota.configure(
+            ota.OtaContext(
+                workspace=Path(self._tmp.name),
+                os_type="ubuntu",
+                os_version="24.04",
+                architecture="arm64",
+                robot=robot,
+            )
+        )
+
+    def test_headers_come_from_the_injected_identity(self):
+        self._configure(
+            ota.RobotIdentity(
+                api_key="rk_test",  # pragma: allowlist secret
+                node_key="jetson",
+                client_version="agent/1.2",
+            )
+        )
+
+        headers = ota._robot_auth_headers("session-1")
+
+        self.assertEqual(headers["Authorization"], "Robot rk_test")
+        self.assertEqual(headers["X-Robot-Node"], "jetson")
+        self.assertEqual(headers["X-Client-Version"], "agent/1.2")
+        self.assertEqual(headers["X-Install-Session-Id"], "session-1")
+
+    def test_no_identity_means_no_robot_requests(self):
+        self._configure(robot=None)
+
+        self.assertIsNone(ota._robot_auth_headers("session-1"))
+        self.assertFalse(ota.robot_reporting_enabled())
+
+    def test_environment_alone_does_not_grant_a_robot_identity(self):
+        """The caller decides who it is — not whatever is lying on the machine."""
+        self._configure(robot=None)
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "rk_from_env",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ):
+            self.assertIsNone(ota._robot_auth_headers("session-1"))
+            self.assertFalse(ota.robot_reporting_enabled())
+
+    def test_credential_resolution_is_not_the_core_s_job(self):
+        removed = [
+            "get_robot_api_key",
+            "get_robot_node_key",
+            "get_robot_api_key_path",
+            "save_robot_api_key",
+            "_load_local_config",
+        ]
+        still_here = [n for n in removed if hasattr(ota, n)]
+
+        self.assertEqual(still_here, [])
 
 
 class TestCoreDoesNotImportCliGlobals(unittest.TestCase):

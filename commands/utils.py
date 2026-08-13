@@ -378,8 +378,9 @@ def init_environment(script_file_path, yes_flag):
         always_yes=yes_flag,
     )
 
-    # The OTA core does not read these globals; hand it the same values.
-    from commands import ota_client
+    # The OTA core does not read these globals, nor does it resolve a
+    # credential; hand it both.
+    from commands import ota_client, robot_credentials
 
     ota_client.configure(
         ota_client.OtaContext(
@@ -387,6 +388,7 @@ def init_environment(script_file_path, yes_flag):
             os_type=os_type,
             os_version=os_version,
             architecture=architecture,
+            robot=robot_credentials.resolve_robot_identity(),
         )
     )
 

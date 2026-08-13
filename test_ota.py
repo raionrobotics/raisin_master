@@ -12,6 +12,7 @@ Usage:
 """
 
 import base64
+import contextlib
 import errno
 import hashlib
 import json
@@ -30,6 +31,7 @@ from unittest.mock import MagicMock, patch, call
 from click.testing import CliRunner
 
 import commands.ota_client as ota
+import commands.robot_credentials as rc
 from commands import globals as g
 from commands import install_tree
 
@@ -63,6 +65,16 @@ def _mock_response(
     return resp
 
 
+# Identity the core is configured with while a test declares itself a robot.
+_TEST_ROBOT = None
+
+TEST_ROBOT_IDENTITY = ota.RobotIdentity(
+    api_key="robot-key",  # pragma: allowlist secret
+    node_key="jetson",
+    client_version="raisin-cli",
+)
+
+
 def _sync_ota_context():
     """Point the OTA core at whatever the CLI globals currently hold.
 
@@ -75,25 +87,60 @@ def _sync_ota_context():
             os_type=g.os_type,
             os_version=g.os_version,
             architecture=g.architecture,
+            robot=_TEST_ROBOT,
         )
     )
 
 
-def _as_robot(testcase):
-    """Give a test the robot identity that install-event recording requires.
-
-    `raisin_master` also runs on developer workstations, which have none — and
-    there it records nothing at all.
-    """
-    env = patch.dict(
-        os.environ,
-        {
-            "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-            "RAISIN_ROBOT_NODE": "jetson",
-        },
+@contextlib.contextmanager
+def _robot_identity(client_version="raisin-cli"):
+    """Run a block as a configured robot, as `init_environment` would."""
+    global _TEST_ROBOT
+    previous = _TEST_ROBOT
+    _TEST_ROBOT = ota.RobotIdentity(
+        api_key="robot-key",  # pragma: allowlist secret
+        node_key="jetson",
+        client_version=client_version,
     )
-    env.start()
-    testcase.addCleanup(env.stop)
+    _sync_ota_context()
+    try:
+        yield
+    finally:
+        _TEST_ROBOT = previous
+        _sync_ota_context()
+
+
+@contextlib.contextmanager
+def _no_robot_identity():
+    """Run a block as a machine with no robot credential."""
+    global _TEST_ROBOT
+    previous = _TEST_ROBOT
+    _TEST_ROBOT = None
+    _sync_ota_context()
+    try:
+        yield
+    finally:
+        _TEST_ROBOT = previous
+        _sync_ota_context()
+
+
+def _as_robot(testcase, identity=TEST_ROBOT_IDENTITY):
+    """Give a test the robot identity that robot-authenticated calls require.
+
+    The CLI also runs on developer workstations, which have none — and there
+    the core makes no robot requests and records nothing.
+    """
+    global _TEST_ROBOT
+    previous = _TEST_ROBOT
+    _TEST_ROBOT = identity
+    _sync_ota_context()
+
+    def _restore():
+        global _TEST_ROBOT
+        _TEST_ROBOT = previous
+        _sync_ota_context()
+
+    testcase.addCleanup(_restore)
 
 
 def _make_sshsig(raw_sig=None):
@@ -154,14 +201,14 @@ class TestConfiguration(unittest.TestCase):
         self._orig_script_directory = g.script_directory
         g.script_directory = self._tmpdir.name
         _sync_ota_context()
-        ota._robot_api_key_cache.clear()
-        ota._robot_auth_warning_keys.clear()
-        ota._local_config_cache.clear()
+        rc._robot_api_key_cache.clear()
+        rc._robot_auth_warning_keys.clear()
+        rc._local_config_cache.clear()
 
     def tearDown(self):
-        ota._robot_api_key_cache.clear()
-        ota._robot_auth_warning_keys.clear()
-        ota._local_config_cache.clear()
+        rc._robot_api_key_cache.clear()
+        rc._robot_auth_warning_keys.clear()
+        rc._local_config_cache.clear()
         g.script_directory = self._orig_script_directory
         _sync_ota_context()
         self._tmpdir.cleanup()
@@ -210,7 +257,7 @@ class TestConfiguration(unittest.TestCase):
             },
             clear=True,
         ):
-            self.assertEqual(ota.get_robot_api_key(), "robot-key")
+            self.assertEqual(rc.get_robot_api_key(), "robot-key")
 
     def test_get_robot_api_key_from_config_yaml(self):
         config_path = Path(g.script_directory) / "configuration_setting.yaml"
@@ -220,7 +267,7 @@ class TestConfiguration(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(ota.get_robot_api_key(), "config-robot-key")
+            self.assertEqual(rc.get_robot_api_key(), "config-robot-key")
 
     def test_get_robot_api_key_env_overrides_config_yaml(self):
         config_path = Path(g.script_directory) / "configuration_setting.yaml"
@@ -236,11 +283,11 @@ class TestConfiguration(unittest.TestCase):
             },
             clear=True,
         ):
-            self.assertEqual(ota.get_robot_api_key(), "env-robot-key")
+            self.assertEqual(rc.get_robot_api_key(), "env-robot-key")
 
     def test_get_robot_node_key_from_env(self):
         with patch.dict(os.environ, {"RAISIN_ROBOT_NODE": " jetson "}, clear=True):
-            self.assertEqual(ota.get_robot_node_key(), "jetson")
+            self.assertEqual(rc.get_robot_node_key(), "jetson")
 
     def test_get_robot_node_key_from_config_yaml(self):
         config_path = Path(g.script_directory) / "configuration_setting.yaml"
@@ -250,7 +297,7 @@ class TestConfiguration(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(ota.get_robot_node_key(), "vision")
+            self.assertEqual(rc.get_robot_node_key(), "vision")
 
     def test_save_and_read_robot_api_key_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -260,12 +307,12 @@ class TestConfiguration(unittest.TestCase):
                 {"RAISIN_ROBOT_API_KEY_FILE": str(key_path)},
                 clear=True,
             ):
-                saved_path = ota.save_robot_api_key(" robot-key ")
+                saved_path = rc.save_robot_api_key(" robot-key ")
                 self.assertEqual(saved_path, key_path)
                 if os.name == "posix":
                     self.assertEqual(saved_path.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(ota.get_robot_api_key(), "robot-key")
-                self.assertEqual(ota._robot_api_key_cache[key_path][1], "robot-key")
+                self.assertEqual(rc.get_robot_api_key(), "robot-key")
+                self.assertEqual(rc._robot_api_key_cache[key_path][1], "robot-key")
 
     def test_missing_pinned_robot_api_key_file_warns(self):
         """An explicitly pinned path that yields nothing must not fail quietly."""
@@ -275,7 +322,7 @@ class TestConfiguration(unittest.TestCase):
             {"RAISIN_ROBOT_API_KEY_FILE": str(missing)},
             clear=True,
         ), patch("builtins.print") as mock_print:
-            self.assertIsNone(ota.get_robot_api_key())
+            self.assertIsNone(rc.get_robot_api_key())
 
         self.assertTrue(
             any(
@@ -292,18 +339,18 @@ class TestConfiguration(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {}, clear=True):
-            first = ota._load_local_config()
+            first = rc._load_local_config()
             for _ in range(4):
-                ota._load_local_config()
+                rc._load_local_config()
             self.assertEqual(first.get("robot", {}).get("api_key"), "cfg-key")
-            self.assertEqual(len(ota._local_config_cache), 1)
+            self.assertEqual(len(rc._local_config_cache), 1)
 
             # A rewrite must invalidate the cache rather than serve stale values.
             os.utime(config_path, (0, 0))
             config_path.write_text(
                 "robot:\n  api_key: rotated-key\n  node: primary\n", encoding="utf-8"
             )
-            self.assertEqual(ota.get_robot_api_key(), "rotated-key")
+            self.assertEqual(rc.get_robot_api_key(), "rotated-key")
 
     @unittest.skipIf(os.name != "posix", "POSIX file permission check")
     def test_insecure_robot_api_key_file_is_ignored(self):
@@ -316,7 +363,7 @@ class TestConfiguration(unittest.TestCase):
                 {"RAISIN_ROBOT_API_KEY_FILE": str(key_path)},
                 clear=True,
             ):
-                self.assertIsNone(ota.get_robot_api_key())
+                self.assertIsNone(rc.get_robot_api_key())
 
     @unittest.skipIf(os.name != "posix", "POSIX file permission check")
     def test_insecure_robot_api_key_file_warning_is_cached(self):
@@ -329,8 +376,8 @@ class TestConfiguration(unittest.TestCase):
                 {"RAISIN_ROBOT_API_KEY_FILE": str(key_path)},
                 clear=True,
             ), patch("builtins.print") as mock_print:
-                self.assertIsNone(ota.get_robot_api_key())
-                self.assertIsNone(ota.get_robot_api_key())
+                self.assertIsNone(rc.get_robot_api_key())
+                self.assertIsNone(rc.get_robot_api_key())
 
             mock_print.assert_called_once()
 
@@ -995,14 +1042,7 @@ class TestInstallEventQueue(unittest.TestCase):
         queued = self._queued()
         acks = [{"eventId": e["eventId"], "status": "created"} for e in queued]
 
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-            },
-            clear=True,
-        ), patch(
+        with _robot_identity(), patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
         ), patch(
@@ -1024,14 +1064,7 @@ class TestInstallEventQueue(unittest.TestCase):
     def test_offline_flush_keeps_the_queue_for_later(self):
         ota.record_install_event("started")
 
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-            },
-            clear=True,
-        ), patch(
+        with _robot_identity(), patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
         ), patch(
@@ -1048,14 +1081,7 @@ class TestInstallEventQueue(unittest.TestCase):
         ota.record_install_event("started")
         first = [e["eventId"] for e in self._queued()]
 
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-            },
-            clear=True,
-        ), patch(
+        with _robot_identity(), patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
         ), patch(
@@ -1098,19 +1124,10 @@ class TestInstallEventQueue(unittest.TestCase):
                 }
             )
 
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-            },
-            clear=True,
-        ), patch(
+        with _robot_identity(), patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
-        ), patch(
-            "commands.ota_client.requests.post", side_effect=capture
-        ):
+        ), patch("commands.ota_client.requests.post", side_effect=capture):
             ota.flush_install_events()
 
         self.assertEqual(posted, [ota._INSTALL_EVENT_BATCH_LIMIT, 5])
@@ -1121,21 +1138,24 @@ class TestInstallEventQueue(unittest.TestCase):
 
         Buffering them there grows a file that can never be flushed.
         """
-        with patch.dict(os.environ, {}, clear=True):
+        with _no_robot_identity():
             self.assertIsNone(ota.record_install_event("started"))
             self.assertIsNone(ota.report_install_outcome(True))
 
         self.assertEqual(self._queued(), [])
         self.assertFalse(ota._install_event_queue_path().exists())
 
-    def test_api_key_without_a_node_records_nothing(self):
-        """Half-configured is not configured: the reports would be rejected."""
+    def test_half_a_credential_yields_no_identity_so_nothing_is_recorded(self):
+        """Resolution refuses it, and the core is then simply unconfigured."""
         with patch.dict(
             os.environ,
             {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
             clear=True,
         ), patch("builtins.print"):
-            ota.record_install_event("started")
+            self.assertIsNone(rc.resolve_robot_identity())
+
+        with _no_robot_identity():
+            self.assertIsNone(ota.record_install_event("started"))
 
         self.assertEqual(self._queued(), [])
 
@@ -1144,14 +1164,7 @@ class TestInstallEventQueue(unittest.TestCase):
         for i in range(cap + 25):
             ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
 
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-            },
-            clear=True,
-        ), patch(
+        with _robot_identity(), patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
         ), patch(
@@ -1654,8 +1667,9 @@ class TestDownloadBlobErrorPropagation(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _call(self, **env):
-        with patch.dict(os.environ, env, clear=True), patch(
+    def _call(self, robot=True):
+        identity = _robot_identity() if robot else _no_robot_identity()
+        with identity, patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
         ):
@@ -1677,10 +1691,7 @@ class TestDownloadBlobErrorPropagation(unittest.TestCase):
             headers={"X-Content-Hash": hashlib.sha256(body).hexdigest()},
         )
         with patch("commands.ota_client.requests.get", return_value=resp):
-            ok, code = self._call(
-                RAISIN_ROBOT_API_KEY="robot-key",  # pragma: allowlist secret
-                RAISIN_ROBOT_NODE="jetson",
-            )
+            ok, code = self._call(robot=True)
 
         self.assertTrue(ok)
         self.assertIsNone(code)
@@ -1690,10 +1701,7 @@ class TestDownloadBlobErrorPropagation(unittest.TestCase):
             "commands.ota_client.requests.get",
             side_effect=requests.ConnectionError("refused"),
         ), patch("commands.ota_client.time.sleep"):
-            ok, code = self._call(
-                RAISIN_ROBOT_API_KEY="robot-key",  # pragma: allowlist secret
-                RAISIN_ROBOT_NODE="jetson",
-            )
+            ok, code = self._call(robot=True)
 
         self.assertFalse(ok)
         self.assertEqual(code, "network")
@@ -1705,7 +1713,7 @@ class TestDownloadBlobErrorPropagation(unittest.TestCase):
             "commands.ota_client.requests.get",
             side_effect=requests.HTTPError(response=resp),
         ), patch("commands.ota_client.time.sleep"):
-            ok, code = self._call()
+            ok, code = self._call(robot=False)
 
         self.assertFalse(ok)
         self.assertEqual(code, "server_error")
@@ -1954,10 +1962,10 @@ class TestDownload(unittest.TestCase):
         ota._auth_failed = False
         ota._archive_cache.clear()
         ota._install_session_id = None
-        ota._robot_api_key_cache.clear()
+        rc._robot_api_key_cache.clear()
         ota._pending_snapshot_reports.clear()
-        ota._robot_auth_warning_keys.clear()
-        ota._local_config_cache.clear()
+        rc._robot_auth_warning_keys.clear()
+        rc._local_config_cache.clear()
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
@@ -1978,8 +1986,8 @@ class TestDownload(unittest.TestCase):
         ota._archive_cache.clear()
         ota._install_session_id = None
         ota._pending_snapshot_reports.clear()
-        ota._robot_auth_warning_keys.clear()
-        ota._local_config_cache.clear()
+        rc._robot_auth_warning_keys.clear()
+        rc._local_config_cache.clear()
         g.os_type = self._orig_os_type
         _sync_ota_context()
         g.os_version = self._orig_os_version
@@ -2263,15 +2271,7 @@ class TestDownload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             download_path = Path(tmpdir) / "pkg.zip"
-            with patch.dict(
-                os.environ,
-                {
-                    "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                    "RAISIN_ROBOT_NODE": "jetson",
-                    "RAISIN_OTA_CLIENT_VERSION": "raisin-cli-test",
-                },
-                clear=True,
-            ):
+            with _robot_identity("raisin-cli-test"):
                 result = ota._download_package_blob(
                     "arch-1",
                     "pkg-1",
@@ -2311,35 +2311,16 @@ class TestDownload(unittest.TestCase):
         )
         self.assertEqual(call_args.kwargs["headers"]["X-Robot-Node"], "jetson")
 
-    @patch("commands.ota_client._stream_download", return_value=True)
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    def test_download_package_blob_falls_back_without_robot_node(
-        self, _ep, mock_stream
-    ):
+    def test_key_without_a_node_is_not_a_usable_identity(self):
+        """Robot endpoints resolve a node, so half a credential fails every call."""
         with patch.dict(
             os.environ,
             {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
             clear=True,
         ), patch("builtins.print") as mock_print:
-            result = ota._download_package_blob(
-                "arch-1",
-                "pkg-1",
-                "mypkg",
-                Path("/tmp/pkg.zip"),
-                archive_name="dso",
-                archive_version="1.0.3",
-                platform_str="ubuntu-24.04-arm64",
-                install_session_id="session-1",
-            )
+            identity = rc.resolve_robot_identity()
 
-        self.assertTrue(result)
-        mock_stream.assert_called_once_with(
-            "https://ota.example.com/archives/arch-1/packages/pkg-1/download",
-            Path("/tmp/pkg.zip"),
-            "mypkg",
-        )
+        self.assertIsNone(identity)
         mock_print.assert_called_once()
 
     @patch("commands.ota_client._get_auth_context", return_value=("tok", {}))
@@ -2409,15 +2390,7 @@ class TestDownload(unittest.TestCase):
             }
         ]
 
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-                "RAISIN_CLIENT_VERSION": "raisin-cli-test",
-            },
-            clear=True,
-        ):
+        with _robot_identity("raisin-cli-test"):
             result = ota.report_software_snapshot(
                 archive_id="arch-1",
                 archive_name="dso",
@@ -2829,14 +2802,7 @@ class TestDownload(unittest.TestCase):
 
     def _robot_download(self, headers, target):
         """Run a robot-authenticated download of b'abc' with the given headers."""
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-            },
-            clear=True,
-        ), patch(
+        with _robot_identity(), patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
         ), patch(
@@ -3031,14 +2997,7 @@ class TestDownload(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _desired_state(self, payload, platform="ubuntu-24.04-arm64"):
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-            },
-            clear=True,
-        ), patch(
+        with _robot_identity(), patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
         ), patch(
@@ -3176,14 +3135,7 @@ class TestDownload(unittest.TestCase):
         self.assertIsNone(name)
 
     def _desired_state_output(self, payload, platform="ubuntu-24.04-arm64"):
-        with patch.dict(
-            os.environ,
-            {
-                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
-                "RAISIN_ROBOT_NODE": "jetson",
-            },
-            clear=True,
-        ), patch(
+        with _robot_identity(), patch(
             "commands.ota_client.get_ota_endpoint",
             return_value="https://ota.example.com",
         ), patch(
@@ -3265,9 +3217,9 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._auth_failed = False
         ota._archive_cache.clear()
         ota._install_session_id = None
-        ota._robot_api_key_cache.clear()
-        ota._robot_auth_warning_keys.clear()
-        ota._local_config_cache.clear()
+        rc._robot_api_key_cache.clear()
+        rc._robot_auth_warning_keys.clear()
+        rc._local_config_cache.clear()
         self._orig_os_type = g.os_type
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
@@ -3288,9 +3240,9 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._archive_cache.clear()
         ota._install_session_id = None
         ota._pending_snapshot_reports.clear()
-        ota._robot_api_key_cache.clear()
-        ota._robot_auth_warning_keys.clear()
-        ota._local_config_cache.clear()
+        rc._robot_api_key_cache.clear()
+        rc._robot_auth_warning_keys.clear()
+        rc._local_config_cache.clear()
         g.os_type = self._orig_os_type
         _sync_ota_context()
         g.os_version = self._orig_os_version
