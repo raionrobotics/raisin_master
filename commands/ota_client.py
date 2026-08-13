@@ -11,8 +11,10 @@ All operations fail gracefully — OTA is supplementary, never blocks existing f
 """
 
 import base64
+import errno
 import json
 import os
+import random
 import re
 import hashlib
 import shutil
@@ -66,6 +68,11 @@ _TOKEN_CACHE_FILE = ".ota_token_cache.json"
 
 # Per-install metadata file written after OTA extraction
 _INSTALL_METADATA_FILE = "ota-install.json"
+
+# Correlation id for one install, persisted so a crashed run resumes the same
+# session rather than inventing a new one.
+_INSTALL_SESSION_FILE = ".ota-session.json"
+_INSTALL_SESSION_TTL_SECONDS = 24 * 60 * 60
 
 # Robot API key configuration. The key file is intentionally outside the repo.
 _ROBOT_API_KEY_FILE = "robot-api-key"  # pragma: allowlist secret
@@ -372,12 +379,68 @@ def get_client_version() -> str:
     return DEFAULT_CLIENT_VERSION
 
 
+def _install_session_path() -> Path:
+    return Path(g.script_directory) / "install" / _INSTALL_SESSION_FILE
+
+
+def _read_install_session() -> Optional[str]:
+    """Recover the session an interrupted install was using, if still current."""
+    try:
+        data = json.loads(_install_session_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    session_id = data.get("installSessionId")
+    started_at = data.get("startedAt")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if not isinstance(started_at, (int, float)):
+        return None
+    if time.time() - started_at > _INSTALL_SESSION_TTL_SECONDS:
+        return None
+    return session_id
+
+
+def _persist_install_session(session_id: str) -> None:
+    path = _install_session_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"installSessionId": session_id, "startedAt": time.time()}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def get_install_session_id() -> str:
-    """Return a stable install session id for this CLI process."""
+    """Return the install session id, resuming an interrupted one if present.
+
+    A retry after a crash has to keep the same id: the server pins download
+    authorization to what desired state resolved at session start, and the
+    partial files on disk belong to that session.
+    """
     global _install_session_id
-    if not _install_session_id:
-        _install_session_id = str(uuid.uuid4())
+    if _install_session_id:
+        return _install_session_id
+
+    resumed = _read_install_session()
+    _install_session_id = resumed or str(uuid.uuid4())
+    if not resumed:
+        _persist_install_session(_install_session_id)
     return _install_session_id
+
+
+def clear_install_session() -> None:
+    """Retire the session so the next install starts a fresh one."""
+    global _install_session_id
+    _install_session_id = None
+    try:
+        _install_session_path().unlink()
+    except OSError:
+        pass
 
 
 def get_archive_name(build_type: str, archive_name: Optional[str] = None) -> str:
@@ -1069,8 +1132,8 @@ def _fetch_archive_with_stable_fallback(
     return None
 
 
-def _stream_download(url: str, download_path: Path, error_context: str = "") -> bool:
-    """Stream download a file from a URL.
+def _stream_download(url: str, download_path: Path, error_context: str = "") -> tuple:
+    """Stream download a file from a URL, with resume, verification and retry.
 
     Args:
         url: Full URL to download from.
@@ -1078,30 +1141,16 @@ def _stream_download(url: str, download_path: Path, error_context: str = "") -> 
         error_context: Context string for error messages (e.g., package name).
 
     Returns:
-        True on success, False on failure.
+        (ok, error_code); error_code is None on success and otherwise a member
+        of the install-event error taxonomy.
     """
     ctx = _get_auth_context()
     if not ctx:
-        return False
+        return (False, ERROR_UNKNOWN)
     _, headers = ctx
-
-    try:
-        download_path.parent.mkdir(parents=True, exist_ok=True)
-        with requests.get(url, headers=headers, stream=True, timeout=60) as resp:
-            resp.raise_for_status()
-            with open(download_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        return True
-    except (requests.RequestException, OSError) as e:
-        if download_path.exists():
-            try:
-                download_path.unlink()
-            except OSError:
-                pass
-        context = f" for '{error_context}'" if error_context else ""
-        print(f"⚠️ OTA download failed{context}: {e}")
-        return False
+    return _download_to_path(
+        url, download_path, headers=headers, error_context=error_context
+    )
 
 
 def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[dict]:
@@ -1202,6 +1251,258 @@ def _resolve_desired_state(platform_str: str) -> tuple:
     return (False, name, version)
 
 
+class ContentHashMismatch(Exception):
+    """Downloaded bytes did not match the digest the server advertised."""
+
+
+# Error codes from the server's install-event contract
+# (docs/ota-install-event-contract.md). The server treats these as data and
+# never branches on them — classification is the client's job, because the
+# client is the only party that knows what actually happened.
+ERROR_NETWORK = "network"
+ERROR_TIMEOUT = "timeout"
+ERROR_HASH_MISMATCH = "hash_mismatch"
+ERROR_DISK_FULL = "disk_full"
+ERROR_SERVER_ERROR = "server_error"
+ERROR_UNKNOWN = "unknown"
+
+# Retrying only helps when the cause is transient. A 4xx, a full disk or an
+# unclassified failure will answer the same way on the next attempt.
+_RETRYABLE_ERROR_CODES = frozenset(
+    {ERROR_NETWORK, ERROR_TIMEOUT, ERROR_SERVER_ERROR, ERROR_HASH_MISMATCH}
+)
+
+
+def classify_download_error(exc: BaseException) -> str:
+    """Map a download failure onto the install-event error taxonomy."""
+    if isinstance(exc, ContentHashMismatch):
+        return ERROR_HASH_MISMATCH
+    # ConnectTimeout subclasses both Timeout and ConnectionError, so timeout
+    # must be tested first to keep the more specific answer.
+    if isinstance(exc, requests.Timeout):
+        return ERROR_TIMEOUT
+    if isinstance(exc, requests.ConnectionError):
+        return ERROR_NETWORK
+    if isinstance(exc, requests.HTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(status, int) and 500 <= status < 600:
+            return ERROR_SERVER_ERROR
+        return ERROR_UNKNOWN
+    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        return ERROR_DISK_FULL
+    return ERROR_UNKNOWN
+
+
+def is_retryable_error_code(error_code: str) -> bool:
+    """Whether backoff should spend another attempt on this failure."""
+    return error_code in _RETRYABLE_ERROR_CODES
+
+
+# Retry/backoff tuning. A synchronised fleet reboots together, so jitter is
+# what keeps the retry burst from arriving in lockstep.
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_MAX_SECONDS = 30.0
+_MAX_DOWNLOAD_ATTEMPTS = 4
+
+# Partial downloads live beside the target under this suffix, never at the
+# final path — the installer must never see a half-written archive.
+_PART_SUFFIX = ".part"
+
+# Refuse a download that would leave no room to unpack what it just fetched.
+_DISK_HEADROOM_BYTES = 16 * 1024 * 1024
+
+
+def _part_state_path(part_path: Path) -> Path:
+    return part_path.with_name(part_path.name + ".json")
+
+
+def _write_part_state(part_path: Path, content_hash: Optional[str]) -> None:
+    """Record the digest a partial file belongs to, so a later process can resume."""
+    if not content_hash:
+        return
+    try:
+        _part_state_path(part_path).write_text(
+            json.dumps({"contentHash": content_hash}), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _read_part_state(part_path: Path) -> Optional[str]:
+    try:
+        data = json.loads(_part_state_path(part_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("contentHash")
+    return value if isinstance(value, str) and value else None
+
+
+def _discard_part(part_path: Path) -> None:
+    for path in (part_path, _part_state_path(part_path)):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _digest_of_prefix(path: Path, length: int):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        remaining = length
+        while remaining > 0:
+            chunk = f.read(min(8192, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return digest
+
+
+def _announced_body_length(response_headers) -> Optional[int]:
+    """Bytes the server says this response body carries, if it says."""
+    try:
+        return int(response_headers.get("Content-Length"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _assert_disk_space(part_path: Path, response_headers) -> None:
+    """Fail before writing rather than filling the disk and dying mid-stream."""
+    incoming = _announced_body_length(response_headers)
+    if incoming is None:
+        return
+
+    try:
+        free = shutil.disk_usage(part_path.parent).free
+    except OSError:
+        return
+
+    if free < incoming + _DISK_HEADROOM_BYTES:
+        raise OSError(
+            errno.ENOSPC,
+            f"needs {incoming + _DISK_HEADROOM_BYTES} bytes, {free} free",
+        )
+
+
+def _attempt_download(
+    url: str,
+    part_path: Path,
+    download_path: Path,
+    headers: Optional[dict],
+    params: Optional[dict],
+    timeout: int,
+) -> None:
+    """One download attempt. Raises on any failure; renames into place on success."""
+    known_hash = _read_part_state(part_path)
+    try:
+        existing = part_path.stat().st_size
+    except OSError:
+        existing = 0
+
+    # A partial with no recorded digest cannot be validated after resuming, so
+    # it is cheaper to discard it than to risk splicing two different objects.
+    if existing and not known_hash:
+        _discard_part(part_path)
+        existing = 0
+
+    request_headers = dict(headers or {})
+    if existing:
+        request_headers["Range"] = f"bytes={existing}-"
+        request_headers["If-Range"] = f'"{known_hash}"'
+
+    part_path.parent.mkdir(parents=True, exist_ok=True)
+    with requests.get(
+        url, headers=request_headers, params=params, stream=True, timeout=timeout
+    ) as resp:
+        resp.raise_for_status()
+
+        # A 200 in response to a Range request means the object changed and the
+        # server is sending the whole thing — the partial is now garbage.
+        resume_from = existing
+        if resume_from and resp.status_code != 206:
+            _discard_part(part_path)
+            resume_from = 0
+
+        expected = _expected_content_hash(resp.headers)
+        if not expected:
+            print(
+                f"⚠️ OTA server sent no content hash for "
+                f"'{download_path.name}'; download integrity was not verified."
+            )
+        _assert_disk_space(part_path, resp.headers)
+        _write_part_state(part_path, expected)
+
+        digest = (
+            _digest_of_prefix(part_path, resume_from)
+            if resume_from
+            else hashlib.sha256()
+        )
+        received = 0
+        with open(part_path, "ab" if resume_from else "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                digest.update(chunk)
+                received += len(chunk)
+                f.write(chunk)
+
+        # A connection cut cleanly between chunks raises nothing, so without
+        # this a truncated body would be renamed into place whenever the server
+        # sends no digest to check it against.
+        announced = _announced_body_length(resp.headers)
+        if announced is not None and received < announced:
+            raise requests.ConnectionError(
+                f"incomplete body: got {received} of {announced} bytes"
+            )
+
+    if expected and digest.hexdigest() != expected:
+        _discard_part(part_path)
+        raise ContentHashMismatch(f"expected {expected}, got {digest.hexdigest()}")
+
+    part_path.replace(download_path)
+    _discard_part(part_path)
+
+
+def _download_to_path(
+    url: str,
+    download_path: Path,
+    headers: Optional[dict] = None,
+    params: Optional[dict] = None,
+    error_context: str = "",
+    max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS,
+    timeout: int = 60,
+) -> tuple:
+    """Download to `download_path` with resume, verification and bounded retry.
+
+    Returns `(ok, error_code)`; `error_code` is None on success and otherwise a
+    member of the install-event taxonomy, ready to attach to a failed event.
+    """
+    part_path = download_path.with_name(download_path.name + _PART_SUFFIX)
+    context = f" for '{error_context}'" if error_context else ""
+    error_code = ERROR_UNKNOWN
+
+    for attempt in range(max_attempts):
+        try:
+            _attempt_download(url, part_path, download_path, headers, params, timeout)
+            return (True, None)
+        except (requests.RequestException, OSError, ContentHashMismatch) as e:
+            error_code = classify_download_error(e)
+            print(f"⚠️ OTA download failed{context} [{error_code}]: {e}")
+
+            if not is_retryable_error_code(error_code):
+                break
+            if attempt == max_attempts - 1:
+                break
+
+            window = min(_BACKOFF_BASE_SECONDS * (2**attempt), _BACKOFF_MAX_SECONDS)
+            delay = random.uniform(window / 2, window)
+            print(f"   retrying in {delay:.1f}s ({attempt + 2}/{max_attempts})")
+            time.sleep(delay)
+
+    return (False, error_code)
+
+
 def _expected_content_hash(response_headers) -> Optional[str]:
     """Extract the sha256 the server claims for a download body.
 
@@ -1227,7 +1528,7 @@ def _stream_robot_package_download(
     platform_str: str,
     download_path: Path,
     headers: dict,
-) -> bool:
+) -> tuple:
     """Download a package through the robot-authenticated by-key endpoint."""
     base = get_ota_endpoint().rstrip("/")
     url = f"{base}/robots/me/archives/by-key/packages/{package_id}/download"
@@ -1236,42 +1537,13 @@ def _stream_robot_package_download(
         "platform": platform_str,
         "version": archive_version.lstrip("vV"),
     }
-
-    try:
-        download_path.parent.mkdir(parents=True, exist_ok=True)
-        with requests.get(
-            url, headers=headers, params=params, stream=True, timeout=60
-        ) as resp:
-            resp.raise_for_status()
-            digest = hashlib.sha256()
-            with open(download_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    digest.update(chunk)
-                    f.write(chunk)
-            expected = _expected_content_hash(resp.headers)
-
-        # Nobody is watching an unattended robot install, so a truncated or
-        # corrupted body has to fail here rather than surface later as a
-        # confusing "not a zip file" during extraction.
-        if expected and digest.hexdigest() != expected:
-            raise OSError(
-                f"content hash mismatch (expected {expected}, "
-                f"got {digest.hexdigest()})"
-            )
-        if not expected:
-            print(
-                f"⚠️ OTA server sent no content hash for '{package_name}'; "
-                "download integrity was not verified."
-            )
-        return True
-    except (requests.RequestException, OSError) as e:
-        if download_path.exists():
-            try:
-                download_path.unlink()
-            except OSError:
-                pass
-        print(f"⚠️ Robot OTA download failed for '{package_name}': {e}")
-        return False
+    return _download_to_path(
+        url,
+        download_path,
+        headers=headers,
+        params=params,
+        error_context=package_name,
+    )
 
 
 def _download_package_blob(
@@ -1283,8 +1555,11 @@ def _download_package_blob(
     archive_version: Optional[str] = None,
     platform_str: Optional[str] = None,
     install_session_id: Optional[str] = None,
-) -> bool:
-    """Download a single package blob from an archive."""
+) -> tuple:
+    """Download a single package blob from an archive.
+
+    Returns (ok, error_code); error_code is None on success.
+    """
     robot_headers = _robot_auth_headers(install_session_id)
     if robot_headers and archive_name and archive_version and platform_str:
         return _stream_robot_package_download(
@@ -1722,7 +1997,7 @@ def download_package(
     install_session_id = get_install_session_id()
 
     print(f"⬇️  Downloading '{package_name}' v{version} from OTA server...")
-    if not _download_package_blob(
+    download_ok, _download_error = _download_package_blob(
         archive_id,
         pkg_id,
         package_name,
@@ -1731,7 +2006,8 @@ def download_package(
         archive_version=actual_version,
         platform_str=platform_str,
         install_session_id=install_session_id,
-    ):
+    )
+    if not download_ok:
         return None
 
     install_metadata = _build_archive_install_metadata(
@@ -1872,7 +2148,7 @@ def download_all_from_archive(
         )
 
         print(f"⬇️  Downloading '{name}' v{version} from OTA server...")
-        if not _download_package_blob(
+        download_ok, _download_error = _download_package_blob(
             archive_id,
             pkg_id,
             name,
@@ -1881,7 +2157,8 @@ def download_all_from_archive(
             archive_version=actual_version,
             platform_str=platform_str,
             install_session_id=install_session_id,
-        ):
+        )
+        if not download_ok:
             continue
 
         install_metadata = _build_archive_install_metadata(
@@ -1958,7 +2235,8 @@ def _download_blob_by_hash(blob_hash: str, download_path: Path) -> bool:
     """Download a blob directly by its hash."""
     base = get_ota_endpoint().rstrip("/")
     url = f"{base}/blobs/{blob_hash}/download"
-    return _stream_download(url, download_path, f"blob {blob_hash[:8]}")
+    ok, _error_code = _stream_download(url, download_path, f"blob {blob_hash[:8]}")
+    return ok
 
 
 def download_package_at_timestamp(
