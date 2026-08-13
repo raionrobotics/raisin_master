@@ -3125,6 +3125,53 @@ class TestDownload(unittest.TestCase):
         self.assertFalse(halted)
         self.assertIsNone(name)
 
+    def _desired_state_output(self, payload, platform="ubuntu-24.04-arm64"):
+        with patch.dict(
+            os.environ,
+            {
+                "RAISIN_ROBOT_API_KEY": "robot-key",  # pragma: allowlist secret
+                "RAISIN_ROBOT_NODE": "jetson",
+            },
+            clear=True,
+        ), patch(
+            "commands.ota_client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ), patch(
+            "commands.ota_client.requests.get",
+            return_value=_mock_response(json_data={"success": True, "data": payload}),
+        ), patch(
+            "builtins.print"
+        ) as mock_print:
+            ota._resolve_desired_state(platform)
+        return " ".join(str(c) for c in mock_print.call_args_list)
+
+    def test_no_target_says_the_node_is_unassigned(self):
+        """Otherwise the legacy-route warnings that follow read as a failure.
+
+        A robot with no assignment is in a normal state; the SSH and GitHub
+        fallback warnings make it look like its credential is broken.
+        """
+        output = self._desired_state_output({"halt": False, "reason": "no_target"})
+
+        self.assertIn("no archive", output.lower())
+        self.assertIn("assign", output.lower())
+
+    def test_an_assigned_target_says_nothing_about_being_unassigned(self):
+        output = self._desired_state_output(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "archiveId": "arch-1",
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-24.04-arm64",
+                },
+            }
+        )
+
+        self.assertNotIn("no archive", output.lower())
+
     def test_resolve_desired_state_without_robot_auth_is_inert(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(

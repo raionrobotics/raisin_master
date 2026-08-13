@@ -1560,11 +1560,21 @@ def _resolve_desired_state(platform_str: str) -> tuple:
 
     target = state.get("target")
     if not isinstance(target, dict):
-        if state.get("reason") == "target_unresolved":
+        reason = state.get("reason")
+        if reason == "target_unresolved":
             detail = state.get("unresolvedDetail") or "no detail given"
             print(
                 "⚠️ The OTA server has an archive assigned to this node but "
                 f"could not resolve it: {detail}."
+            )
+        elif reason == "no_target":
+            # Say this plainly: an unassigned node is in a normal state, but
+            # the legacy-route warnings that follow read as a broken
+            # credential rather than as "nobody told this robot what to run".
+            print(
+                "ℹ️  No archive is assigned to this robot node yet. "
+                "Assign one on the OTA server to install as this robot; "
+                "continuing on the legacy route, which authenticates as a user."
             )
         return (False, None, None, None)
 
