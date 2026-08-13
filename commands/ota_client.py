@@ -74,6 +74,18 @@ _INSTALL_METADATA_FILE = "ota-install.json"
 _INSTALL_SESSION_FILE = ".ota-session.json"
 _INSTALL_SESSION_TTL_SECONDS = 24 * 60 * 60
 
+# Install events are buffered on disk so an offline robot still reports what
+# happened once it can reach the server again.
+_INSTALL_EVENT_QUEUE_FILE = ".ota-install-events.jsonl"
+_INSTALL_EVENT_STATE_FILE = ".ota-install-events.state.json"
+_INSTALL_EVENT_BATCH_LIMIT = 100
+_TERMINAL_EVENT_TYPES = frozenset({"succeeded", "failed", "rolled_back"})
+
+# First failure of the current attempt. A terminal event means the attempt
+# finished, so the decision is deferred to the end of the run instead of being
+# emitted from inside the package loop while downloads are still going.
+_pending_install_failure = None
+
 # Robot API key configuration. The key file is intentionally outside the repo.
 _ROBOT_API_KEY_FILE = "robot-api-key"  # pragma: allowlist secret
 _ROBOT_API_KEY_ENV = "RAISIN_ROBOT_API_KEY"  # pragma: allowlist secret
@@ -433,12 +445,269 @@ def get_install_session_id() -> str:
     return _install_session_id
 
 
+def _utc_now_iso() -> str:
+    """Client clock for `occurredAt`, at millisecond resolution.
+
+    Whole seconds would let two events of one attempt tie, and the server
+    orders a delayed batch by this field.
+    """
+    now = time.time()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now))
+    return f"{stamp}.{int(now % 1 * 1000):03d}Z"
+
+
+def _install_event_queue_path() -> Path:
+    return Path(g.script_directory) / "install" / _INSTALL_EVENT_QUEUE_FILE
+
+
+def _install_event_state_path() -> Path:
+    return Path(g.script_directory) / "install" / _INSTALL_EVENT_STATE_FILE
+
+
+def _read_install_event_queue() -> list:
+    """Read the buffered events, skipping any line corruption."""
+    try:
+        raw = _install_event_queue_path().read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+
+    events = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _write_install_event_queue(events: list) -> None:
+    path = _install_event_queue_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    except OSError as e:
+        print(f"⚠️ Failed to write OTA install-event queue: {e}")
+
+
+def _append_install_event(event: dict) -> None:
+    path = _install_event_queue_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
+    except OSError as e:
+        print(f"⚠️ Failed to buffer OTA install event: {e}")
+
+
+def _read_install_event_state() -> dict:
+    try:
+        data = json.loads(_install_event_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _install_event_marker_seen(session_id: str, marker: str) -> bool:
+    return bool(_read_install_event_state().get(session_id, {}).get(marker))
+
+
+def _mark_install_event(session_id: str, marker: str) -> None:
+    """Persist the marker so a restarted process does not re-emit the event."""
+    state = _read_install_event_state()
+    state.setdefault(session_id, {})[marker] = True
+    path = _install_event_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def note_install_failure(
+    stage: str, error_code: Optional[str], message: Optional[str] = None
+) -> None:
+    """Remember why this attempt is going to fail, without ending it yet.
+
+    The first cause wins: an attempt reports one terminal event, and the first
+    failure is what explains the rest.
+    """
+    global _pending_install_failure
+    if _pending_install_failure is None:
+        _pending_install_failure = (stage, error_code or ERROR_UNKNOWN, message)
+
+
+def pending_install_failure() -> Optional[tuple]:
+    """(stage, error_code) of this attempt's first failure, if any."""
+    if _pending_install_failure is None:
+        return None
+    return (_pending_install_failure[0], _pending_install_failure[1])
+
+
+def clear_pending_install_failure() -> None:
+    global _pending_install_failure
+    _pending_install_failure = None
+
+
+def install_attempt_started() -> bool:
+    """Whether this session already reported a `started` event."""
+    return _install_event_marker_seen(get_install_session_id(), "started")
+
+
+def report_install_outcome(overall_success: bool) -> Optional[dict]:
+    """Close the attempt with exactly one terminal event.
+
+    Only the caller knows whether the run as a whole worked, and a noted
+    failure outranks it: `install_command` returns True when *any* package
+    landed, so a partial archive install would otherwise report success.
+    """
+    if not install_attempt_started():
+        return None
+
+    failure = _pending_install_failure
+    if failure is not None:
+        stage, error_code, message = failure
+        return record_install_event(
+            "failed", stage=stage, error_code=error_code, error_message=message
+        )
+    if overall_success:
+        return record_install_event("succeeded")
+    return record_install_event(
+        "failed",
+        error_code=ERROR_UNKNOWN,
+        error_message="install did not complete",
+    )
+
+
+def record_install_event(
+    event_type: str,
+    stage: Optional[str] = None,
+    error_code: Optional[str] = None,
+    error_message: Optional[str] = None,
+    attempt: Optional[int] = None,
+    archive_id: Optional[str] = None,
+    archive_name: Optional[str] = None,
+    archive_version: Optional[str] = None,
+    platform: Optional[str] = None,
+    detail: Optional[dict] = None,
+    install_session_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Buffer one install-attempt event.
+
+    An attempt emits exactly one `started` and exactly one terminal event, so
+    the guard is persisted rather than held in memory: a crashed run that
+    resumes its session must not report a second `started`.
+
+    Returns the event, or None when the guard suppressed it.
+    """
+    session_id = install_session_id or get_install_session_id()
+    marker = "terminal" if event_type in _TERMINAL_EVENT_TYPES else event_type
+    if marker in ("started", "terminal") and _install_event_marker_seen(
+        session_id, marker
+    ):
+        return None
+
+    event = {
+        "eventId": str(uuid.uuid4()),
+        "installSessionId": session_id,
+        "eventType": event_type,
+        "occurredAt": _utc_now_iso(),
+        "clientVersion": get_client_version(),
+    }
+    for key, value in (
+        ("stage", stage),
+        ("errorCode", error_code),
+        ("errorMessage", error_message),
+        ("attempt", attempt),
+        ("archiveId", archive_id),
+        ("archiveName", archive_name),
+        ("archiveVersion", archive_version),
+        ("platform", platform),
+        ("detail", detail),
+    ):
+        if value is not None:
+            event[key] = value
+
+    _append_install_event(event)
+    if marker in ("started", "terminal"):
+        _mark_install_event(session_id, marker)
+    return event
+
+
+def flush_install_events() -> bool:
+    """Send buffered install events, keeping anything the server did not ack.
+
+    Returns True only when the queue is empty afterwards, so an offline robot
+    simply tries again on the next run.
+    """
+    remaining = _read_install_event_queue()
+    if not remaining:
+        return True
+
+    headers = _robot_auth_headers()
+    if not headers:
+        return False
+
+    request_headers = dict(headers)
+    request_headers["Content-Type"] = "application/json"
+    base = get_ota_endpoint().rstrip("/")
+    url = f"{base}/robots/me/install-events"
+
+    while remaining:
+        batch = remaining[:_INSTALL_EVENT_BATCH_LIMIT]
+        try:
+            resp = requests.post(
+                url, headers=request_headers, json={"events": batch}, timeout=15
+            )
+            resp.raise_for_status()
+            data = _unwrap_response(resp.json()) or {}
+        except (requests.RequestException, ValueError) as e:
+            print(f"⚠️ Failed to report OTA install events: {e}")
+            break
+
+        acks = data.get("acks") if isinstance(data, dict) else None
+        acked = {
+            ack.get("eventId")
+            for ack in (acks or [])
+            if isinstance(ack, dict) and ack.get("eventId")
+        }
+        # A response that acknowledges nothing we sent would loop forever.
+        if not acked:
+            print("⚠️ OTA server acknowledged no install events; keeping the queue.")
+            break
+
+        remaining = [e for e in remaining if e.get("eventId") not in acked]
+
+    _write_install_event_queue(remaining)
+    if remaining:
+        print(f"ℹ️  {len(remaining)} OTA install event(s) buffered for a later run.")
+    return not remaining
+
+
 def clear_install_session() -> None:
     """Retire the session so the next install starts a fresh one."""
     global _install_session_id
+    clear_pending_install_failure()
+    retired = _install_session_id
     _install_session_id = None
     try:
         _install_session_path().unlink()
+    except OSError:
+        pass
+
+    # Drop the once-per-session guards too, or the state file grows for the
+    # life of the robot.
+    if not retired:
+        return
+    state = _read_install_event_state()
+    if state.pop(retired, None) is None:
+        return
+    try:
+        _install_event_state_path().write_text(json.dumps(state), encoding="utf-8")
     except OSError:
         pass
 
@@ -1361,6 +1630,15 @@ def _digest_of_prefix(path: Path, length: int):
     return digest
 
 
+def _content_range_start(response_headers) -> Optional[int]:
+    """First byte offset of a 206 slice, per `Content-Range: bytes <s>-<e>/<t>`."""
+    raw = response_headers.get("Content-Range")
+    if not isinstance(raw, str):
+        return None
+    match = re.match(r"\s*bytes\s+(\d+)-", raw)
+    return int(match.group(1)) if match else None
+
+
 def _announced_body_length(response_headers) -> Optional[int]:
     """Bytes the server says this response body carries, if it says."""
     try:
@@ -1425,6 +1703,17 @@ def _attempt_download(
         if resume_from and resp.status_code != 206:
             _discard_part(part_path)
             resume_from = 0
+
+        # A slice that does not begin where we asked would be appended at the
+        # wrong offset; the hash check catches it only after the whole body has
+        # been written, and blames the wrong thing.
+        if resume_from:
+            start = _content_range_start(resp.headers)
+            if start is not None and start != resume_from:
+                _discard_part(part_path)
+                raise requests.ConnectionError(
+                    f"server resumed at byte {start}, expected {resume_from}"
+                )
 
         expected = _expected_content_hash(resp.headers)
         if not expected:
@@ -1995,6 +2284,14 @@ def download_package(
     )
 
     install_session_id = get_install_session_id()
+    record_install_event(
+        "started",
+        archive_id=archive_id,
+        archive_name=archive_name,
+        archive_version=actual_version,
+        platform=platform_str,
+        install_session_id=install_session_id,
+    )
 
     print(f"⬇️  Downloading '{package_name}' v{version} from OTA server...")
     download_ok, _download_error = _download_package_blob(
@@ -2008,6 +2305,9 @@ def download_package(
         install_session_id=install_session_id,
     )
     if not download_ok:
+        note_install_failure(
+            "download", _download_error, f"download of '{package_name}' failed"
+        )
         return None
 
     install_metadata = _build_archive_install_metadata(
@@ -2033,6 +2333,10 @@ def download_package(
         version,
         install_metadata=install_metadata,
     )
+    if not result:
+        note_install_failure(
+            "unpack", "unpack_failed", f"could not unpack '{package_name}'"
+        )
     if result:
         _queue_snapshot_report(
             install_base_path=install_base_path,
@@ -2118,6 +2422,14 @@ def download_all_from_archive(
 
     print(f"📦 Using archive: {archive_name} v{actual_version or 'latest'}")
     install_session_id = get_install_session_id()
+    event_context = {
+        "archive_id": archive_id,
+        "archive_name": archive_name,
+        "archive_version": actual_version,
+        "platform": platform_str,
+        "install_session_id": install_session_id,
+    }
+    record_install_event("started", **event_context)
 
     results = {}
     for pkg in packages:
@@ -2159,6 +2471,9 @@ def download_all_from_archive(
             install_session_id=install_session_id,
         )
         if not download_ok:
+            note_install_failure(
+                "download", _download_error, f"download of '{name}' failed"
+            )
             continue
 
         install_metadata = _build_archive_install_metadata(
@@ -2186,6 +2501,10 @@ def download_all_from_archive(
         )
         if result:
             results[name] = result
+        else:
+            note_install_failure(
+                "unpack", "unpack_failed", f"could not unpack '{name}'"
+            )
 
     if results:
         _report_snapshot_from_install_metadata(

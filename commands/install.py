@@ -30,6 +30,8 @@ from commands.ota_client import (
     download_all_from_archive,
     flush_pending_snapshot_reports,
     clear_install_session,
+    report_install_outcome,
+    flush_install_events,
 )
 
 
@@ -631,6 +633,14 @@ def install_cli_command(
             overall_success = False
 
     flush_pending_snapshot_reports()
+
+    # Close the attempt with one terminal event. A failure noted downstream
+    # outranks overall_success, because install_command returns True when any
+    # package landed — a partial archive install is not a completed one.
+    report_install_outcome(overall_success)
+
+    # Flush either way — a failed attempt is exactly what needs reporting.
+    flush_install_events()
 
     # Keep the session on failure so a retry resumes it; retire it on success.
     if not overall_success:
