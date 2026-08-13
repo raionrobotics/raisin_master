@@ -28,14 +28,14 @@ import zipfile
 
 import requests
 import yaml
+from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa, padding
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from commands import globals as g
 from commands import install_tree
-from commands.utils import parse_version_specifier
 
 # Module-level cached auth token (lives for the CLI session)
 _cached_token = None
@@ -108,6 +108,92 @@ DEFAULT_CLIENT_VERSION = "raisin-cli"
 
 
 # ============================================================================
+# Runtime context
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class OtaContext:
+    """Where this process works and what platform it is working for.
+
+    The CLI fills these from its own startup; an agent supplies them directly.
+    Reading them from a CLI module would tie the core to a process that only
+    exists in one of its two callers.
+    """
+
+    workspace: Path
+    os_type: str
+    os_version: str
+    architecture: str
+
+    @property
+    def platform(self) -> str:
+        """Platform string as the OTA server names it, e.g. ubuntu-24.04-arm64."""
+        return f"{self.os_type}-{self.os_version}-{self.architecture}"
+
+    def package_dir(self, base: Path, package: str, build_type: str) -> Path:
+        """Where one package's files live under an install tree."""
+        return (
+            Path(base)
+            / package
+            / self.os_type
+            / self.os_version
+            / self.architecture
+            / build_type
+        )
+
+
+_context = None
+
+
+def configure(context: OtaContext) -> None:
+    """Point the core at a workspace and platform. Call once at startup."""
+    global _context
+    _context = context
+
+
+def _ctx() -> OtaContext:
+    if _context is None:
+        raise RuntimeError(
+            "OTA core is not configured; call ota_client.configure(OtaContext(...)) "
+            "before using it."
+        )
+    return _context
+
+
+def parse_version_specifier(spec_str):
+    """Parse a version specifier string into a SpecifierSet.
+
+    Kept here rather than imported: the CLI's utils module pulls in process
+    globals at import time, and this function needs none of them.
+
+        ""            -> >=0.0.0 (any version)
+        ">=1.0.0"     -> standard specifier
+        ">=1.0,<2.0"  -> compound specifier
+        "1.0.0"       -> treated as ==1.0.0
+
+    Returns a SpecifierSet, or None when the string cannot be parsed.
+    """
+    try:
+        spec_str = (spec_str or "").strip()
+        if not spec_str:
+            return SpecifierSet(">=0.0.0")
+
+        specifiers = re.findall(r"[<>=!~]+[\d.]+", spec_str)
+        if specifiers:
+            formatted = ", ".join(specifiers)
+            formatted = formatted.replace(">, =", ">=").replace("< =", "<=")
+            return SpecifierSet(formatted)
+
+        if re.match(r"^[\d.]+$", spec_str):
+            return SpecifierSet(f"=={spec_str}")
+
+        return None
+    except InvalidSpecifier:
+        return None
+
+
+# ============================================================================
 # Configuration
 # ============================================================================
 
@@ -162,7 +248,7 @@ def _load_local_config() -> dict:
     package download, and each rebuild resolves both the API key and the node
     key, so an uncached read re-parses the YAML twice per package.
     """
-    script_dir_path = Path(g.script_directory)
+    script_dir_path = _ctx().workspace
     for filename in _ROBOT_CONFIG_FILES:
         config_path = script_dir_path / filename
         try:
@@ -397,7 +483,7 @@ def get_client_version() -> str:
 
 
 def _install_session_path() -> Path:
-    return Path(g.script_directory) / "install" / _INSTALL_SESSION_FILE
+    return _ctx().workspace / "install" / _INSTALL_SESSION_FILE
 
 
 def _read_install_session() -> Optional[str]:
@@ -459,14 +545,7 @@ def _unusable_packages(install_base_path: Path, requested, build_type: str) -> l
     """
     broken = []
     for name in sorted(requested):
-        package_dir = (
-            install_base_path
-            / name
-            / g.os_type
-            / g.os_version
-            / g.architecture
-            / build_type
-        )
+        package_dir = _ctx().package_dir(install_base_path, name, build_type)
         try:
             if not package_dir.is_dir() or not any(package_dir.iterdir()):
                 broken.append(name)
@@ -496,11 +575,11 @@ def _utc_now_iso() -> str:
 
 
 def _install_event_queue_path() -> Path:
-    return Path(g.script_directory) / "install" / _INSTALL_EVENT_QUEUE_FILE
+    return _ctx().workspace / "install" / _INSTALL_EVENT_QUEUE_FILE
 
 
 def _install_event_state_path() -> Path:
-    return Path(g.script_directory) / "install" / _INSTALL_EVENT_STATE_FILE
+    return _ctx().workspace / "install" / _INSTALL_EVENT_STATE_FILE
 
 
 def _read_install_event_queue() -> list:
@@ -795,7 +874,7 @@ def get_archive_name(build_type: str, archive_name: Optional[str] = None) -> str
 
 def _get_token_cache_path() -> Path:
     """Path to the persistent token cache file."""
-    return Path(g.script_directory) / _TOKEN_CACHE_FILE
+    return _ctx().workspace / _TOKEN_CACHE_FILE
 
 
 def _is_jwt_expired(token: str) -> bool:
@@ -1129,7 +1208,7 @@ def upload_package(
     try:
         # 1. Compute SHA256
         sha256 = _compute_sha256(archive_path)
-        platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+        platform_str = _ctx().platform
 
         # 2. Check if blob already exists (deduplication)
         resp = requests.get(
@@ -2327,7 +2406,7 @@ def download_package(
     """
     from packaging.version import parse as parse_version, InvalidVersion
 
-    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+    platform_str = _ctx().platform
     archive_name = get_archive_name(build_type, archive_name)
 
     # Selection priority mirrors download_all_from_archive:
@@ -2388,18 +2467,9 @@ def download_package(
     tag = best_pkg.get("tagName") or best_pkg.get("version", "")
     version = tag.lstrip("vV") if tag else "0.0.0"
 
-    install_dir = (
-        install_base_path
-        / package_name
-        / g.os_type
-        / g.os_version
-        / g.architecture
-        / build_type
-    )
+    install_dir = _ctx().package_dir(install_base_path, package_name, build_type)
 
-    download_file = (
-        Path(g.script_directory) / "install" / f"{package_name}-ota-{version}.zip"
-    )
+    download_file = _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
 
     install_session_id = get_install_session_id()
 
@@ -2505,7 +2575,7 @@ def download_all_from_archive(
         dict mapping package_name to {'version': str, 'dependencies': list}
         for successfully downloaded packages. Empty dict on complete failure.
     """
-    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+    platform_str = _ctx().platform
 
     release = install_tree.release_for(install_base_path)
     repaired = install_tree.ensure_tree(release)
@@ -2596,13 +2666,9 @@ def download_all_from_archive(
 
         # _extract_and_read_deps removes this directory before unpacking, which
         # is what breaks the hardlink shared with the previous version.
-        install_dir = (
-            staging / name / g.os_type / g.os_version / g.architecture / build_type
-        )
+        install_dir = _ctx().package_dir(staging, name, build_type)
 
-        download_file = (
-            Path(g.script_directory) / "install" / f"{name}-ota-{version}.zip"
-        )
+        download_file = _ctx().workspace / "install" / f"{name}-ota-{version}.zip"
 
         print(f"⬇️  Downloading '{name}' v{version} from OTA server...")
         download_ok, _download_error = _download_package_blob(
@@ -2789,7 +2855,7 @@ def download_package_at_timestamp(
     if not ctx:
         return None
     base, headers = ctx
-    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+    platform_str = _ctx().platform
 
     try:
         # Fetch manifest at timestamp
@@ -2818,17 +2884,10 @@ def download_package_at_timestamp(
             print(f"⚠️ Manifest for '{package_name}' has no blob hash")
             return None
 
-        install_dir = (
-            install_base_path
-            / package_name
-            / g.os_type
-            / g.os_version
-            / g.architecture
-            / build_type
-        )
+        install_dir = _ctx().package_dir(install_base_path, package_name, build_type)
 
         download_file = (
-            Path(g.script_directory) / "install" / f"{package_name}-ota-{version}.zip"
+            _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
         )
 
         print(f"⬇️  Downloading '{package_name}' v{version} (at {timestamp})...")

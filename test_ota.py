@@ -63,6 +63,22 @@ def _mock_response(
     return resp
 
 
+def _sync_ota_context():
+    """Point the OTA core at whatever the CLI globals currently hold.
+
+    Production wires this once in `init_environment`; tests move the globals
+    around per case, so they re-sync after each change.
+    """
+    ota.configure(
+        ota.OtaContext(
+            workspace=Path(g.script_directory or "."),
+            os_type=g.os_type,
+            os_version=g.os_version,
+            architecture=g.architecture,
+        )
+    )
+
+
 def _as_robot(testcase):
     """Give a test the robot identity that install-event recording requires.
 
@@ -137,6 +153,7 @@ class TestConfiguration(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._orig_script_directory = g.script_directory
         g.script_directory = self._tmpdir.name
+        _sync_ota_context()
         ota._robot_api_key_cache.clear()
         ota._robot_auth_warning_keys.clear()
         ota._local_config_cache.clear()
@@ -146,6 +163,7 @@ class TestConfiguration(unittest.TestCase):
         ota._robot_auth_warning_keys.clear()
         ota._local_config_cache.clear()
         g.script_directory = self._orig_script_directory
+        _sync_ota_context()
         self._tmpdir.cleanup()
 
     def test_get_ota_endpoint_returns_default_when_unset(self):
@@ -343,11 +361,13 @@ class TestTokenPersistence(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._orig_script_directory = g.script_directory
         g.script_directory = self._tmpdir
+        _sync_ota_context()
 
     def tearDown(self):
         ota._cached_token = None
         ota._auth_failed = False
         g.script_directory = self._orig_script_directory
+        _sync_ota_context()
         import shutil
 
         shutil.rmtree(self._tmpdir, ignore_errors=True)
@@ -653,15 +673,21 @@ class TestUpload(unittest.TestCase):
         self._orig_os_version = g.os_version
         self._orig_architecture = g.architecture
         g.os_type = "linux"
+        _sync_ota_context()
         g.os_version = "22.04"
+        _sync_ota_context()
         g.architecture = "x86_64"
+        _sync_ota_context()
 
     def tearDown(self):
         ota._cached_token = None
         ota._auth_failed = False
         g.os_type = self._orig_os_type
+        _sync_ota_context()
         g.os_version = self._orig_os_version
+        _sync_ota_context()
         g.architecture = self._orig_architecture
+        _sync_ota_context()
 
     def test_compute_sha256_correct(self):
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -906,6 +932,7 @@ class TestInstallEventQueue(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._orig_script_directory = g.script_directory
         g.script_directory = self._tmp.name
+        _sync_ota_context()
         ota._install_session_id = "session-29"
         ota.clear_pending_install_failure()
         _as_robot(self)
@@ -914,6 +941,7 @@ class TestInstallEventQueue(unittest.TestCase):
         ota._install_session_id = None
         ota.clear_pending_install_failure()
         g.script_directory = self._orig_script_directory
+        _sync_ota_context()
         self._tmp.cleanup()
 
     def _queued(self):
@@ -1164,7 +1192,9 @@ class TestInstallEventEmission(unittest.TestCase):
             g.architecture,
         )
         g.script_directory = self._tmp.name
+        _sync_ota_context()
         g.os_type, g.os_version, g.architecture = "linux", "22.04", "x86_64"
+        _sync_ota_context()
         ota._install_session_id = "session-emit"
         ota._archive_cache.clear()
         ota.clear_pending_install_failure()
@@ -1340,7 +1370,9 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._orig = (g.script_directory, g.os_type, g.os_version, g.architecture)
         g.script_directory = self._tmp.name
+        _sync_ota_context()
         g.os_type, g.os_version, g.architecture = "linux", "22.04", "x86_64"
+        _sync_ota_context()
         ota._install_session_id = "session-tx"
         ota._archive_cache.clear()
         ota.clear_pending_install_failure()
@@ -1560,11 +1592,13 @@ class TestInstallSessionPersistence(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._orig_script_directory = g.script_directory
         g.script_directory = self._tmp.name
+        _sync_ota_context()
         ota._install_session_id = None
 
     def tearDown(self):
         ota._install_session_id = None
         g.script_directory = self._orig_script_directory
+        _sync_ota_context()
         self._tmp.cleanup()
 
     def _new_process(self):
@@ -1930,9 +1964,13 @@ class TestDownload(unittest.TestCase):
         self._orig_script_directory = g.script_directory
         self._tmp_script_dir = tempfile.TemporaryDirectory()
         g.os_type = "linux"
+        _sync_ota_context()
         g.os_version = "22.04"
+        _sync_ota_context()
         g.architecture = "x86_64"
+        _sync_ota_context()
         g.script_directory = self._tmp_script_dir.name
+        _sync_ota_context()
 
     def tearDown(self):
         ota._cached_token = None
@@ -1943,9 +1981,13 @@ class TestDownload(unittest.TestCase):
         ota._robot_auth_warning_keys.clear()
         ota._local_config_cache.clear()
         g.os_type = self._orig_os_type
+        _sync_ota_context()
         g.os_version = self._orig_os_version
+        _sync_ota_context()
         g.architecture = self._orig_architecture
+        _sync_ota_context()
         g.script_directory = self._orig_script_directory
+        _sync_ota_context()
         self._tmp_script_dir.cleanup()
 
     @patch("commands.ota_client.authenticate", return_value="tok")
@@ -2528,6 +2570,7 @@ class TestDownload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
@@ -2602,6 +2645,7 @@ class TestDownload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
@@ -2642,6 +2686,7 @@ class TestDownload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
             download_file = Path(tmpdir) / "install" / "mypkg-ota-1.2.0.zip"
@@ -2710,6 +2755,7 @@ class TestDownload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
@@ -2723,6 +2769,7 @@ class TestDownload(unittest.TestCase):
     def test_download_package_manifest_unavailable(self, _manifest):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             result = ota.download_package(
                 "mypkg", "", "release", Path(tmpdir), tag=None
             )
@@ -2735,6 +2782,7 @@ class TestDownload(unittest.TestCase):
         # per-target loop will then fall back to GitHub releases.
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             result = ota.download_package(
                 "mypkg", "", "release", Path(tmpdir), tag="stable"
             )
@@ -2765,6 +2813,7 @@ class TestDownload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             ota.download_package("mypkg", "", "release", Path(tmpdir), tag="latest")
 
         called_tags = [call.args[2] for call in mock_fetch_by_tag.call_args_list]
@@ -3079,6 +3128,7 @@ class TestDownload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             live = Path(tmpdir) / "release" / "install"
             live.parent.mkdir(parents=True, exist_ok=True)
             results = ota.download_all_from_archive("release", live)
@@ -3224,9 +3274,13 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         self._orig_script_directory = g.script_directory
         self._tmp_script_dir = tempfile.TemporaryDirectory()
         g.os_type = "linux"
+        _sync_ota_context()
         g.os_version = "22.04"
+        _sync_ota_context()
         g.architecture = "x86_64"
+        _sync_ota_context()
         g.script_directory = self._tmp_script_dir.name
+        _sync_ota_context()
 
     def tearDown(self):
         ota._cached_token = None
@@ -3238,9 +3292,13 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         ota._robot_auth_warning_keys.clear()
         ota._local_config_cache.clear()
         g.os_type = self._orig_os_type
+        _sync_ota_context()
         g.os_version = self._orig_os_version
+        _sync_ota_context()
         g.architecture = self._orig_architecture
+        _sync_ota_context()
         g.script_directory = self._orig_script_directory
+        _sync_ota_context()
         self._tmp_script_dir.cleanup()
         # Clear env var if set
         if "RAISIN_ARCHIVE_NAME" in os.environ:
@@ -3302,6 +3360,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
@@ -3364,6 +3423,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
@@ -3435,6 +3495,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
     def test_download_package_uses_archive_name_override(self, mock_manifest):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
@@ -3460,6 +3521,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
     def test_download_all_from_archive_uses_archive_name_override(self, mock_manifest):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
@@ -3485,6 +3547,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
     ):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             install_base = Path(tmpdir) / "release" / "install"
             install_base.mkdir(parents=True)
 
@@ -3556,6 +3619,7 @@ class TestInstallOutcomeDecision(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._orig = g.script_directory
         g.script_directory = self._tmp.name
+        _sync_ota_context()
         ota._install_session_id = "session-outcome"
         ota.clear_pending_install_failure()
         _as_robot(self)
@@ -3564,6 +3628,7 @@ class TestInstallOutcomeDecision(unittest.TestCase):
         ota._install_session_id = None
         ota.clear_pending_install_failure()
         g.script_directory = self._orig
+        _sync_ota_context()
         self._tmp.cleanup()
 
     def _events(self):
@@ -3720,6 +3785,7 @@ class TestInstallIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._orig_script_directory = g.script_directory
             g.script_directory = tmpdir
+            _sync_ota_context()
             try:
                 with patch(
                     "commands.install.load_configuration",
@@ -3729,6 +3795,7 @@ class TestInstallIntegration(unittest.TestCase):
                         install_command([], "release", tag="none")
             finally:
                 g.script_directory = self._orig_script_directory
+                _sync_ota_context()
 
         self.assertIsNone(mock_dl.call_args.kwargs["tag"])
 
@@ -3756,6 +3823,7 @@ class TestInstallIntegration(unittest.TestCase):
         self._orig_script_directory = g.script_directory
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             try:
                 with patch(
                     "commands.install.load_configuration",
@@ -3772,6 +3840,7 @@ class TestInstallIntegration(unittest.TestCase):
                 return mock_dl.call_args.kwargs["tag"]
             finally:
                 g.script_directory = self._orig_script_directory
+                _sync_ota_context()
 
     def test_install_command_defaults_to_latest_for_devel_user(self):
         self.assertEqual(self._run_install_command_with_user_type("devel"), "latest")
@@ -3816,6 +3885,7 @@ class TestPublishIntegration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
+            _sync_ota_context()
             target_dir = Path(tmpdir) / "src" / "mypkg"
             target_dir.mkdir(parents=True)
             release_yaml = target_dir / "release.yaml"

@@ -378,4 +378,16 @@ def init_environment(script_file_path, yes_flag):
         always_yes=yes_flag,
     )
 
+    # The OTA core does not read these globals; hand it the same values.
+    from commands import ota_client
+
+    ota_client.configure(
+        ota_client.OtaContext(
+            workspace=Path(script_directory),
+            os_type=os_type,
+            os_version=os_version,
+            architecture=architecture,
+        )
+    )
+
     delete_directory(os.path.join(script_directory, "temp"))
