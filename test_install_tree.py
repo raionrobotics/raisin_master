@@ -9,11 +9,13 @@ Layout:
 index) are unaffected; only its type changes, from directory to symlink.
 """
 
+import errno
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -204,6 +206,93 @@ class TestStageAndCommit(InstallTreeTestCase):
         )
         self.assertEqual(cloned.stat().st_ino, inode)
         self.assertNotEqual(pkg, cloned)
+
+
+class TestUnusableTreeIsReported(InstallTreeTestCase):
+    """Giving a robot a bigger package partition is a normal thing to do.
+
+    Mounting one at `release/install` puts it on a different filesystem from
+    `release/versions`, and neither `rename` nor `os.link` crosses that
+    boundary. The module docstring promises operations fail gracefully; they
+    escaped as a traceback instead.
+    """
+
+    def test_a_cross_device_migration_names_the_cause(self):
+        legacy = it.current_link(self.release)
+        legacy.mkdir()
+        (legacy / "raisin").mkdir()
+
+        def cross_device(self_, target):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+        with patch.object(Path, "rename", cross_device):
+            with self.assertRaises(it.InstallTreeUnusable) as caught:
+                it.ensure_tree(self.release)
+
+        self.assertIn("filesystem", str(caught.exception))
+
+    def test_a_clone_that_cannot_hardlink_is_reported(self):
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "1.0.0")
+        it.commit_version(self.release, "1.0.0")
+
+        with patch(
+            "commands.install_tree.shutil.copytree",
+            side_effect=OSError(errno.EXDEV, "Invalid cross-device link"),
+        ):
+            with self.assertRaises(it.InstallTreeUnusable):
+                it.stage_version(self.release, "2.0.0")
+
+
+class TestForeignSymlinks(InstallTreeTestCase):
+    """A robot's package tree is often deliberately put on another disk.
+
+    `release/install -> /mnt/data/raisin-install` is how an operator moves
+    1.1GB off a small root filesystem. Recovery must not read that as its own
+    broken link, because "fixing" it puts the next install back on the disk
+    they moved it off — and says it repaired something while doing it.
+    """
+
+    def _operator_link(self):
+        external = Path(self._tmp.name) / "data" / "install"
+        external.mkdir(parents=True)
+        (external / "raisin").mkdir()
+        os.symlink(external, it.current_link(self.release))
+        return external
+
+    def test_a_link_to_another_disk_is_left_alone(self):
+        external = self._operator_link()
+
+        said = it.ensure_tree(self.release)
+
+        self.assertIsNone(said)
+        self.assertTrue(it.current_link(self.release).is_symlink())
+        self.assertEqual(
+            os.path.realpath(it.current_link(self.release)),
+            os.path.realpath(external),
+        )
+
+    def test_a_link_to_another_disk_is_not_repointed_at_a_local_version(self):
+        """With versions on disk the old code silently relocated the install."""
+        external = self._operator_link()
+        stale = it.versions_dir(self.release) / "0001-old"
+        stale.mkdir(parents=True)
+
+        it.ensure_tree(self.release)
+
+        self.assertEqual(
+            os.path.realpath(it.current_link(self.release)),
+            os.path.realpath(external),
+        )
+
+    def test_our_own_dangling_link_is_still_recovered(self):
+        """The recovery this replaces must keep working for links we made."""
+        versions = it.versions_dir(self.release)
+        (versions / "0001-1.0.0").mkdir(parents=True)
+        os.symlink("versions/0002-2.0.0", it.current_link(self.release))
+
+        it.ensure_tree(self.release)
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
 
 
 class TestTamperRecovery(InstallTreeTestCase):

@@ -257,8 +257,33 @@ def get_ssh_key_path() -> Path:
     return ssh_dir / "id_ed25519"
 
 
+def _robot_state_path(filename: str) -> Path:
+    """Robot state that has to outlive a build.
+
+    `<workspace>/install` is deleted and recreated by every full build
+    (`setup.py`), so anything kept there is gone by the next run. That is fatal
+    for the event queue in particular: buffering exists so a robot that was
+    offline when an install failed still reports on a later run, and a build in
+    between must not erase what it was going to say. `release/` already holds
+    the install tree's own state and no build removes it.
+
+    A file left at the old location is carried over rather than abandoned: an
+    upgrade must not throw away reports the previous client had buffered.
+    """
+    current = _ctx().workspace / "release" / filename
+    legacy = _ctx().workspace / "install" / filename
+    if legacy.exists() and not current.exists():
+        try:
+            current.parent.mkdir(parents=True, exist_ok=True)
+            legacy.replace(current)
+        except OSError:
+            # Keep reading the old copy rather than losing it.
+            return legacy
+    return current
+
+
 def _install_session_path() -> Path:
-    return _ctx().workspace / "install" / _INSTALL_SESSION_FILE
+    return _robot_state_path(_INSTALL_SESSION_FILE)
 
 
 def _read_install_session() -> Optional[str]:
@@ -406,11 +431,11 @@ def _utc_now_iso() -> str:
 
 
 def _install_event_queue_path() -> Path:
-    return _ctx().workspace / "install" / _INSTALL_EVENT_QUEUE_FILE
+    return _robot_state_path(_INSTALL_EVENT_QUEUE_FILE)
 
 
 def _install_event_state_path() -> Path:
-    return _ctx().workspace / "install" / _INSTALL_EVENT_STATE_FILE
+    return _robot_state_path(_INSTALL_EVENT_STATE_FILE)
 
 
 def _read_install_event_queue() -> list:
@@ -637,12 +662,19 @@ def flush_install_events() -> bool:
             for ack in (acks or [])
             if isinstance(ack, dict) and ack.get("eventId")
         }
-        # A response that acknowledges nothing we sent would loop forever.
-        if not acked:
-            print("⚠️ OTA server acknowledged no install events; keeping the queue.")
-            break
-
+        # The loop only terminates by draining the queue, so it has to be the
+        # queue that is checked. A response can be non-empty and still acknowledge
+        # nothing we sent — ids from another node, or from a batch already
+        # dropped — and testing the response instead reposts the same batch
+        # forever.
+        before = len(remaining)
         remaining = [e for e in remaining if e.get("eventId") not in acked]
+        if len(remaining) == before:
+            print(
+                "⚠️ OTA server acknowledged none of the install events in this "
+                "batch; keeping the queue."
+            )
+            break
 
     dropped = len(remaining) - _MAX_BUFFERED_INSTALL_EVENTS
     if dropped > 0:
@@ -681,6 +713,24 @@ def clear_install_session() -> None:
         _install_event_state_path().write_text(json.dumps(state), encoding="utf-8")
     except OSError:
         pass
+
+
+def archive_is_pinned(
+    archive_name: Optional[str] = None, archive_version: Optional[str] = None
+) -> bool:
+    """Whether this install targets one deliberately chosen archive.
+
+    A pin is a decision someone made about this machine, so nothing may quietly
+    substitute another archive, another tag, or GitHub releases for it. It can
+    come from the command line, or per-node from `RAISIN_ARCHIVE_NAME` — an
+    operator who exports that on a robot has pinned that robot.
+
+    Both the core and `install_command` have to agree on what counts, which is
+    why they ask here instead of each deciding for themselves.
+    """
+    return bool(
+        archive_name or archive_version or os.environ.get("RAISIN_ARCHIVE_NAME")
+    )
 
 
 def get_archive_name(build_type: str, archive_name: Optional[str] = None) -> str:
@@ -1479,6 +1529,15 @@ class ContentHashMismatch(Exception):
     """Downloaded bytes did not match the digest the server advertised."""
 
 
+class OtaInstallHalted(Exception):
+    """The OTA server told this node to stop installing.
+
+    Raised rather than returned so no caller can mistake it for "no archive
+    available" and go looking somewhere else. A halt is an instruction; an
+    empty result is an absence, and the two must not share a representation.
+    """
+
+
 # Error codes from the server's install-event contract
 # (docs/ota-install-event-contract.md). The server treats these as data and
 # never branches on them — classification is the client's job, because the
@@ -1663,6 +1722,20 @@ def _attempt_download(
     with requests.get(
         url, headers=request_headers, params=params, stream=True, timeout=timeout
     ) as resp:
+        # 416 answers a Range we should not have asked for: the partial is
+        # already the whole object — a crash between the digest check and the
+        # rename leaves exactly that — or longer than the server's copy. It is
+        # our request that was wrong, not the server that is unwell, so it
+        # classifies as `unknown` and is never retried. Start over now rather
+        # than spending an attempt, or the package fails identically on every
+        # run until the partial ages out.
+        if resp.status_code == 416 and existing:
+            _discard_part(part_path)
+            # `existing` is 0 on the way back in, so no Range is sent and this
+            # branch cannot be taken again.
+            return _attempt_download(
+                url, part_path, download_path, headers, params, timeout
+            )
         resp.raise_for_status()
 
         # A 200 in response to a Range request means the object changed and the
@@ -2376,7 +2449,7 @@ def download_all_from_archive(
     # An explicit name or version from the caller is a deliberate pin and
     # outranks whatever the fleet has assigned. Only ask the server what to run
     # when the caller expressed no preference.
-    caller_pinned_archive = bool(archive_name) or bool(archive_version)
+    caller_pinned_archive = archive_is_pinned(archive_name, archive_version)
     archive_name = get_archive_name(build_type, archive_name)
 
     desired_manifest = None
@@ -2385,7 +2458,7 @@ def download_all_from_archive(
             _resolve_desired_state(platform_str)
         )
         if halted:
-            return {}
+            raise OtaInstallHalted("the OTA server has halted installs for this node")
         if desired_name and desired_version:
             archive_name, archive_version = desired_name, desired_version
 
@@ -2419,7 +2492,19 @@ def download_all_from_archive(
     if not archive_id:
         return {}
 
-    print(f"📦 Using archive: {archive_name} v{actual_version or 'latest'}")
+    # The version names the directory this install commits into, and the
+    # generation pattern needs a non-empty one. `None` produces a directory
+    # called `0002-None` that `commit_version` can never resolve; an empty
+    # string produces `0002-`, which the pattern cannot see at all, so the next
+    # run stages into the same name. Neither can be committed or rolled back to.
+    if not actual_version:
+        print(
+            f"⚠️ Archive '{archive_name}' came back without a version; "
+            f"refusing to install an archive that cannot be named."
+        )
+        return {}
+
+    print(f"📦 Using archive: {archive_name} v{actual_version}")
     install_session_id = get_install_session_id()
     event_context = {
         "archive_id": archive_id,
@@ -2525,7 +2610,26 @@ def download_all_from_archive(
         )
         return {}
 
-    install_tree.commit_version(release, actual_version, session=install_session_id)
+    # Moving the symlink is what makes an install real. If it did not move,
+    # nothing was installed — and the health check below would read the tree
+    # that is still live and pass, so silence here reports the previous
+    # version's packages as a successful install of this one.
+    committed = install_tree.commit_version(
+        release, actual_version, session=install_session_id
+    )
+    if committed is None:
+        print(
+            f"⚠️ Could not switch release/install to '{archive_name}' "
+            f"v{actual_version}; the previous version keeps running."
+        )
+        install_tree.discard_staging(release, actual_version)
+        note_install_failure(
+            "unpack",
+            ERROR_UNKNOWN,
+            f"commit failed for {archive_name} v{actual_version}",
+        )
+        return {}
+
     print(f"🔀 Switched release/install to {archive_name} v{actual_version}.")
 
     broken = _unusable_packages(install_base_path, requested, build_type)

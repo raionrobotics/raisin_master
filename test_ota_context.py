@@ -48,9 +48,10 @@ class TestOtaContext(unittest.TestCase):
         )
 
     def test_workspace_paths_come_from_the_context(self):
-        self.assertEqual(ota._install_session_path().parent, self.workspace / "install")
+        # `release/`, not `install/`: a full build deletes the latter.
+        self.assertEqual(ota._install_session_path().parent, self.workspace / "release")
         self.assertEqual(
-            ota._install_event_queue_path().parent, self.workspace / "install"
+            ota._install_event_queue_path().parent, self.workspace / "release"
         )
 
     def test_an_unconfigured_core_fails_loudly(self):
@@ -74,7 +75,7 @@ class TestOtaContext(unittest.TestCase):
         )
 
         self.assertEqual(ota._ctx().platform, "ubuntu-22.04-x86_64")
-        self.assertEqual(ota._install_session_path().parent, other / "install")
+        self.assertEqual(ota._install_session_path().parent, other / "release")
 
 
 class TestRobotIdentityIsInjected(unittest.TestCase):

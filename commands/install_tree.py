@@ -14,11 +14,25 @@ already live still stages into a fresh directory instead of mutating the tree
 underneath a running system.
 """
 
+import errno
 import os
 import re
 import shutil
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+
+class InstallTreeUnusable(Exception):
+    """The versioned tree cannot be prepared where it has been placed.
+
+    Almost always a layout question rather than a transient fault: mounting a
+    bigger partition at `release/install` puts it on a different filesystem
+    from `release/versions`, and neither the rename that adopts an existing
+    tree nor the hardlink clone that stages a new one crosses that boundary.
+    Raised with the cause named so the operator can move the mount instead of
+    reading a traceback.
+    """
+
 
 _VERSIONS_DIR = "versions"
 _CURRENT_LINK = "install"
@@ -92,6 +106,24 @@ def _current_dir_name(release) -> Optional[str]:
     return name
 
 
+def _is_our_link(link: Path) -> bool:
+    """Whether this symlink is one this module created.
+
+    Ours are always relative and inside `versions/`. Pointing
+    `release/install` at another disk is how an operator moves a large package
+    tree off a small root filesystem, and that link is not ours to repair —
+    "repairing" it would put the next install back on the disk they moved it
+    off, while reporting that something was fixed.
+    """
+    try:
+        target = os.readlink(link)
+    except OSError:
+        return False
+    if os.path.isabs(target):
+        return False
+    return Path(target).parts[:1] == (_VERSIONS_DIR,)
+
+
 def _newest_available(release) -> Optional[str]:
     generations = _generations(release)
     return generations[-1][2].name if generations else None
@@ -108,6 +140,8 @@ def ensure_tree(release) -> Optional[str]:
     link = current_link(release)
 
     if link.is_symlink():
+        if not _is_our_link(link):
+            return None  # someone else's link; leave it exactly as it is
         if _current_dir_name(release) is not None:
             return None  # healthy
         recovered = _newest_available(release)
@@ -231,9 +265,24 @@ def migrate_legacy_tree(release) -> bool:
         versions_dir(release) / f"{_next_generation(release):04d}-{_LEGACY_VERSION}"
     )
     target.parent.mkdir(parents=True, exist_ok=True)
-    link.rename(target)
+    try:
+        link.rename(target)
+    except OSError as exc:
+        raise InstallTreeUnusable(_layout_hint(link, target.parent, exc)) from exc
     _point_current_at(release, target.name)
     return True
+
+
+def _layout_hint(source, destination, exc: BaseException) -> str:
+    """Explain a filesystem refusal in terms of what an operator can change."""
+    if getattr(exc, "errno", None) == errno.EXDEV:
+        return (
+            f"{source} and {destination} are on different filesystems. The "
+            "versioned install tree moves and hardlinks between them, which "
+            "the kernel will not do across a mount point — mount the whole "
+            "release/ directory rather than release/install."
+        )
+    return f"could not prepare the install tree at {destination}: {exc}"
 
 
 def _clone_tree(src: Path, dst: Path) -> None:
@@ -249,7 +298,13 @@ def stage_version(release, version: str) -> Path:
     current = _current_dir_name(release)
     current_dir = versions_dir(release) / current if current else None
     if current_dir and current_dir.is_dir():
-        _clone_tree(current_dir, staging)
+        try:
+            _clone_tree(current_dir, staging)
+        except (OSError, shutil.Error) as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise InstallTreeUnusable(
+                _layout_hint(current_dir, staging.parent, exc)
+            ) from exc
     else:
         staging.mkdir(parents=True, exist_ok=True)
 
