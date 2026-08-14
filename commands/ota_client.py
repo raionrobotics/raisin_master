@@ -311,6 +311,62 @@ def get_install_session_id() -> str:
     return _install_session_id
 
 
+def _archive_identity_from_tree(
+    install_base_path: Path, build_type: str
+) -> Optional[tuple]:
+    """(archive_id, name, version) recorded in whatever tree is live right now.
+
+    Read back rather than remembered: after a rollback the live tree is the
+    *previous* archive, and only its own install metadata knows which one that
+    was. A tree adopted from a pre-versioning install has no such metadata and
+    yields None.
+    """
+    pattern = f"*/*/*/*/{build_type}/{_INSTALL_METADATA_FILE}"
+    for metadata_path in sorted(Path(install_base_path).glob(pattern)):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(metadata, dict) or metadata.get("source") != "archive":
+            continue
+
+        archive_id = _normalize_optional_string(metadata.get("archiveId"))
+        name = _normalize_optional_string(metadata.get("archiveName"))
+        version = _normalize_optional_string(metadata.get("archiveVersion"))
+        if archive_id and name and version:
+            return (archive_id, name, version)
+    return None
+
+
+def _report_restored_snapshot(
+    install_base_path: Path, build_type: str, install_session_id: str
+) -> None:
+    """Tell the server what the robot is running after a rollback.
+
+    A snapshot is otherwise only sent on a successful commit, so a rollback
+    that stays silent leaves the fleet view showing the version that was just
+    reverted — software the robot is no longer running.
+    """
+    identity = _archive_identity_from_tree(install_base_path, build_type)
+    if identity is None:
+        print(
+            "⚠️ Rolled back to a tree with no archive metadata; the server "
+            "still lists the version that was reverted."
+        )
+        return
+
+    archive_id, archive_name, archive_version = identity
+    _report_snapshot_from_install_metadata(
+        install_base_path=install_base_path,
+        archive_id=archive_id,
+        archive_name=archive_name,
+        archive_version=archive_version,
+        platform_str=_ctx().platform,
+        build_type=build_type,
+        install_session_id=install_session_id,
+    )
+
+
 def _unusable_packages(install_base_path: Path, requested, build_type: str) -> list:
     """Requested packages that are not actually present in the live tree.
 
@@ -2490,6 +2546,7 @@ def download_all_from_archive(
                 error_message=f"unusable after switch: {', '.join(broken)}",
                 **event_context,
             )
+            _report_restored_snapshot(install_base_path, build_type, install_session_id)
         else:
             # Nothing to restore, so this is not a rollback — the contract
             # reserves `rolled_back` for an attempt that came back.

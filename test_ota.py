@@ -1401,10 +1401,22 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         (g.script_directory, g.os_type, g.os_version, g.architecture) = self._orig
         self._tmp.cleanup()
 
+    # A real archive manifest always carries manifestHash; the snapshot
+    # contract requires it per package.
     MANIFEST = (
         [
-            {"packageName": "pkg1", "packageId": "p1", "tagName": "1.0.0"},
-            {"packageName": "pkg2", "packageId": "p2", "tagName": "1.0.0"},
+            {
+                "packageName": "pkg1",
+                "packageId": "p1",
+                "tagName": "1.0.0",
+                "manifestHash": "a" * 64,
+            },
+            {
+                "packageName": "pkg2",
+                "packageId": "p2",
+                "tagName": "1.0.0",
+                "manifestHash": "b" * 64,
+            },
         ],
         "arch-1",
         "2026.2.0",
@@ -1420,6 +1432,13 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
             (install_dir / "release.yaml").write_text(
                 f"version: {version}\n", encoding="utf-8"
             )
+            # Real extraction records this; a rollback reads it back to learn
+            # which archive the restored tree belongs to.
+            metadata = kw.get("install_metadata")
+            if metadata:
+                (install_dir / "ota-install.json").write_text(
+                    json.dumps(metadata), encoding="utf-8"
+                )
             return {"version": version, "dependencies": []}
 
         return fake
@@ -1531,10 +1550,12 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
             "commands.ota_client._extract_and_read_deps", side_effect=hollow
         ), patch(
             "commands.ota_client.report_software_snapshot", return_value=True
-        ):
-            return ota.download_all_from_archive(
+        ) as mock_snapshot:
+            results = ota.download_all_from_archive(
                 "release", self.live, archive_version=version
             )
+        self.last_snapshot = mock_snapshot
+        return results
 
     def test_broken_commit_rolls_back_to_the_previous_version(self):
         self._run({"pkg1", "pkg2"})
@@ -1565,6 +1586,40 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         ]
         self.assertEqual([e["eventType"] for e in terminal], ["rolled_back"])
         self.assertEqual(terminal[0]["errorCode"], "health_check_failed")
+
+    def test_rollback_reports_the_restored_archive(self):
+        """After reverting, the server still has the failed version recorded.
+
+        Nothing else corrects it: the snapshot is only sent on a successful
+        commit, so a rollback that stays silent leaves the fleet view showing
+        software the robot is no longer running.
+        """
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-snap"
+
+        self._run_with_hollow_extract("2026.3.0")
+
+        self.last_snapshot.assert_called_once()
+        reported = self.last_snapshot.call_args.kwargs
+        self.assertEqual(reported["archive_version"], "2026.2.0")
+        self.assertEqual(reported["archive_id"], "arch-1")
+        self.assertEqual(
+            sorted(p["packageName"] for p in reported["packages"]), ["pkg1", "pkg2"]
+        )
+
+    def test_a_tree_with_no_archive_metadata_is_not_reported(self):
+        """An adopted pre-versioning tree has nothing to say about an archive."""
+        legacy = self.live / "old_pkg" / "linux" / "22.04" / "x86_64" / "release"
+        legacy.mkdir(parents=True)
+        (legacy / "release.yaml").write_text("version: 0.1\n", encoding="utf-8")
+        install_tree.ensure_tree(self.release)
+        self._write_pkg_free_commit = None
+
+        with patch("builtins.print"):
+            self._run_with_hollow_extract("2026.3.0")
+
+        self.last_snapshot.assert_not_called()
 
     def test_broken_first_install_cannot_roll_back_and_says_so(self):
         """With no previous version there is nothing to restore — that is `failed`."""
