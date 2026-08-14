@@ -25,7 +25,17 @@ from packaging.specifiers import SpecifierSet
 from commands import globals as g
 from commands.utils import load_configuration, parse_version_specifier
 
-from commands.ota_client import download_package_at_timestamp, download_all_from_archive
+from commands.install_tree import InstallTreeUnusable
+from commands.ota_client import (
+    download_package_at_timestamp,
+    download_all_from_archive,
+    OtaInstallHalted,
+    archive_is_pinned,
+    flush_pending_snapshot_reports,
+    clear_install_session,
+    report_install_outcome,
+    flush_install_events,
+)
 
 
 def _default_tag_for_user_type(user_type: Optional[str]) -> str:
@@ -42,6 +52,43 @@ def _default_tag_for_user_type(user_type: Optional[str]) -> str:
 
 
 def install_command(
+    targets,
+    build_type,
+    archive_version: Optional[str] = None,
+    archive_name: Optional[str] = None,
+    at_timestamp: Optional[str] = None,
+    from_github: bool = False,
+    tag: Optional[str] = None,
+) -> bool:
+    """Install packages, reporting a broken install tree rather than raising.
+
+    Both the archive route and the per-package route prepare the versioned
+    tree, so both can find it unusable — on a robot whose `release/install` is
+    a mount point, for instance. That is a layout problem, not a reason to
+    install the same packages from somewhere else into the same place, so it
+    ends the run here instead of falling through.
+    """
+    try:
+        return _install(
+            targets,
+            build_type,
+            archive_version,
+            archive_name,
+            at_timestamp,
+            from_github,
+            tag,
+        )
+    except InstallTreeUnusable as unusable:
+        print("")
+        print("=" * 72)
+        print("❌ The install tree cannot be prepared — nothing was installed.")
+        print(f"   {unusable}")
+        print("   No fallback is performed; the layout has to change first.")
+        print("=" * 72)
+        return False
+
+
+def _install(
     targets,
     build_type,
     archive_version: Optional[str] = None,
@@ -126,12 +173,12 @@ def install_command(
     session = requests.Session()
     is_successful = True
 
-    # When the caller pinned an explicit archive (name AND/OR version), we
-    # refuse to fall back silently to another archive, another tag, or GitHub
-    # releases. A miss must be a hard, loud failure — the alternative is what
-    # caused `--archive-name dso --archive-version 1.0.3` to quietly resolve
-    # to `raisin-dev 1.0.3` and install the wrong controllers.
-    explicit_archive_pin = bool(archive_name) or bool(archive_version)
+    # When an archive is pinned — on the command line, or per-node through
+    # RAISIN_ARCHIVE_NAME — we refuse to fall back silently to another archive,
+    # another tag, or GitHub releases. A miss must be a hard, loud failure: the
+    # alternative is what caused `--archive-name dso --archive-version 1.0.3`
+    # to quietly resolve to `raisin-dev 1.0.3` and install the wrong controllers.
+    explicit_archive_pin = archive_is_pinned(archive_name, archive_version)
 
     if not install_queue:
         # Normalize 'none' (case-insensitive) to None for legacy fallback.
@@ -162,13 +209,24 @@ def install_command(
                 "the latest archive."
             )
 
-        ota_results = download_all_from_archive(
-            build_type,
-            script_dir_path / "release" / "install",
-            archive_version=archive_version,
-            archive_name=archive_name,
-            tag=resolved_tag,
-        )
+        try:
+            ota_results = download_all_from_archive(
+                build_type,
+                script_dir_path / "release" / "install",
+                archive_version=archive_version,
+                archive_name=archive_name,
+                tag=resolved_tag,
+            )
+        except OtaInstallHalted as halted:
+            # A halt is an instruction to stop. Falling back would install the
+            # same software from somewhere else and call it obedience.
+            print("")
+            print("=" * 72)
+            print("⛔ Installs are halted for this node — nothing was installed.")
+            print(f"   {halted}")
+            print("   No fallback is performed while a halt is in effect.")
+            print("=" * 72)
+            return False
 
         if ota_results:
             print("🎉🎉🎉 Installation process finished successfully.")
@@ -348,6 +406,10 @@ def install_command(
                     )
                     is_successful = False
                     continue
+            except InstallTreeUnusable:
+                # Not a per-package problem, and retrying the next package
+                # against the same broken tree would only repeat it.
+                raise
             except Exception as e:
                 print(
                     f"⚠️ OTA download failed for '{package_name}': {e}. Falling back to GitHub."
@@ -515,13 +577,6 @@ def install_command(
     help="Build type to install",
 )
 @click.option(
-    "--all",
-    "-a",
-    "install_all",
-    is_flag=True,
-    help="Install both debug and release builds",
-)
-@click.option(
     "--archive-version",
     "-v",
     "archive_version",
@@ -562,7 +617,6 @@ def install_command(
 def install_cli_command(
     packages,
     build_type,
-    install_all,
     archive_version,
     archive_name,
     at_timestamp,
@@ -578,7 +632,6 @@ def install_cli_command(
         raisin install raisin_network                # Install specific package
         raisin install raisin_network==1.1.0         # Install specific version
         raisin install --type debug                  # Install debug builds
-        raisin install --all                         # Install both debug and release
         raisin install --archive-version v2024.01   # Install from specific archive
         raisin install --archive-name team-robot    # Install from a custom archive name
         raisin install --at 2024-01-15               # Install packages at timestamp
@@ -586,10 +639,7 @@ def install_cli_command(
     """
     packages = list(packages)
 
-    if install_all:
-        build_types = ["debug", "release"]
-    else:
-        build_types = [build_type]
+    build_types = [build_type]
 
     # Run every build_type even if an earlier one fails so the user sees the
     # full picture, then exit non-zero if any of them reported failure. That's
@@ -625,5 +675,18 @@ def install_cli_command(
         if not succeeded:
             overall_success = False
 
+    flush_pending_snapshot_reports()
+
+    # Close the attempt with one terminal event. A failure noted downstream
+    # outranks overall_success, because install_command returns True when any
+    # package landed — a partial archive install is not a completed one.
+    report_install_outcome(overall_success)
+
+    # Flush either way — a failed attempt is exactly what needs reporting.
+    flush_install_events()
+
+    # Keep the session on failure so a retry resumes it; retire it on success.
     if not overall_success:
         raise click.exceptions.Exit(code=1)
+
+    clear_install_session()
