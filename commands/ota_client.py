@@ -28,14 +28,12 @@ import zipfile
 
 import requests
 import yaml
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa, padding
+from packaging.specifiers import SpecifierSet, InvalidSpecifier
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from commands import globals as g
 from commands import install_tree
-from commands.utils import parse_version_specifier
 
 # Module-level cached auth token (lives for the CLI session)
 _cached_token = None
@@ -56,7 +54,6 @@ _install_session_id = None
 _pending_snapshot_reports = {}
 
 # Caches file-backed robot API keys by path and file stat metadata.
-_robot_api_key_cache = {}
 
 # Default archive name prefix (build_type is appended for debug)
 DEFAULT_ARCHIVE_NAME = "raisin-robot"
@@ -98,13 +95,129 @@ _ROBOT_API_KEY_FILE_ENV = "RAISIN_ROBOT_API_KEY_FILE"  # pragma: allowlist secre
 _ROBOT_NODE_ENV = "RAISIN_ROBOT_NODE"
 _ROBOT_NODE_KEY_ENV = "RAISIN_ROBOT_NODE_KEY"
 _ROBOT_CONFIG_FILES = ("configuration_setting.yaml", "secrets.yaml")
-_robot_auth_warning_keys = set()
 
 # Caches parsed local config by path and file stat metadata.
-_local_config_cache = {}
 
 # Client identity attached to robot OTA audit/history records.
 DEFAULT_CLIENT_VERSION = "raisin-cli"
+
+
+# ============================================================================
+# Runtime context
+# ============================================================================
+
+
+def _normalize_optional_string(value) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if not value or value.lower() in {"none", "null"}:
+        return None
+    return value
+
+
+@dataclass(frozen=True)
+class RobotIdentity:
+    """Who this process is to the OTA server.
+
+    Resolving this — environment, config files, a key file under someone's
+    HOME — is the caller's job. A robot on a service account and a developer
+    at a shell answer it differently, and a human running the tool on a robot
+    must not be attributed to the robot just because a key file is on disk.
+    """
+
+    api_key: str
+    node_key: str
+    client_version: str = DEFAULT_CLIENT_VERSION
+
+
+@dataclass(frozen=True)
+class OtaContext:
+    """Where this process works and what platform it is working for.
+
+    The CLI fills these from its own startup; an agent supplies them directly.
+    Reading them from a CLI module would tie the core to a process that only
+    exists in one of its two callers.
+    """
+
+    workspace: Path
+    os_type: str
+    os_version: str
+    architecture: str
+    robot: Optional[RobotIdentity] = None
+
+    @property
+    def platform(self) -> str:
+        """Platform string as the OTA server names it, e.g. ubuntu-24.04-arm64."""
+        return f"{self.os_type}-{self.os_version}-{self.architecture}"
+
+    def package_dir(self, base: Path, package: str, build_type: str) -> Path:
+        """Where one package's files live under an install tree."""
+        return (
+            Path(base)
+            / package
+            / self.os_type
+            / self.os_version
+            / self.architecture
+            / build_type
+        )
+
+
+_context = None
+
+
+def configure(context: OtaContext) -> None:
+    """Point the core at a workspace and platform. Call once at startup."""
+    global _context
+    _context = context
+
+
+def _client_version() -> str:
+    robot = _ctx().robot
+    return robot.client_version if robot else DEFAULT_CLIENT_VERSION
+
+
+def _ctx() -> OtaContext:
+    if _context is None:
+        raise RuntimeError(
+            "OTA core is not configured; call ota_client.configure(OtaContext(...)) "
+            "before using it."
+        )
+    return _context
+
+
+def parse_version_specifier(spec_str):
+    """Parse a version specifier string into a SpecifierSet.
+
+    Kept here rather than imported: the CLI's utils module pulls in process
+    globals at import time, and this function needs none of them.
+
+        ""            -> >=0.0.0 (any version)
+        ">=1.0.0"     -> standard specifier
+        ">=1.0,<2.0"  -> compound specifier
+        "1.0.0"       -> treated as ==1.0.0
+
+    Returns a SpecifierSet, or None when the string cannot be parsed.
+    """
+    try:
+        spec_str = (spec_str or "").strip()
+        if not spec_str:
+            return SpecifierSet(">=0.0.0")
+
+        specifiers = re.findall(r"[<>=!~]+[\d.]+", spec_str)
+        if specifiers:
+            formatted = ", ".join(specifiers)
+            formatted = formatted.replace(">, =", ">=").replace("< =", "<=")
+            return SpecifierSet(formatted)
+
+        if re.match(r"^[\d.]+$", spec_str):
+            return SpecifierSet(f"=={spec_str}")
+
+        return None
+    except InvalidSpecifier:
+        return None
 
 
 # ============================================================================
@@ -144,260 +257,8 @@ def get_ssh_key_path() -> Path:
     return ssh_dir / "id_ed25519"
 
 
-def _normalize_optional_string(value) -> Optional[str]:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        value = str(value)
-    value = value.strip()
-    if not value or value.lower() in {"none", "null"}:
-        return None
-    return value
-
-
-def _load_local_config() -> dict:
-    """Best-effort read of local configuration without enforcing full config validity.
-
-    Cached on file stat metadata: robot auth headers are rebuilt for every
-    package download, and each rebuild resolves both the API key and the node
-    key, so an uncached read re-parses the YAML twice per package.
-    """
-    script_dir_path = Path(g.script_directory)
-    for filename in _ROBOT_CONFIG_FILES:
-        config_path = script_dir_path / filename
-        try:
-            stat_result = config_path.stat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(stat_result.st_mode):
-            continue
-
-        cache_token = (stat_result.st_mtime_ns, stat_result.st_size)
-        cached = _local_config_cache.get(config_path)
-        if cached and cached[0] == cache_token:
-            return cached[1]
-
-        try:
-            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            return {}
-        config = config if isinstance(config, dict) else {}
-        _local_config_cache[config_path] = (cache_token, config)
-        return config
-    return {}
-
-
-def _get_nested_config_value(config: dict, path: tuple) -> Optional[str]:
-    current = config
-    for key in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    return _normalize_optional_string(current)
-
-
-def _get_local_config_value(paths: tuple) -> Optional[str]:
-    config = _load_local_config()
-    for path in paths:
-        value = _get_nested_config_value(config, path)
-        if value:
-            return value
-    return None
-
-
-def get_robot_api_key_path() -> Path:
-    """Get the local robot API key path.
-
-    Resolution order:
-        1. RAISIN_ROBOT_API_KEY_FILE environment variable
-        2. ~/.config/raisin/robot-api-key
-    """
-    env_path = os.environ.get(_ROBOT_API_KEY_FILE_ENV, "").strip()
-    if env_path:
-        return Path(env_path).expanduser()
-    return Path.home() / ".config" / "raisin" / _ROBOT_API_KEY_FILE
-
-
-def save_robot_api_key(api_key: str, path: Optional[Path] = None) -> Path:
-    """Persist a robot API key with owner-only file permissions."""
-    key = (api_key or "").strip()
-    if not key:
-        raise ValueError("Robot API key cannot be empty")
-
-    target = Path(path).expanduser() if path else get_robot_api_key_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    temp_path = target.with_name(f".{target.name}.tmp")
-    try:
-        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(key + "\n")
-        temp_path.replace(target)
-    finally:
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
-
-    try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
-    _cache_robot_api_key(target, key)
-    return target
-
-
-def _api_key_cache_token(stat_result) -> tuple:
-    return (
-        stat_result.st_mtime_ns,
-        stat_result.st_size,
-        stat_result.st_mode & 0o777,
-    )
-
-
-def _cache_robot_api_key(key_path: Path, api_key: Optional[str]) -> None:
-    try:
-        stat_result = key_path.stat()
-    except OSError:
-        _robot_api_key_cache.pop(key_path, None)
-        return
-    _robot_api_key_cache[key_path] = (
-        _api_key_cache_token(stat_result),
-        api_key,
-        False,
-    )
-
-
-def _read_robot_api_key_file_detailed(key_path: Path) -> tuple:
-    """Read a key file, reporting whether a failure was already explained.
-
-    Returns (key, explained). `explained` is True when the reason the key is
-    unusable has already been printed — either by this call or by the earlier
-    call that cached the result — so callers do not stack a second, vaguer
-    warning on top of a specific one.
-    """
-    try:
-        stat_result = key_path.stat()
-    except FileNotFoundError:
-        _robot_api_key_cache.pop(key_path, None)
-        return (None, False)
-    except OSError as e:
-        print(f"⚠️ Failed to read robot API key file '{key_path}': {e}")
-        return (None, True)
-
-    cache_token = _api_key_cache_token(stat_result)
-    cached = _robot_api_key_cache.get(key_path)
-    if cached and cached[0] == cache_token:
-        return (cached[1], cached[2])
-
-    if os.name == "posix" and (stat_result.st_mode & 0o077):
-        print(
-            "⚠️ Ignoring robot API key file with insecure permissions: "
-            f"{key_path} (run: chmod 600 {key_path})"
-        )
-        _robot_api_key_cache[key_path] = (cache_token, None, True)
-        return (None, True)
-
-    try:
-        key = key_path.read_text(encoding="utf-8").strip()
-    except OSError as e:
-        print(f"⚠️ Failed to read robot API key file '{key_path}': {e}")
-        return (None, True)
-
-    cached_key = key or None
-    _robot_api_key_cache[key_path] = (cache_token, cached_key, False)
-    return (cached_key, False)
-
-
-def _read_robot_api_key_file(key_path: Path) -> Optional[str]:
-    return _read_robot_api_key_file_detailed(key_path)[0]
-
-
-def get_robot_api_key() -> Optional[str]:
-    """Read the robot API key from env or the local key file.
-
-    Resolution order:
-        1. RAISIN_ROBOT_API_KEY
-        2. RAISIN_ROBOT_API_KEY_FILE
-        3. configuration_setting.yaml/secrets.yaml robot.api_key
-        4. ~/.config/raisin/robot-api-key
-
-    File-backed keys are ignored on POSIX systems if group/other permissions
-    are enabled.
-    """
-    env_key = os.environ.get(_ROBOT_API_KEY_ENV, "").strip()
-    if env_key:
-        return env_key
-
-    env_key_file = os.environ.get(_ROBOT_API_KEY_FILE_ENV, "").strip()
-    if env_key_file:
-        # An explicitly pinned path is a deliberate choice. Do not fall through
-        # to the config file or the default path when it does not resolve —
-        # say so instead, or the robot quietly downloads as an anonymous client.
-        key, explained = _read_robot_api_key_file_detailed(
-            Path(env_key_file).expanduser()
-        )
-        if not key and not explained:
-            _warn_robot_auth_config_once(
-                f"unreadable_key_file:{env_key_file}",
-                f"⚠️ {_ROBOT_API_KEY_FILE_ENV} points at '{env_key_file}' but no "
-                "robot API key could be read from it. Using legacy OTA "
-                "authentication instead.",
-            )
-        return key
-
-    config_key = _get_local_config_value(
-        (
-            ("robot", "api_key"),
-            ("robot", "apiKey"),
-            ("ota", "robot_api_key"),
-            ("robot_api_key",),
-        )
-    )
-    if config_key:
-        return config_key
-
-    return _read_robot_api_key_file(get_robot_api_key_path())
-
-
-def get_robot_node_key() -> Optional[str]:
-    """Read the robot-local node key required by robot-authenticated endpoints."""
-    for env_name in (_ROBOT_NODE_ENV, _ROBOT_NODE_KEY_ENV):
-        env_value = _normalize_optional_string(os.environ.get(env_name))
-        if env_value:
-            return env_value
-
-    return _get_local_config_value(
-        (
-            ("robot", "node"),
-            ("robot", "node_key"),
-            ("robot", "nodeKey"),
-            ("ota", "robot_node"),
-            ("robot_node",),
-            ("robot_node_key",),
-        )
-    )
-
-
-def _warn_robot_auth_config_once(key: str, message: str) -> None:
-    if key in _robot_auth_warning_keys:
-        return
-    _robot_auth_warning_keys.add(key)
-    print(message)
-
-
-def get_client_version() -> str:
-    """Return the OTA client identity used in robot audit/history records."""
-    for env_name in ("RAISIN_OTA_CLIENT_VERSION", "RAISIN_CLIENT_VERSION"):
-        value = os.environ.get(env_name, "").strip()
-        if value:
-            return value
-    return DEFAULT_CLIENT_VERSION
-
-
 def _install_session_path() -> Path:
-    return Path(g.script_directory) / "install" / _INSTALL_SESSION_FILE
+    return _ctx().workspace / "install" / _INSTALL_SESSION_FILE
 
 
 def _read_install_session() -> Optional[str]:
@@ -459,14 +320,7 @@ def _unusable_packages(install_base_path: Path, requested, build_type: str) -> l
     """
     broken = []
     for name in sorted(requested):
-        package_dir = (
-            install_base_path
-            / name
-            / g.os_type
-            / g.os_version
-            / g.architecture
-            / build_type
-        )
+        package_dir = _ctx().package_dir(install_base_path, name, build_type)
         try:
             if not package_dir.is_dir() or not any(package_dir.iterdir()):
                 broken.append(name)
@@ -496,11 +350,11 @@ def _utc_now_iso() -> str:
 
 
 def _install_event_queue_path() -> Path:
-    return Path(g.script_directory) / "install" / _INSTALL_EVENT_QUEUE_FILE
+    return _ctx().workspace / "install" / _INSTALL_EVENT_QUEUE_FILE
 
 
 def _install_event_state_path() -> Path:
-    return Path(g.script_directory) / "install" / _INSTALL_EVENT_STATE_FILE
+    return _ctx().workspace / "install" / _INSTALL_EVENT_STATE_FILE
 
 
 def _read_install_event_queue() -> list:
@@ -574,7 +428,7 @@ def robot_reporting_enabled() -> bool:
     credential. Buffering install events there would grow a file that can never
     be flushed, so nothing is recorded in the first place.
     """
-    return bool(get_robot_api_key() and get_robot_node_key())
+    return _ctx().robot is not None
 
 
 def note_install_failure(
@@ -668,7 +522,7 @@ def record_install_event(
         "installSessionId": session_id,
         "eventType": event_type,
         "occurredAt": _utc_now_iso(),
-        "clientVersion": get_client_version(),
+        "clientVersion": _client_version(),
     }
     for key, value in (
         ("stage", stage),
@@ -795,7 +649,7 @@ def get_archive_name(build_type: str, archive_name: Optional[str] = None) -> str
 
 def _get_token_cache_path() -> Path:
     """Path to the persistent token cache file."""
-    return Path(g.script_directory) / _TOKEN_CACHE_FILE
+    return _ctx().workspace / _TOKEN_CACHE_FILE
 
 
 def _is_jwt_expired(token: str) -> bool:
@@ -894,6 +748,25 @@ def _clear_cached_token():
 # ============================================================================
 
 
+def _sign_nonce(nonce: str, key_path: Path) -> str:
+    """Sign a nonce with an SSH private key.
+
+    Imported lazily: signing is the only thing here that needs
+    `cryptography`, and it belongs to the user-authenticated path. A robot
+    authenticates with its own credential and never reaches this, so it
+    should not have to install a native extension to run.
+    """
+    try:
+        from . import ota_ssh
+    except ImportError as e:  # pragma: no cover - depends on the install extra
+        raise RuntimeError(
+            "SSH authentication needs the 'cryptography' package. "
+            "Install the ssh extra, or use a robot credential instead."
+        ) from e
+
+    return ota_ssh.sign_nonce(nonce, key_path)
+
+
 def _get_ssh_fingerprint(key_path: Path) -> str:
     """Run ssh-keygen -lf <key.pub> and return hex-encoded SHA256 fingerprint.
 
@@ -913,58 +786,6 @@ def _get_ssh_fingerprint(key_path: Path) -> str:
     # Convert base64 → raw bytes → hex
     padded = sha256_b64 + "=" * (-len(sha256_b64) % 4)
     return base64.b64decode(padded).hex()
-
-
-def _sign_nonce(nonce: str, key_path: Path) -> str:
-    """Sign nonce with SSH private key (supports ed25519, RSA, ECDSA).
-
-    Loads the SSH private key via the ``cryptography`` library and signs
-    the nonce bytes directly. Returns the signature as base64-encoded SSH
-    wire format (length-prefixed algorithm name + length-prefixed raw signature).
-
-    Supported key types:
-        - Ed25519 (ssh-ed25519)
-        - RSA (ssh-rsa) - uses SHA-256 with PKCS1v15 padding
-        - ECDSA (ecdsa-sha2-nistp256, nistp384, nistp521)
-    """
-    with open(key_path, "rb") as f:
-        private_key = serialization.load_ssh_private_key(f.read(), password=None)
-
-    data = bytes.fromhex(nonce)
-
-    # Sign based on key type
-    if isinstance(private_key, ed25519.Ed25519PrivateKey):
-        algo = b"ssh-ed25519"
-        raw_sig = private_key.sign(data)
-
-    elif isinstance(private_key, rsa.RSAPrivateKey):
-        algo = b"rsa-sha2-256"
-        raw_sig = private_key.sign(data, padding.PKCS1v15(), hashes.SHA256())
-
-    elif isinstance(private_key, ec.EllipticCurvePrivateKey):
-        # Determine curve and algorithm name
-        curve_name = private_key.curve.name
-        if curve_name == "secp256r1":
-            algo = b"ecdsa-sha2-nistp256"
-            hash_algo = hashes.SHA256()
-        elif curve_name == "secp384r1":
-            algo = b"ecdsa-sha2-nistp384"
-            hash_algo = hashes.SHA384()
-        elif curve_name == "secp521r1":
-            algo = b"ecdsa-sha2-nistp521"
-            hash_algo = hashes.SHA512()
-        else:
-            raise ValueError(f"Unsupported ECDSA curve: {curve_name}")
-        raw_sig = private_key.sign(data, ec.ECDSA(hash_algo))
-
-    else:
-        raise ValueError(f"Unsupported SSH key type: {type(private_key).__name__}")
-
-    # Build SSH wire format: length-prefixed algo + length-prefixed signature
-    sig_wire = (
-        struct.pack(">I", len(algo)) + algo + struct.pack(">I", len(raw_sig)) + raw_sig
-    )
-    return base64.b64encode(sig_wire).decode()
 
 
 def authenticate() -> Optional[str]:
@@ -1129,7 +950,7 @@ def upload_package(
     try:
         # 1. Compute SHA256
         sha256 = _compute_sha256(archive_path)
-        platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+        platform_str = _ctx().platform
 
         # 2. Check if blob already exists (deduplication)
         resp = requests.get(
@@ -1485,25 +1306,16 @@ def _stream_download(url: str, download_path: Path, error_context: str = "") -> 
 
 def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[dict]:
     """Build robot-authenticated headers, or return None when unconfigured."""
-    api_key = get_robot_api_key()
-    if not api_key:
-        return None
-    node_key = get_robot_node_key()
-    if not node_key:
-        _warn_robot_auth_config_once(
-            "missing_robot_node",
-            "⚠️ Robot API key is configured but robot node is missing "
-            "(set RAISIN_ROBOT_NODE or configuration_setting.yaml robot.node). "
-            "Using legacy OTA authentication instead.",
-        )
+    robot = _ctx().robot
+    if robot is None:
         return None
 
     session_id = install_session_id or get_install_session_id()
     return {
-        "Authorization": f"Robot {api_key}",
-        "X-Client-Version": get_client_version(),
+        "Authorization": f"Robot {robot.api_key}",
+        "X-Client-Version": robot.client_version,
         "X-Install-Session-Id": session_id,
-        "X-Robot-Node": node_key,
+        "X-Robot-Node": robot.node_key,
     }
 
 
@@ -2197,7 +2009,7 @@ def report_software_snapshot(
         "archiveId": archive_id,
         "archivePackages": packages,
         "installSessionId": session_id,
-        "clientVersion": get_client_version(),
+        "clientVersion": _client_version(),
     }
     if archive_name:
         payload["name"] = archive_name
@@ -2327,7 +2139,7 @@ def download_package(
     """
     from packaging.version import parse as parse_version, InvalidVersion
 
-    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+    platform_str = _ctx().platform
     archive_name = get_archive_name(build_type, archive_name)
 
     # Selection priority mirrors download_all_from_archive:
@@ -2388,18 +2200,9 @@ def download_package(
     tag = best_pkg.get("tagName") or best_pkg.get("version", "")
     version = tag.lstrip("vV") if tag else "0.0.0"
 
-    install_dir = (
-        install_base_path
-        / package_name
-        / g.os_type
-        / g.os_version
-        / g.architecture
-        / build_type
-    )
+    install_dir = _ctx().package_dir(install_base_path, package_name, build_type)
 
-    download_file = (
-        Path(g.script_directory) / "install" / f"{package_name}-ota-{version}.zip"
-    )
+    download_file = _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
 
     install_session_id = get_install_session_id()
 
@@ -2505,7 +2308,7 @@ def download_all_from_archive(
         dict mapping package_name to {'version': str, 'dependencies': list}
         for successfully downloaded packages. Empty dict on complete failure.
     """
-    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+    platform_str = _ctx().platform
 
     release = install_tree.release_for(install_base_path)
     repaired = install_tree.ensure_tree(release)
@@ -2596,13 +2399,9 @@ def download_all_from_archive(
 
         # _extract_and_read_deps removes this directory before unpacking, which
         # is what breaks the hardlink shared with the previous version.
-        install_dir = (
-            staging / name / g.os_type / g.os_version / g.architecture / build_type
-        )
+        install_dir = _ctx().package_dir(staging, name, build_type)
 
-        download_file = (
-            Path(g.script_directory) / "install" / f"{name}-ota-{version}.zip"
-        )
+        download_file = _ctx().workspace / "install" / f"{name}-ota-{version}.zip"
 
         print(f"⬇️  Downloading '{name}' v{version} from OTA server...")
         download_ok, _download_error = _download_package_blob(
@@ -2789,7 +2588,7 @@ def download_package_at_timestamp(
     if not ctx:
         return None
     base, headers = ctx
-    platform_str = f"{g.os_type}-{g.os_version}-{g.architecture}"
+    platform_str = _ctx().platform
 
     try:
         # Fetch manifest at timestamp
@@ -2818,17 +2617,10 @@ def download_package_at_timestamp(
             print(f"⚠️ Manifest for '{package_name}' has no blob hash")
             return None
 
-        install_dir = (
-            install_base_path
-            / package_name
-            / g.os_type
-            / g.os_version
-            / g.architecture
-            / build_type
-        )
+        install_dir = _ctx().package_dir(install_base_path, package_name, build_type)
 
         download_file = (
-            Path(g.script_directory) / "install" / f"{package_name}-ota-{version}.zip"
+            _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
         )
 
         print(f"⬇️  Downloading '{package_name}' v{version} (at {timestamp})...")

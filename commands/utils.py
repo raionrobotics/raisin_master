@@ -378,4 +378,18 @@ def init_environment(script_file_path, yes_flag):
         always_yes=yes_flag,
     )
 
+    # The OTA core does not read these globals, nor does it resolve a
+    # credential; hand it both.
+    from commands import ota_client, robot_credentials
+
+    ota_client.configure(
+        ota_client.OtaContext(
+            workspace=Path(script_directory),
+            os_type=os_type,
+            os_version=os_version,
+            architecture=architecture,
+            robot=robot_credentials.resolve_robot_identity(),
+        )
+    )
+
     delete_directory(os.path.join(script_directory, "temp"))
