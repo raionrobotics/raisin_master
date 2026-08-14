@@ -1028,17 +1028,19 @@ def upload_package(
                 resp.raise_for_status()
 
         # 4. Ensure package record exists
-        resp = requests.get(
-            f"{base}/packages",
-            headers=headers,
-            params={"name": package_name},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        packages = _unwrap_response(resp.json())
+        found = _search_packages(base, headers, package_name)
+        if found is None:
+            # Creating the record now would risk a duplicate for a package that
+            # may well exist — the lookup never got an answer either way.
+            print(f"⚠️ OTA upload aborted: could not look up '{package_name}'")
+            return False
 
-        if packages and len(packages) > 0:
-            package_id = packages[0]["id"]
+        existing = next(
+            (p for p in found if p.get("name") == package_name),
+            None,
+        )
+        if existing:
+            package_id = existing["id"]
         else:
             resp = requests.post(
                 f"{base}/packages",
@@ -2578,33 +2580,138 @@ def download_all_from_archive(
     return results
 
 
-def _fetch_package_id_by_name(package_name: str) -> Optional[str]:
-    """Fetch package ID by name from the OTA server.
+# `GET /packages` caps `limit` at 100 and rejects anything larger outright.
+_PACKAGE_PAGE_SIZE = 100
 
-    Returns package UUID on success, None on failure.
+
+def _rejection_detail(response) -> str:
+    """The server's own words for why it refused the request."""
+    try:
+        body = response.json()
+    except ValueError:
+        return (getattr(response, "text", "") or "").strip()[:200]
+
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return str(body)[:200]
+
+    reasons = [
+        item["message"]
+        for item in error.get("validationErrors") or []
+        if isinstance(item, dict) and item.get("message")
+    ]
+    return "; ".join(reasons) or str(error.get("message", ""))[:200]
+
+
+def _get_packages_page(base, headers, params: dict, purpose: str) -> Optional[dict]:
+    """One page of ``GET /packages``, or None if the request did not succeed.
+
+    A refusal is announced rather than folded into an empty result. This
+    endpoint validates its query strictly — an unexpected parameter is a 400,
+    not an empty page — and reporting that as "no such package" sends whoever
+    is reading the output to look on the wrong side of the wire.
+    """
+    try:
+        resp = requests.get(
+            f"{base}/packages", headers=headers, params=params, timeout=10
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status is not None and 400 <= status < 500:
+            print(f"⚠️ OTA server rejected {purpose} ({status}):")
+            detail = _rejection_detail(response)
+            if detail:
+                print(f"   {detail}")
+        else:
+            print(f"⚠️ OTA server unreachable for {purpose}: {exc}")
+        return None
+
+    result = _unwrap_response(resp.json())
+    if isinstance(result, list):  # an older server that returned a bare array
+        return {"packages": result, "totalPages": 1}
+    if not isinstance(result, dict):
+        return {"packages": [], "totalPages": 1}
+
+    packages = result.get("packages")
+    return {
+        "packages": packages if isinstance(packages, list) else [],
+        "totalPages": result.get("totalPages") or 1,
+    }
+
+
+def _paginate_packages(
+    base, headers, search: Optional[str], page_size: int, purpose: str
+) -> Optional[list]:
+    """Every matching package, or None if any page was refused.
+
+    Returning what arrived before a refusal would present a truncated list as
+    the complete one, which is the same failure this is here to remove.
+    """
+    collected = []
+    page = 1
+    while True:
+        params = {"page": page, "limit": min(page_size, _PACKAGE_PAGE_SIZE)}
+        if search is not None:
+            params["search"] = search
+
+        result = _get_packages_page(base, headers, params, purpose)
+        if result is None:
+            return None
+
+        collected.extend(result["packages"])
+        if page >= result["totalPages"] or not result["packages"]:
+            return collected
+        page += 1
+
+
+def _search_packages(
+    base, headers, search: str, page_size: int = _PACKAGE_PAGE_SIZE
+) -> Optional[list]:
+    return _paginate_packages(
+        base, headers, search, page_size, f"the lookup for '{search}'"
+    )
+
+
+def _list_all_packages(page_size: int = _PACKAGE_PAGE_SIZE) -> Optional[list]:
+    """Every package on the server, or None if it could not be listed."""
+    ctx = _get_auth_context()
+    if not ctx:
+        return None
+    base, headers = ctx
+    return _paginate_packages(base, headers, None, page_size, "the package list")
+
+
+def _fetch_package_id_by_name(
+    package_name: str, page_size: int = _PACKAGE_PAGE_SIZE
+) -> Optional[str]:
+    """Package UUID for an exact name, or None if there is no such package.
+
+    ``GET /packages`` offers no exact-name lookup: ``search`` is a substring
+    match over name *and* description, so searching ``raisin`` also returns
+    ``raisin_gui``, ``raisin_plugin`` and anything merely mentioning it. Taking
+    the first hit would install a different package than the one asked for, so
+    the name has to match exactly.
     """
     ctx = _get_auth_context()
     if not ctx:
         return None
     base, headers = ctx
 
-    try:
-        resp = requests.get(
-            f"{base}/packages",
-            headers=headers,
-            params={"name": package_name},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        result = _unwrap_response(resp.json())
-        packages = (
-            result.get("packages", result) if isinstance(result, dict) else result
-        )
-        if packages and len(packages) > 0:
-            return packages[0].get("id")
-        return None
-    except requests.RequestException:
-        return None
+    found = _search_packages(base, headers, package_name, page_size)
+    if found is None:
+        return None  # refused, and _get_packages_page has already said why
+
+    package_id = next(
+        (p.get("id") for p in found if p.get("name") == package_name),
+        None,
+    )
+    if package_id is None:
+        # Only claimed once the server actually answered. Saying "not found"
+        # for a request the server refused points at the wrong problem.
+        print(f"⚠️ Package '{package_name}' not found on OTA server.")
+    return package_id
 
 
 def _download_blob_by_hash(blob_hash: str, download_path: Path) -> bool:
@@ -2638,7 +2745,6 @@ def download_package_at_timestamp(
     # Get package ID first (this handles its own auth)
     package_id = _fetch_package_id_by_name(package_name)
     if not package_id:
-        print(f"⚠️ Package '{package_name}' not found on OTA server.")
         return None
 
     ctx = _get_auth_context()
@@ -2748,18 +2854,9 @@ def download_all_at_timestamp(
     base, headers = ctx
 
     try:
-        # Fetch all packages
-        resp = requests.get(
-            f"{base}/packages",
-            headers=headers,
-            params={"limit": 1000},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        result = _unwrap_response(resp.json())
-        packages = (
-            result.get("packages", result) if isinstance(result, dict) else result
-        )
+        packages = _list_all_packages()
+        if packages is None:
+            return {}
 
         if not packages:
             print("⚠️ No packages found on OTA server.")

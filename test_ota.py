@@ -758,7 +758,20 @@ class TestUpload(unittest.TestCase):
         # Server wraps responses in {"data": ...}
         mock_get.side_effect = [
             _mock_response(json_data={"data": {"exists": False}}),
-            _mock_response(json_data={"data": [{"id": "pkg-1"}]}),
+            _mock_response(
+                json_data={
+                    "data": {
+                        "packages": [
+                            {"id": "other", "name": "mypkg_extra"},
+                            {"id": "pkg-1", "name": "mypkg"},
+                        ],
+                        "total": 2,
+                        "page": 1,
+                        "limit": 100,
+                        "totalPages": 1,
+                    }
+                }
+            ),
         ]
 
         # POST blob upload, POST manifest, POST tag
@@ -789,7 +802,20 @@ class TestUpload(unittest.TestCase):
         # GET packages → existing package
         mock_get.side_effect = [
             _mock_response(json_data={"data": {"exists": True}}),
-            _mock_response(json_data={"data": [{"id": "pkg-1"}]}),
+            _mock_response(
+                json_data={
+                    "data": {
+                        "packages": [
+                            {"id": "other", "name": "mypkg_extra"},
+                            {"id": "pkg-1", "name": "mypkg"},
+                        ],
+                        "total": 2,
+                        "page": 1,
+                        "limit": 100,
+                        "totalPages": 1,
+                    }
+                }
+            ),
         ]
 
         # POST manifest, POST tag (no blob upload)
@@ -834,7 +860,20 @@ class TestUpload(unittest.TestCase):
             ),
             # Retry calls (after re-auth):
             _mock_response(json_data={"data": {"exists": True}}),
-            _mock_response(json_data={"data": [{"id": "pkg-1"}]}),
+            _mock_response(
+                json_data={
+                    "data": {
+                        "packages": [
+                            {"id": "other", "name": "mypkg_extra"},
+                            {"id": "pkg-1", "name": "mypkg"},
+                        ],
+                        "total": 2,
+                        "page": 1,
+                        "limit": 100,
+                        "totalPages": 1,
+                    }
+                }
+            ),
         ]
         mock_post.side_effect = [
             _mock_response(),  # manifest
@@ -966,6 +1005,146 @@ class TestMalformedReleaseYaml(unittest.TestCase):
         )
 
         self.assertEqual(result["dependencies"], ["depA"])
+
+
+class TestPackageLookup(unittest.TestCase):
+    """`GET /packages` takes search/page/limit — not `name`, and limit caps at 100.
+
+    The endpoint rejects anything else, and the rejection was being reported as
+    "package not found", which sends the operator looking in the wrong place.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+
+    def tearDown(self):
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _page(names, total=None, page=1, limit=100):
+        return _mock_response(
+            json_data={
+                "success": True,
+                "data": {
+                    "packages": [{"id": f"id-{n}", "name": n} for n in names],
+                    "total": total if total is not None else len(names),
+                    "page": page,
+                    "limit": limit,
+                    "totalPages": -(
+                        -(total if total is not None else len(names)) // limit
+                    ),
+                },
+            }
+        )
+
+    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
+    @patch("commands.ota_client.requests.get")
+    def test_lookup_searches_rather_than_sending_an_unknown_parameter(
+        self, mock_get, _ctx
+    ):
+        mock_get.return_value = self._page(["raisin"])
+
+        ota._fetch_package_id_by_name("raisin")
+
+        sent = mock_get.call_args.kwargs["params"]
+        self.assertNotIn("name", sent)
+        self.assertEqual(sent["search"], "raisin")
+        self.assertLessEqual(sent["limit"], 100)
+
+    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
+    @patch("commands.ota_client.requests.get")
+    def test_lookup_returns_the_exact_name_not_the_first_result(self, mock_get, _ctx):
+        """`search` is a substring match over name and description."""
+        mock_get.return_value = self._page(["raisin_gui", "raisin", "raisin_plugin"])
+
+        self.assertEqual(ota._fetch_package_id_by_name("raisin"), "id-raisin")
+
+    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
+    @patch("commands.ota_client.requests.get")
+    def test_lookup_walks_pages_to_find_the_exact_name(self, mock_get, _ctx):
+        mock_get.side_effect = [
+            self._page(["raisin_a"], total=2, page=1, limit=1),
+            self._page(["raisin"], total=2, page=2, limit=1),
+        ]
+
+        self.assertEqual(
+            ota._fetch_package_id_by_name("raisin", page_size=1), "id-raisin"
+        )
+
+    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
+    @patch("commands.ota_client.requests.get")
+    def test_a_rejected_request_is_reported_as_a_rejection(self, mock_get, _ctx):
+        """Not as an absent package — that sends the operator to the wrong place."""
+        rejected = _mock_response(
+            status_code=400,
+            json_data={
+                "success": False,
+                "error": {
+                    "message": "Validation failed",
+                    "validationErrors": [
+                        {
+                            "field": "property",
+                            "message": "property name should not exist",
+                        }
+                    ],
+                },
+            },
+        )
+        rejected.raise_for_status.side_effect = requests.HTTPError(response=rejected)
+        mock_get.return_value = rejected
+
+        with patch("builtins.print") as mock_print:
+            result = ota._fetch_package_id_by_name("raisin")
+
+        self.assertIsNone(result)
+        output = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("reject", output.lower())
+        self.assertIn("property name should not exist", output)
+        self.assertNotIn("not found", output.lower())
+
+    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
+    @patch("commands.ota_client.requests.get")
+    def test_a_missing_package_is_reported_as_missing(self, mock_get, _ctx):
+        mock_get.return_value = self._page([])
+
+        with patch("builtins.print") as mock_print:
+            self.assertIsNone(ota._fetch_package_id_by_name("nope"))
+
+        output = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("not found", output.lower())
+        self.assertNotIn("reject", output.lower())
+
+    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
+    @patch("commands.ota_client.requests.get")
+    def test_a_refused_page_does_not_become_a_shorter_list(self, mock_get, _ctx):
+        """Half a list reads as "these are all the packages" — the same lie."""
+        refused = _mock_response(status_code=400, json_data={"success": False})
+        refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
+        mock_get.side_effect = [
+            self._page(["a", "b"], total=4, page=1, limit=2),
+            refused,
+        ]
+
+        with patch("builtins.print"):
+            self.assertIsNone(ota._list_all_packages(page_size=2))
+
+    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
+    @patch("commands.ota_client.requests.get")
+    def test_listing_every_package_stays_within_the_page_limit(self, mock_get, _ctx):
+        mock_get.side_effect = [
+            self._page(["a", "b"], total=3, page=1, limit=2),
+            self._page(["c"], total=3, page=2, limit=2),
+        ]
+
+        names = [p["name"] for p in ota._list_all_packages(page_size=2)]
+
+        self.assertEqual(names, ["a", "b", "c"])
+        for call in mock_get.call_args_list:
+            self.assertLessEqual(call.kwargs["params"]["limit"], 100)
 
 
 class TestInstallEventQueue(unittest.TestCase):
