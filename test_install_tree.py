@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from commands import install_tree as it  # noqa: E402
+from raisin_ota import install_tree as it  # noqa: E402
 
 
 class InstallTreeTestCase(unittest.TestCase):
@@ -236,7 +236,7 @@ class TestUnusableTreeIsReported(InstallTreeTestCase):
         it.commit_version(self.release, "1.0.0")
 
         with patch(
-            "commands.install_tree.shutil.copytree",
+            "raisin_ota.install_tree.shutil.copytree",
             side_effect=OSError(errno.EXDEV, "Invalid cross-device link"),
         ):
             with self.assertRaises(it.InstallTreeUnusable):

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import commands.ota_client as ota  # noqa: E402
+import raisin_ota.client as ota  # noqa: E402
 
 
 class TestOtaContext(unittest.TestCase):
@@ -157,36 +157,60 @@ class TestRobotIdentityIsInjected(unittest.TestCase):
         self.assertEqual(still_here, [])
 
 
-class TestCoreDoesNotImportCliGlobals(unittest.TestCase):
-    """The dependency that blocks extracting the core into its own package."""
+class TestCoreDoesNotImportTheCli(unittest.TestCase):
+    """The package must not reach back into the CLI it was extracted from.
 
-    CORE_MODULES = ("commands/ota_client.py", "commands/install_tree.py")
+    Two named modules were the original coupling, but the property that matters
+    is broader and easier to state: nothing under `raisin_ota/` imports
+    `commands` at all. An agent, a commissioning tool and a telemetry program
+    each install this package without the CLI present, so a single import here
+    is an ImportError on a robot rather than a lint failure here.
+    """
 
-    def test_core_modules_do_not_import_commands_globals(self):
-        offenders = []
-        for module in self.CORE_MODULES:
-            source = Path(module).read_text(encoding="utf-8")
-            for line_no, line in enumerate(source.splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith(("import ", "from ")) and "globals" in stripped:
-                    offenders.append(f"{module}:{line_no} {stripped}")
+    CORE_MODULES = (
+        "raisin_ota/__init__.py",
+        "raisin_ota/client.py",
+        "raisin_ota/install_tree.py",
+        "raisin_ota/ssh.py",
+    )
+
+    def _import_lines(self, module):
+        source = Path(module).read_text(encoding="utf-8")
+        for line_no, line in enumerate(source.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")):
+                yield line_no, stripped
+
+    def test_no_core_module_imports_the_cli(self):
+        offenders = [
+            f"{module}:{line_no} {line}"
+            for module in self.CORE_MODULES
+            for line_no, line in self._import_lines(module)
+            if line.startswith(("import commands", "from commands"))
+        ]
 
         self.assertEqual(offenders, [])
 
-    def test_core_modules_do_not_import_commands_utils(self):
-        """`commands.utils` imports the globals module at import time."""
-        offenders = []
-        for module in self.CORE_MODULES:
-            source = Path(module).read_text(encoding="utf-8")
-            for line_no, line in enumerate(source.splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith(("import ", "from ")) and (
-                    "commands.utils" in stripped
-                    or "from commands import utils" in stripped
-                ):
-                    offenders.append(f"{module}:{line_no} {stripped}")
+    def test_the_guard_would_notice(self):
+        """A guard nothing can fail is not a guard.
 
-        self.assertEqual(offenders, [])
+        Runs the same detection over a file with the coupling deliberately put
+        back, so a refactor that breaks the check fails here rather than going
+        quiet and passing forever.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            planted = Path(tmp) / "planted.py"
+            planted.write_text(
+                "import os\nfrom commands import globals as g\n", encoding="utf-8"
+            )
+
+            caught = [
+                line
+                for _, line in self._import_lines(str(planted))
+                if line.startswith(("import commands", "from commands"))
+            ]
+
+        self.assertEqual(caught, ["from commands import globals as g"])
 
 
 if __name__ == "__main__":

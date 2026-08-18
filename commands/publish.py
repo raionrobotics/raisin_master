@@ -294,7 +294,7 @@ def _upload_to_ota(
     """
     print("\n--- Uploading to OTA Server ---")
     try:
-        from commands.ota_client import upload_package as ota_upload
+        from raisin_ota.client import upload_package as ota_upload
 
         success = ota_upload(
             archive_path=archive_path,

@@ -15,7 +15,7 @@ from typing import Optional
 import yaml
 
 from commands import globals as g
-from commands.ota_client import RobotIdentity
+from raisin_ota import RobotIdentity
 
 # Robot API key configuration. The key file is intentionally outside the repo.
 _ROBOT_API_KEY_FILE = "robot-api-key"  # pragma: allowlist secret

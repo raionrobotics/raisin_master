@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from commands import install_tree
+from . import install_tree
 
 # Module-level cached auth token (lives for the CLI session)
 _cached_token = None
@@ -863,7 +863,7 @@ def _sign_nonce(nonce: str, key_path: Path) -> str:
     should not have to install a native extension to run.
     """
     try:
-        from . import ota_ssh
+        from . import ssh as ota_ssh
     except ImportError as e:  # pragma: no cover - depends on the install extra
         raise RuntimeError(
             "SSH authentication needs the 'cryptography' package. "
