@@ -1504,6 +1504,23 @@ def _resolve_desired_state(platform_str: str) -> tuple:
                 "Assign one on the OTA server to install as this robot; "
                 "continuing on the legacy route, which authenticates as a user."
             )
+        elif reason == "unconfigured":
+            print(
+                "ℹ️  This robot node is not configured on the OTA server yet. "
+                "Register it before assigning an archive; continuing on the "
+                "legacy route, which authenticates as a user."
+            )
+        else:
+            # The server has more reasons than this client knows, and it gains
+            # them faster than a fleet updates. A reason we cannot interpret is
+            # still information — reporting it unrecognised is what keeps a new
+            # server state from arriving as silence, which is how `unconfigured`
+            # went unnoticed until a migration produced it.
+            print(
+                f"ℹ️  The OTA server reports no target for this node "
+                f"(reason: {reason or 'none given'}), which this client does "
+                f"not recognise. Continuing on the legacy route."
+            )
         return (False, None, None, None)
 
     target_platform = _normalize_optional_string(target.get("platform"))

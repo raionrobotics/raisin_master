@@ -3617,9 +3617,13 @@ class TestDownload(unittest.TestCase):
                     json_data={"success": True, "data": payload}
                 ),
             ),
-            patch("builtins.print"),
+            patch("builtins.print") as printed,
         ):
-            return ota._resolve_desired_state(platform)
+            result = ota._resolve_desired_state(platform)
+            # Kept so a test can assert on what the operator was told; the
+            # patch is inside this helper, so an outer one would be shadowed.
+            self.printed = " ".join(str(c) for c in printed.call_args_list)
+            return result
 
     def test_desired_state_supplies_the_package_manifest(self):
         """#37: the target carries the package list, so no JWT is needed."""
@@ -3723,6 +3727,25 @@ class TestDownload(unittest.TestCase):
         )
 
         self.assertEqual((halted, name, version), (False, "raisin-robot", "2026.1.0"))
+
+    def test_an_unconfigured_node_is_explained(self):
+        """The server has a word for this state; silence is not it."""
+        self._desired_state({"halt": False, "reason": "unconfigured"})
+
+        self.assertNotEqual(
+            self.printed.strip(), "", "an explained state was reported as silence"
+        )
+
+    def test_a_reason_this_client_does_not_know_still_says_something(self):
+        """The server has nine reasons and this client knew two of them.
+
+        A new one arriving is normal — the server moves faster than the fleet —
+        so the failure mode has to be "names a reason I do not recognise",
+        never "says nothing at all".
+        """
+        self._desired_state({"halt": False, "reason": "some_future_reason"})
+
+        self.assertIn("some_future_reason", self.printed)
 
     def test_resolve_desired_state_honours_halt(self):
         halted, name, version, _manifest = self._desired_state(
