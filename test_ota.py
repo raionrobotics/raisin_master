@@ -713,6 +713,23 @@ class TestAuthentication(unittest.TestCase):
 class TestUpload(unittest.TestCase):
     """Verify upload_package and _compute_sha256."""
 
+    @staticmethod
+    def _package_page(name):
+        return _mock_response(
+            json_data={
+                "data": {
+                    "packages": [
+                        {"id": "other", "name": f"{name}_extra"},
+                        {"id": "pkg-1", "name": name},
+                    ],
+                    "total": 2,
+                    "page": 1,
+                    "limit": 100,
+                    "totalPages": 1,
+                }
+            }
+        )
+
     def setUp(self):
         ota._cached_token = None
         ota._auth_failed = False
@@ -789,6 +806,45 @@ class TestUpload(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(mock_post.call_count, 3)
+
+    @patch("commands.ota_client.authenticate", return_value="tok")
+    @patch(
+        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
+    )
+    @patch("commands.ota_client.requests.get")
+    @patch("commands.ota_client.requests.post")
+    @patch("commands.ota_client._compute_sha256", return_value="a" * 64)
+    def test_blob_upload_streams_the_body_and_names_the_hash_in_a_header(
+        self, _sha, mock_post, mock_get, _ep, _auth
+    ):
+        """`POST /blobs` takes a raw stream, not a form.
+
+        The server reads the digest from `x-content-sha256` and refuses the
+        request outright without it — a multipart body carrying `sha256` as a
+        field is a 400, so publish never uploaded anything.
+        """
+        mock_get.side_effect = [
+            _mock_response(json_data={"data": {"exists": False}}),
+            self._package_page("mypkg"),
+        ]
+        mock_post.side_effect = [
+            _mock_response(),  # blob
+            _mock_response(),  # manifest
+            _mock_response(),  # tag
+        ]
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(b"fake-zip")
+            tmp.flush()
+            ota.upload_package(Path(tmp.name), "mypkg", "1.0.0", "release")
+        os.unlink(tmp.name)
+
+        blob_call = mock_post.call_args_list[0]
+        headers = blob_call.kwargs["headers"]
+        self.assertEqual(headers["x-content-sha256"], "a" * 64)
+        self.assertEqual(headers["Content-Type"], "application/zip")
+        self.assertNotIn("files", blob_call.kwargs)
+        self.assertIn("data", blob_call.kwargs)
 
     @patch("commands.ota_client.authenticate", return_value="tok")
     @patch(

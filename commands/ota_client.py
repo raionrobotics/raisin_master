@@ -1065,14 +1065,22 @@ def upload_package(
         resp.raise_for_status()
         blob_exists = _unwrap_response(resp.json()).get("exists", False)
 
-        # 3. Upload blob if needed
+        # 3. Upload blob if needed.
+        #
+        # The endpoint streams the body straight to storage and hashes it on the
+        # way through, so it takes the archive as the raw request body and reads
+        # the expected digest from `x-content-sha256`. A multipart form carrying
+        # the digest as a field is refused before anything is read, which is
+        # what publish had been sending.
         if not blob_exists:
+            blob_headers = dict(headers)
+            blob_headers["x-content-sha256"] = sha256
+            blob_headers["Content-Type"] = "application/zip"
             with open(archive_path, "rb") as f:
                 resp = requests.post(
                     f"{base}/blobs",
-                    headers=headers,
-                    files={"file": (archive_path.name, f, "application/zip")},
-                    data={"sha256": sha256},
+                    headers=blob_headers,
+                    data=f,
                     timeout=120,
                 )
                 resp.raise_for_status()
