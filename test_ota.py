@@ -23,6 +23,8 @@ import sys
 import tempfile
 import time
 import unittest
+from typing import Optional
+from dataclasses import dataclass
 import zipfile
 
 import requests
@@ -1133,6 +1135,143 @@ class TestRobotCallsSayWhyTheyFailed(unittest.TestCase):
         self.assertIsNone(result.retry_after)
 
 
+class TestRobotResultsSpeakOneVocabulary(unittest.TestCase):
+    """Every robot-facing result answers the same questions the same way.
+
+    A caller loops over these and decides: back off, stop, or try again. If one
+    result type spells a failure differently from another, that caller handles
+    the case on one call and silently not on the other — which is the defect
+    this whole shape exists to remove, reintroduced by copy-paste.
+    """
+
+    RESULTS = (ota.RobotCallResult, ota.FlushResult)
+    FAILURE_FIELDS = (
+        "status",
+        "throttled",
+        "retry_after",
+        "unauthorized",
+        "unreachable",
+        "detail",
+    )
+
+    def test_every_result_answers_every_failure_question(self):
+        for result_type in self.RESULTS:
+            with self.subTest(result=result_type.__name__):
+                instance = result_type()
+                for field in self.FAILURE_FIELDS:
+                    self.assertTrue(
+                        hasattr(instance, field),
+                        f"{result_type.__name__} cannot say '{field}'",
+                    )
+
+    def test_the_vocabulary_is_shared_rather_than_copied(self):
+        """Inherited, so adding a seventh question reaches every result."""
+        for result_type in self.RESULTS:
+            with self.subTest(result=result_type.__name__):
+                self.assertTrue(issubclass(result_type, ota.RobotCallOutcome))
+
+    def test_a_result_that_copied_the_fields_would_not_pass(self):
+        """A guard nothing can fail is not a guard."""
+
+        @dataclass(frozen=True)
+        class Impostor:
+            status: Optional[int] = None
+            throttled: bool = False
+            retry_after: Optional[float] = None
+            unauthorized: bool = False
+            unreachable: bool = False
+            detail: Optional[str] = None
+
+        self.assertFalse(issubclass(Impostor, ota.RobotCallOutcome))
+
+
+class TestFlushSaysWhyItDidNotDrain(unittest.TestCase):
+    """The same collapse `fetch` had, on the other robot-facing call.
+
+    It matters at exactly one moment: a site comes back from an outage and a
+    thousand robots reconnect at once, each holding a queue. Every cycle then
+    spends a poll *and* a flush, the flush is certain to fail while the fleet
+    is over its budget, and the agent cannot tell — so it spends the request
+    again next cycle. The flush doubles the load precisely when the throttle
+    is already biting.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        _as_robot(self)
+        ota._install_session_id = "session-flush"
+        ota.record_install_event("started", archive_name="dso")
+
+    def tearDown(self):
+        ota._install_session_id = None
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _flush(self, **kwargs):
+        with (
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.post", **kwargs),
+        ):
+            return ota.flush_install_events()
+
+    def test_a_drained_queue_reports_as_drained(self):
+        (event,) = ota._read_install_event_queue()
+        result = self._flush(
+            return_value=_mock_response(
+                json_data={"data": {"acks": [{"eventId": event["eventId"]}]}}
+            )
+        )
+
+        self.assertTrue(result.drained)
+        self.assertEqual(result.remaining, 0)
+
+    def test_being_throttled_is_distinguishable(self):
+        throttled = _mock_response(status_code=429, headers={"Retry-After": "30"})
+        throttled.raise_for_status.side_effect = requests.HTTPError(response=throttled)
+
+        result = self._flush(return_value=throttled)
+
+        self.assertFalse(result.drained)
+        self.assertTrue(result.throttled)
+        self.assertEqual(result.retry_after, 30.0)
+
+    def test_a_refused_credential_is_distinguishable(self):
+        refused = _mock_response(status_code=401)
+        refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
+
+        result = self._flush(return_value=refused)
+
+        self.assertTrue(result.unauthorized)
+        self.assertFalse(result.throttled)
+
+    def test_being_offline_is_distinguishable(self):
+        result = self._flush(side_effect=requests.ConnectionError("no route"))
+
+        self.assertTrue(result.unreachable)
+        self.assertFalse(result.drained)
+
+    def test_what_did_not_go_is_still_on_disk(self):
+        """Whatever the reason, the queue is what makes a later run useful."""
+        self._flush(side_effect=requests.ConnectionError("no route"))
+
+        self.assertEqual(len(ota._read_install_event_queue()), 1)
+
+    def test_no_credential_is_not_a_server_refusal(self):
+        """A developer machine has nothing to report as; that is not a 401."""
+        _as_robot(self, None)
+
+        result = ota.flush_install_events()
+
+        self.assertFalse(result.drained)
+        self.assertFalse(result.unauthorized)
+
+
 class TestHaltStopsTheInstall(unittest.TestCase):
     """A halt tells this node to stop. It is not "no archive available".
 
@@ -1501,7 +1640,7 @@ class TestInstallEventQueue(unittest.TestCase):
 
         result = ota.flush_install_events()
 
-        self.assertFalse(result)
+        self.assertFalse(result.drained)
         self.assertEqual(len(self._queued()), 1)
         self.assertEqual(len(posts), 1)
 
@@ -1590,9 +1729,9 @@ class TestInstallEventQueue(unittest.TestCase):
                 side_effect=requests.ConnectionError("offline"),
             ),
         ):
-            ok = ota.flush_install_events()
+            result = ota.flush_install_events()
 
-        self.assertFalse(ok)
+        self.assertFalse(result.drained)
         self.assertEqual(len(self._queued()), 1)
 
     def test_replayed_batch_keeps_the_same_event_ids(self):
@@ -1724,9 +1863,9 @@ class TestInstallEventQueue(unittest.TestCase):
         # server, which answers 401 and makes this pass for the wrong reason.
         _as_robot(self, None)
 
-        ok = ota.flush_install_events()
+        result = ota.flush_install_events()
 
-        self.assertFalse(ok)
+        self.assertFalse(result.drained)
         self.assertEqual(len(self._queued()), 1)
 
 
