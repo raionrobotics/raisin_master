@@ -1475,15 +1475,23 @@ def _discover_pure_cmake_projects(
             if isinstance(entry, dict):
                 project = entry.get("name", "")
                 raw_args = entry.get("cmake_args", [])
+                raw_provides = entry.get("provides", [])
                 # cmake_args can be a list (applies to all) or a dict keyed by architecture
                 if isinstance(raw_args, dict):
                     arch = platform.machine()  # e.g. "x86_64", "aarch64"
                     cmake_args = raw_args.get(arch, [])
                 else:
                     cmake_args = raw_args
+                if isinstance(raw_provides, list):
+                    provides = raw_provides
+                elif isinstance(raw_provides, str):
+                    provides = [raw_provides]
+                else:
+                    provides = []
             else:
                 project = entry
                 cmake_args = []
+                provides = []
 
             if (
                 not project
@@ -1500,7 +1508,7 @@ def _discover_pure_cmake_projects(
                 )
                 continue
 
-            projects.append((repo_name, project, project_dir, cmake_args))
+            projects.append((repo_name, project, project_dir, cmake_args, provides))
 
     return projects
 
@@ -1552,7 +1560,7 @@ def build_pure_cmake_projects(
             Path(g.script_directory) / f"cmake-build-{build_type_token}" / "pure_cmake"
         )
 
-        for repo_name, project_name, source_dir, cmake_args in projects:
+        for repo_name, project_name, source_dir, cmake_args, provides in projects:
             cache_key = f"{project_name}_{build_type_token}"
             source_hash = _compute_source_hash(source_dir)
             normalized_cmake_args = [str(arg) for arg in (cmake_args or [])]
@@ -1568,6 +1576,7 @@ def build_pure_cmake_projects(
             ):
                 print(f"  -> {project_name} [{cmake_build_type}] (unchanged, skipping)")
                 built.add(project_name)
+                built.update(str(package) for package in provides)
                 continue
 
             # Build required
@@ -1593,6 +1602,7 @@ def build_pure_cmake_projects(
                     "raisin_march": raisin_march or "",
                 }
                 built.add(project_name)
+                built.update(str(package) for package in provides)
             except subprocess.CalledProcessError as e:
                 raise SystemExit(
                     f"❌ Failed to build pure_cmake project '{project_name}' (repo: {repo_name})."
@@ -2222,10 +2232,20 @@ def setup(
 
     packages_to_ignore = get_packages_to_ignore()
     repos_to_ignore = get_repos_to_ignore()
+    pure_cmake_projects = _discover_pure_cmake_projects(
+        package_name, packages_to_ignore, repos_to_ignore
+    )
+    pure_cmake_provided = []
+    for _, project_name, _, _, provides in pure_cmake_projects:
+        pure_cmake_provided.append(project_name)
+        pure_cmake_provided.extend(str(package) for package in provides)
+    source_packages_to_ignore = list(
+        dict.fromkeys(list(packages_to_ignore) + pure_cmake_provided)
+    )
 
     deploy_install_packages()
 
-    guard_src_repo_release_yaml_dependencies(packages_to_ignore, repos_to_ignore)
+    guard_src_repo_release_yaml_dependencies(source_packages_to_ignore, repos_to_ignore)
 
     pure_cmake_built = build_pure_cmake_projects(
         install_dir,
@@ -2236,17 +2256,17 @@ def setup(
         raisin_march=raisin_march,
     )
     if pure_cmake_built:
-        packages_to_ignore = list(
-            dict.fromkeys(list(packages_to_ignore) + pure_cmake_built)
+        source_packages_to_ignore = list(
+            dict.fromkeys(list(source_packages_to_ignore) + pure_cmake_built)
         )
-    _print_ignore_lists(packages_to_ignore, repos_to_ignore)
+    _print_ignore_lists(source_packages_to_ignore, repos_to_ignore)
 
     action_files = find_interface_files(
-        ["src"], ["action"], packages_to_ignore, repos_to_ignore
+        ["src"], ["action"], source_packages_to_ignore, repos_to_ignore
     )[0]
 
     project_directories = find_project_directories(
-        [src_dir], install_dir, packages_to_ignore, repos_to_ignore
+        [src_dir], install_dir, source_packages_to_ignore, repos_to_ignore
     )
     _ensure_scripts_executable(install_dir)
 
@@ -2255,7 +2275,7 @@ def setup(
         create_action_file(action_file, Path(action_file).parent.parent, install_dir)
 
     msg_files, srv_files = find_interface_files(
-        ["src", "temp"], ["msg", "srv"], packages_to_ignore, repos_to_ignore
+        ["src", "temp"], ["msg", "srv"], source_packages_to_ignore, repos_to_ignore
     )
 
     # Handle .msg files
