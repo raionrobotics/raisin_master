@@ -625,35 +625,108 @@ def record_install_event(
     return event
 
 
-def flush_install_events() -> bool:
+@dataclass(frozen=True)
+class RobotCallOutcome:
+    """Why a robot-facing call did not do what was asked.
+
+    Shared because the *decisions* are shared: anything looping over these has
+    to back off when throttled, stop when its credential is refused, and
+    simply try again when it could not reach the server. Copying the six
+    fields into each result type is how two of them drift apart and a caller
+    starts handling one case on one call and not the other.
+
+    Subclasses add what the call actually produced.
+    """
+
+    status: Optional[int] = None
+    throttled: bool = False
+    retry_after: Optional[float] = None
+    unauthorized: bool = False
+    unreachable: bool = False
+    detail: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FlushResult(RobotCallOutcome):
+    """Whether the buffered events went.
+
+    `drained` rather than `ok`: "the call succeeded" and "the queue is empty"
+    are different facts, and a server that acknowledges half a batch has
+    answered fine and left work behind.
+    """
+
+    drained: bool = False
+    remaining: int = 0
+
+
+def _retry_after_seconds(response) -> Optional[float]:
+    """`Retry-After` as seconds, or None.
+
+    Not defaulted: how long to wait when the server does not say is a policy
+    decision, and inventing a number here would hide that it was never given.
+    """
+    raw = getattr(response, "headers", {}) or {}
+    value = raw.get("Retry-After")
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def flush_install_events() -> FlushResult:
     """Send buffered install events, keeping anything the server did not ack.
 
-    Returns True only when the queue is empty afterwards, so an offline robot
-    simply tries again on the next run.
+    Never raises. `drained` is true only when the queue is empty afterwards,
+    and the reason it is not travels on the result: a caller that flushes on a
+    schedule has to know whether to back off, stop, or simply try again.
     """
     remaining = _read_install_event_queue()
     if not remaining:
-        return True
+        return FlushResult(drained=True)
 
     headers = _robot_auth_headers()
     if not headers:
-        return False
+        # A machine with no robot identity has nothing to report *as*. Not a
+        # refusal by the server, and not something to back off from.
+        return FlushResult(
+            remaining=len(remaining), detail="no robot credential configured"
+        )
 
     request_headers = dict(headers)
     request_headers["Content-Type"] = "application/json"
     base = get_ota_endpoint().rstrip("/")
     url = f"{base}/robots/me/install-events"
 
+    failure = {}
     while remaining:
         batch = remaining[:_INSTALL_EVENT_BATCH_LIMIT]
         try:
             resp = requests.post(
                 url, headers=request_headers, json={"events": batch}, timeout=15
             )
+            if resp.status_code == 429:
+                failure = {
+                    "status": 429,
+                    "throttled": True,
+                    "retry_after": _retry_after_seconds(resp),
+                    "detail": "throttled by the OTA server",
+                }
+                break
+            if resp.status_code in (401, 403):
+                failure = {
+                    "status": resp.status_code,
+                    "unauthorized": True,
+                    "detail": "the OTA server refused this robot credential",
+                }
+                break
             resp.raise_for_status()
             data = _unwrap_response(resp.json()) or {}
+        except (requests.ConnectionError, requests.Timeout) as e:
+            failure = {"unreachable": True, "detail": str(e)}
+            break
         except (requests.RequestException, ValueError) as e:
             print(f"⚠️ Failed to report OTA install events: {e}")
+            failure = {"detail": str(e)}
             break
 
         acks = data.get("acks") if isinstance(data, dict) else None
@@ -688,7 +761,7 @@ def flush_install_events() -> bool:
     _write_install_event_queue(remaining)
     if remaining:
         print(f"ℹ️  {len(remaining)} OTA install event(s) buffered for a later run.")
-    return not remaining
+    return FlushResult(drained=not remaining, remaining=len(remaining), **failure)
 
 
 def clear_install_session() -> None:
@@ -1436,26 +1509,17 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
 
 
 @dataclass(frozen=True)
-class RobotCallResult:
+class RobotCallResult(RobotCallOutcome):
     """What a robot-facing call produced, and why it did not.
 
     A CLI only ever needed "did I get a document" — every failure meant "no
-    opinion, carry on". A resident agent has to act differently for each: back
-    off when throttled, stop and become visible when its credential is refused,
-    keep polling normally when the server simply has no opinion, and buffer
-    when it cannot be reached. Collapsing those into `None` makes that
-    impossible, so the reason travels with the result.
+    opinion, carry on". A resident agent has to act differently for each, so
+    the reason travels with the result.
 
     The mechanism reports; deciding what to do is the caller's.
     """
 
     value: Optional[dict] = None
-    status: Optional[int] = None
-    throttled: bool = False
-    retry_after: Optional[float] = None
-    unauthorized: bool = False
-    unreachable: bool = False
-    detail: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -1463,20 +1527,6 @@ class RobotCallResult:
 
     def __bool__(self) -> bool:
         return self.ok
-
-
-def _retry_after_seconds(response) -> Optional[float]:
-    """`Retry-After` as seconds, or None.
-
-    Not defaulted: how long to wait when the server does not say is a policy
-    decision, and inventing a number here would hide that it was never given.
-    """
-    raw = getattr(response, "headers", {}) or {}
-    value = raw.get("Retry-After")
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
-        return None
 
 
 def fetch_robot_desired_state() -> RobotCallResult:
