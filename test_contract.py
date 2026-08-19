@@ -14,6 +14,24 @@ Run against a server:
 Skips entirely when no server is reachable, so it is safe in CI and on a
 developer machine without one.
 
+## What this suite may and may not assert
+
+This repository is public. The suite is *designed* to document server
+behaviour, which makes it the most likely place for an operational detail to
+leak by convenience rather than by decision.
+
+The rule: **assert what is allowed or refused, never how much or how often.**
+
+- "`GET /packages` rejects `name`" — a contract. Fine.
+- "manifest routes are closed to a robot credential" — a restriction, and
+  publishing it says the guard exists rather than where it is missing. Fine.
+- "the machine bucket allows N requests per M seconds" — an operational
+  number, and knowing it exactly is what makes a budget cheap to exhaust.
+  Belongs to the private side.
+
+`TestThisSuiteKeepsItsOwnRule` enforces it on the assertions here, because a
+convention nothing checks is a convention that erodes.
+
 ## Nothing here writes
 
 Two rules keep it that way, and they are also what makes it a good contract
@@ -282,6 +300,72 @@ class TestRobotContract(unittest.TestCase):
         self.assertLess(
             resp.status_code, 500, f"refused with a server error: {resp.text[:200]}"
         )
+
+
+class TestThisSuiteKeepsItsOwnRule(unittest.TestCase):
+    """A public suite that starts recording limits stops being safe to publish.
+
+    Checked rather than written down: the failure mode is somebody adding a
+    throttle assertion because it was convenient, which is exactly the thing a
+    comment does not prevent.
+    """
+
+    #: Terms that name a rate or a window. Naming them in prose is fine — this
+    #: docstring does — but an *assertion* on one means a number went in.
+    OPERATIONAL_TERMS = (
+        "throttle",
+        "rate limit",
+        "retry-after",
+        "requests per",
+        "per minute",
+        "per second",
+        "window_seconds",
+    )
+
+    def _assertion_lines(self, path):
+        source = Path(path).read_text(encoding="utf-8")
+        for line_no, line in enumerate(source.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("self.assert"):
+                yield line_no, stripped
+
+    def test_no_assertion_here_names_a_rate_or_a_window(self):
+        offenders = [
+            f"{line_no}: {line}"
+            for line_no, line in self._assertion_lines(__file__)
+            if any(term in line.lower() for term in self.OPERATIONAL_TERMS)
+        ]
+
+        self.assertEqual(
+            offenders,
+            [],
+            "an operational limit is being asserted in a public suite; "
+            "assert what is refused, not how much is allowed",
+        )
+
+    def test_the_guard_would_notice(self):
+        """A guard nothing can fail is not a guard.
+
+        Runs the same scan over a file with the leak deliberately written in,
+        so a refactor that breaks the check fails here rather than going quiet
+        and passing forever.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            planted = Path(tmp) / "planted.py"
+            planted.write_text(
+                "    def test_x(self):\n"
+                "        self.assertEqual(body['limit'], 600)  # throttle budget\n"
+                "        self.assertTrue(ok)\n",
+                encoding="utf-8",
+            )
+
+            caught = [
+                line
+                for _, line in self._assertion_lines(planted)
+                if any(term in line.lower() for term in self.OPERATIONAL_TERMS)
+            ]
+
+        self.assertEqual(len(caught), 1, "the scan no longer catches a leak")
 
 
 if __name__ == "__main__":
