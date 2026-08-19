@@ -25,8 +25,8 @@ from packaging.specifiers import SpecifierSet
 from commands import globals as g
 from commands.utils import load_configuration, parse_version_specifier
 
-from commands.install_tree import InstallTreeUnusable
-from commands.ota_client import (
+from raisin_ota import InstallTreeUnusable
+from raisin_ota.client import (
     download_package_at_timestamp,
     download_all_from_archive,
     OtaInstallHalted,
@@ -375,7 +375,7 @@ def _install(
                     )
                 else:
                     # Archive-based download (default or specific version)
-                    from commands.ota_client import download_package as ota_download
+                    from raisin_ota.client import download_package as ota_download
 
                     # Normalize 'none' (case-insensitive) to None so the OTA
                     # client falls back to legacy latest-by-time selection.

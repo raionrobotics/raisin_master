@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from commands import install_tree
+from . import install_tree
 
 # Module-level cached auth token (lives for the CLI session)
 _cached_token = None
@@ -625,35 +625,108 @@ def record_install_event(
     return event
 
 
-def flush_install_events() -> bool:
+@dataclass(frozen=True)
+class RobotCallOutcome:
+    """Why a robot-facing call did not do what was asked.
+
+    Shared because the *decisions* are shared: anything looping over these has
+    to back off when throttled, stop when its credential is refused, and
+    simply try again when it could not reach the server. Copying the six
+    fields into each result type is how two of them drift apart and a caller
+    starts handling one case on one call and not the other.
+
+    Subclasses add what the call actually produced.
+    """
+
+    status: Optional[int] = None
+    throttled: bool = False
+    retry_after: Optional[float] = None
+    unauthorized: bool = False
+    unreachable: bool = False
+    detail: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FlushResult(RobotCallOutcome):
+    """Whether the buffered events went.
+
+    `drained` rather than `ok`: "the call succeeded" and "the queue is empty"
+    are different facts, and a server that acknowledges half a batch has
+    answered fine and left work behind.
+    """
+
+    drained: bool = False
+    remaining: int = 0
+
+
+def _retry_after_seconds(response) -> Optional[float]:
+    """`Retry-After` as seconds, or None.
+
+    Not defaulted: how long to wait when the server does not say is a policy
+    decision, and inventing a number here would hide that it was never given.
+    """
+    raw = getattr(response, "headers", {}) or {}
+    value = raw.get("Retry-After")
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def flush_install_events() -> FlushResult:
     """Send buffered install events, keeping anything the server did not ack.
 
-    Returns True only when the queue is empty afterwards, so an offline robot
-    simply tries again on the next run.
+    Never raises. `drained` is true only when the queue is empty afterwards,
+    and the reason it is not travels on the result: a caller that flushes on a
+    schedule has to know whether to back off, stop, or simply try again.
     """
     remaining = _read_install_event_queue()
     if not remaining:
-        return True
+        return FlushResult(drained=True)
 
     headers = _robot_auth_headers()
     if not headers:
-        return False
+        # A machine with no robot identity has nothing to report *as*. Not a
+        # refusal by the server, and not something to back off from.
+        return FlushResult(
+            remaining=len(remaining), detail="no robot credential configured"
+        )
 
     request_headers = dict(headers)
     request_headers["Content-Type"] = "application/json"
     base = get_ota_endpoint().rstrip("/")
     url = f"{base}/robots/me/install-events"
 
+    failure = {}
     while remaining:
         batch = remaining[:_INSTALL_EVENT_BATCH_LIMIT]
         try:
             resp = requests.post(
                 url, headers=request_headers, json={"events": batch}, timeout=15
             )
+            if resp.status_code == 429:
+                failure = {
+                    "status": 429,
+                    "throttled": True,
+                    "retry_after": _retry_after_seconds(resp),
+                    "detail": "throttled by the OTA server",
+                }
+                break
+            if resp.status_code in (401, 403):
+                failure = {
+                    "status": resp.status_code,
+                    "unauthorized": True,
+                    "detail": "the OTA server refused this robot credential",
+                }
+                break
             resp.raise_for_status()
             data = _unwrap_response(resp.json()) or {}
+        except (requests.ConnectionError, requests.Timeout) as e:
+            failure = {"unreachable": True, "detail": str(e)}
+            break
         except (requests.RequestException, ValueError) as e:
             print(f"⚠️ Failed to report OTA install events: {e}")
+            failure = {"detail": str(e)}
             break
 
         acks = data.get("acks") if isinstance(data, dict) else None
@@ -688,7 +761,7 @@ def flush_install_events() -> bool:
     _write_install_event_queue(remaining)
     if remaining:
         print(f"ℹ️  {len(remaining)} OTA install event(s) buffered for a later run.")
-    return not remaining
+    return FlushResult(drained=not remaining, remaining=len(remaining), **failure)
 
 
 def clear_install_session() -> None:
@@ -863,7 +936,7 @@ def _sign_nonce(nonce: str, key_path: Path) -> str:
     should not have to install a native extension to run.
     """
     try:
-        from . import ota_ssh
+        from . import ssh as ota_ssh
     except ImportError as e:  # pragma: no cover - depends on the install extra
         raise RuntimeError(
             "SSH authentication needs the 'cryptography' package. "
@@ -1435,16 +1508,37 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
     }
 
 
-def fetch_robot_desired_state() -> Optional[dict]:
+@dataclass(frozen=True)
+class RobotCallResult(RobotCallOutcome):
+    """What a robot-facing call produced, and why it did not.
+
+    A CLI only ever needed "did I get a document" — every failure meant "no
+    opinion, carry on". A resident agent has to act differently for each, so
+    the reason travels with the result.
+
+    The mechanism reports; deciding what to do is the caller's.
+    """
+
+    value: Optional[dict] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.value is not None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def fetch_robot_desired_state() -> RobotCallResult:
     """Ask the OTA server what this robot node is supposed to be running.
 
-    Returns the resolved desired-state document, or None when robot auth is
-    not configured or the server cannot answer. Never raises: desired state is
-    an optional refinement of the caller's own archive selection.
+    Never raises — desired state is an optional refinement of the caller's own
+    archive selection — but the reason for an empty answer is carried on the
+    result rather than discarded.
     """
     headers = _robot_auth_headers()
     if not headers:
-        return None
+        return RobotCallResult(detail="no robot credential configured")
 
     base = get_ota_endpoint().rstrip("/")
     try:
@@ -1453,14 +1547,32 @@ def fetch_robot_desired_state() -> Optional[dict]:
         )
         if resp.status_code == 404:
             # Either the node is not registered or the server predates the
-            # endpoint. Both mean "no opinion", not "install nothing".
-            return None
+            # endpoint. Both mean "no opinion", not "install nothing" — and
+            # neither is a reason to stop asking.
+            return RobotCallResult(status=404, detail="no desired state for this node")
+        if resp.status_code == 429:
+            return RobotCallResult(
+                status=429,
+                throttled=True,
+                retry_after=_retry_after_seconds(resp),
+                detail="throttled by the OTA server",
+            )
+        if resp.status_code in (401, 403):
+            return RobotCallResult(
+                status=resp.status_code,
+                unauthorized=True,
+                detail="the OTA server refused this robot credential",
+            )
         resp.raise_for_status()
         state = _unwrap_response(resp.json())
-        return state if isinstance(state, dict) else None
+        return RobotCallResult(
+            value=state if isinstance(state, dict) else None, status=resp.status_code
+        )
+    except (requests.ConnectionError, requests.Timeout) as e:
+        return RobotCallResult(unreachable=True, detail=str(e))
     except (requests.RequestException, ValueError) as e:
         print(f"⚠️ Failed to fetch OTA desired state: {e}")
-        return None
+        return RobotCallResult(detail=str(e))
 
 
 def _resolve_desired_state(platform_str: str) -> tuple:
@@ -1477,7 +1589,13 @@ def _resolve_desired_state(platform_str: str) -> tuple:
     robot credential. A server that does not send it yields None here, and the
     caller falls back to the JWT route.
     """
-    state = fetch_robot_desired_state()
+    result = fetch_robot_desired_state()
+    if result.unauthorized:
+        # Worth saying plainly: a revoked or mistyped credential otherwise
+        # reads as "the server has no opinion", and the legacy-route warnings
+        # that follow point at the wrong thing.
+        print(f"⚠️ {result.detail}.")
+    state = result.value
     if not state:
         return (False, None, None, None)
 
@@ -1503,6 +1621,23 @@ def _resolve_desired_state(platform_str: str) -> tuple:
                 "ℹ️  No archive is assigned to this robot node yet. "
                 "Assign one on the OTA server to install as this robot; "
                 "continuing on the legacy route, which authenticates as a user."
+            )
+        elif reason == "unconfigured":
+            print(
+                "ℹ️  This robot node is not configured on the OTA server yet. "
+                "Register it before assigning an archive; continuing on the "
+                "legacy route, which authenticates as a user."
+            )
+        else:
+            # The server has more reasons than this client knows, and it gains
+            # them faster than a fleet updates. A reason we cannot interpret is
+            # still information — reporting it unrecognised is what keeps a new
+            # server state from arriving as silence, which is how `unconfigured`
+            # went unnoticed until a migration produced it.
+            print(
+                f"ℹ️  The OTA server reports no target for this node "
+                f"(reason: {reason or 'none given'}), which this client does "
+                f"not recognise. Continuing on the legacy route."
             )
         return (False, None, None, None)
 

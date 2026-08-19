@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "raisin-ota"
+version = "0.1.0"
+description = "Resolve, fetch, verify and atomically install raisin packages"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.28",
+    "PyYAML>=6.0",
+    "packaging>=21.0",
+]
+
+# Only `raisin_ota.ssh` needs this, and only the user-authenticated path
+# reaches it. A robot authenticates with its own credential and never signs an
+# SSH nonce, so it should not have to build a native extension to run.
+[project.optional-dependencies]
+ssh = ["cryptography>=41.0"]
+
+[tool.setuptools]
+# The developer CLI (`commands/`, `raisin.py`) is deliberately not packaged.
+# This distribution is the mechanism only — what an agent, a commissioning
+# tool or the CLI all call. See raisin-package-manager#70, #71.
+packages = ["raisin_ota"]

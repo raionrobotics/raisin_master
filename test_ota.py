@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit tests for the OTA client (commands/ota_client.py).
+Unit tests for the OTA client (raisin_ota/client.py).
 
 Exercises configuration, SSH auth, upload, download, and integration
 with install.py / publish.py. All external dependencies (HTTP, subprocess,
@@ -23,6 +23,8 @@ import sys
 import tempfile
 import time
 import unittest
+from typing import Optional
+from dataclasses import dataclass
 import zipfile
 
 import requests
@@ -30,10 +32,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 from click.testing import CliRunner
 
-import commands.ota_client as ota
+import raisin_ota.client as ota
 import commands.robot_credentials as rc
 from commands import globals as g
-from commands import install_tree
+from raisin_ota import install_tree
 
 
 # ---------------------------------------------------------------------------
@@ -317,11 +319,14 @@ class TestConfiguration(unittest.TestCase):
     def test_missing_pinned_robot_api_key_file_warns(self):
         """An explicitly pinned path that yields nothing must not fail quietly."""
         missing = Path(self._tmpdir.name) / "no-such-key"
-        with patch.dict(
-            os.environ,
-            {"RAISIN_ROBOT_API_KEY_FILE": str(missing)},
-            clear=True,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch.dict(
+                os.environ,
+                {"RAISIN_ROBOT_API_KEY_FILE": str(missing)},
+                clear=True,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             self.assertIsNone(rc.get_robot_api_key())
 
         self.assertTrue(
@@ -371,11 +376,14 @@ class TestConfiguration(unittest.TestCase):
             key_path = Path(tmpdir) / "robot-api-key"
             key_path.write_text("robot-key\n", encoding="utf-8")
             os.chmod(key_path, 0o644)
-            with patch.dict(
-                os.environ,
-                {"RAISIN_ROBOT_API_KEY_FILE": str(key_path)},
-                clear=True,
-            ), patch("builtins.print") as mock_print:
+            with (
+                patch.dict(
+                    os.environ,
+                    {"RAISIN_ROBOT_API_KEY_FILE": str(key_path)},
+                    clear=True,
+                ),
+                patch("builtins.print") as mock_print,
+            ):
                 self.assertIsNone(rc.get_robot_api_key())
                 self.assertIsNone(rc.get_robot_api_key())
 
@@ -477,13 +485,13 @@ class TestTokenPersistence(unittest.TestCase):
         self.assertEqual(result, token)
         self.assertEqual(ota._cached_token, token)
 
-    @patch("commands.ota_client._get_ssh_fingerprint", return_value="aabb")
+    @patch("raisin_ota.client._get_ssh_fingerprint", return_value="aabb")
     @patch(
-        "commands.ota_client.requests.post",
+        "raisin_ota.client.requests.post",
         side_effect=ota.requests.ConnectionError("refused"),
     )
-    @patch("commands.ota_client.get_ssh_key_path")
-    @patch("commands.ota_client.get_ota_endpoint", return_value="https://ota.test")
+    @patch("raisin_ota.client.get_ssh_key_path")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.test")
     def test_auth_failure_stops_retrying(self, _ep, mock_key_path, mock_post, _fp):
         """After one auth failure, subsequent calls return None immediately."""
         key_path = MagicMock()
@@ -514,7 +522,7 @@ class TestTokenPersistence(unittest.TestCase):
 class TestSSHHelpers(unittest.TestCase):
     """Verify SSH fingerprint extraction and nonce signing."""
 
-    @patch("commands.ota_client.subprocess.run")
+    @patch("raisin_ota.client.subprocess.run")
     def test_get_ssh_fingerprint_parses_output(self, mock_run):
         # "dGVzdGZpbmdlcnByaW50" is base64 for b"testfingerprint"
         mock_run.return_value = MagicMock(
@@ -530,7 +538,7 @@ class TestSSHHelpers(unittest.TestCase):
             check=True,
         )
 
-    @patch("commands.ota_client.subprocess.run")
+    @patch("raisin_ota.client.subprocess.run")
     def test_get_ssh_fingerprint_uses_pub_suffix(self, mock_run):
         """If the key already ends in .pub, don't double-suffix."""
         # "eHl6Nzg5" is base64 for b"xyz789"
@@ -603,10 +611,8 @@ class TestAuthentication(unittest.TestCase):
     def setUp(self):
         ota._cached_token = None
         ota._auth_failed = False
-        self._p_load = patch(
-            "commands.ota_client._load_cached_token", return_value=None
-        )
-        self._p_save = patch("commands.ota_client._save_token")
+        self._p_load = patch("raisin_ota.client._load_cached_token", return_value=None)
+        self._p_save = patch("raisin_ota.client._save_token")
         self._p_load.start()
         self._p_save.start()
 
@@ -616,13 +622,11 @@ class TestAuthentication(unittest.TestCase):
         self._p_load.stop()
         self._p_save.stop()
 
-    @patch("commands.ota_client._sign_nonce", return_value="SIG")
-    @patch("commands.ota_client._get_ssh_fingerprint", return_value="SHA256:fp")
-    @patch("commands.ota_client.requests.post")
-    @patch("commands.ota_client.get_ssh_key_path")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
+    @patch("raisin_ota.client._sign_nonce", return_value="SIG")
+    @patch("raisin_ota.client._get_ssh_fingerprint", return_value="SHA256:fp")
+    @patch("raisin_ota.client.requests.post")
+    @patch("raisin_ota.client.get_ssh_key_path")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
     def test_authenticate_happy_path(self, _ep, mock_key_path, mock_post, _fp, _sign):
         key_path = MagicMock()
         key_path.exists.return_value = True
@@ -639,13 +643,11 @@ class TestAuthentication(unittest.TestCase):
         self.assertEqual(token, "tok123")
         self.assertEqual(mock_post.call_count, 2)
 
-    @patch("commands.ota_client._sign_nonce", return_value="SIG")
-    @patch("commands.ota_client._get_ssh_fingerprint", return_value="SHA256:fp")
-    @patch("commands.ota_client.requests.post")
-    @patch("commands.ota_client.get_ssh_key_path")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
+    @patch("raisin_ota.client._sign_nonce", return_value="SIG")
+    @patch("raisin_ota.client._get_ssh_fingerprint", return_value="SHA256:fp")
+    @patch("raisin_ota.client.requests.post")
+    @patch("raisin_ota.client.get_ssh_key_path")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
     def test_authenticate_caches_token(self, _ep, mock_key_path, mock_post, _fp, _sign):
         key_path = MagicMock()
         key_path.exists.return_value = True
@@ -662,10 +664,8 @@ class TestAuthentication(unittest.TestCase):
         self.assertEqual(tok2, "cached-tok")
         self.assertEqual(mock_post.call_count, 2)  # only from the first call
 
-    @patch("commands.ota_client.get_ssh_key_path")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
+    @patch("raisin_ota.client.get_ssh_key_path")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
     def test_authenticate_ssh_key_missing(self, _ep, mock_key_path):
         key_path = MagicMock()
         key_path.exists.return_value = False
@@ -674,13 +674,11 @@ class TestAuthentication(unittest.TestCase):
         self.assertIsNone(ota.authenticate())
 
     @patch(
-        "commands.ota_client._get_ssh_fingerprint",
+        "raisin_ota.client._get_ssh_fingerprint",
         side_effect=FileNotFoundError("ssh-keygen"),
     )
-    @patch("commands.ota_client.get_ssh_key_path")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
+    @patch("raisin_ota.client.get_ssh_key_path")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
     def test_authenticate_ssh_keygen_not_found(self, _ep, mock_key_path, _fp):
         key_path = MagicMock()
         key_path.exists.return_value = True
@@ -688,15 +686,13 @@ class TestAuthentication(unittest.TestCase):
 
         self.assertIsNone(ota.authenticate())
 
-    @patch("commands.ota_client._get_ssh_fingerprint", return_value="SHA256:fp")
+    @patch("raisin_ota.client._get_ssh_fingerprint", return_value="SHA256:fp")
     @patch(
-        "commands.ota_client.requests.post",
+        "raisin_ota.client.requests.post",
         side_effect=ota.requests.ConnectionError("refused"),
     )
-    @patch("commands.ota_client.get_ssh_key_path")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
+    @patch("raisin_ota.client.get_ssh_key_path")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
     def test_authenticate_server_unreachable(self, _ep, mock_key_path, _post, _fp):
         key_path = MagicMock()
         key_path.exists.return_value = True
@@ -762,13 +758,11 @@ class TestUpload(unittest.TestCase):
         expected = hashlib.sha256(b"hello world").hexdigest()
         self.assertEqual(digest, expected)
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
-    @patch("commands.ota_client.requests.post")
-    @patch("commands.ota_client._compute_sha256", return_value="aabbcc")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
+    @patch("raisin_ota.client.requests.post")
+    @patch("raisin_ota.client._compute_sha256", return_value="aabbcc")
     def test_upload_package_happy_path(self, _sha, mock_post, mock_get, _ep, _auth):
         # GET blob exists → False
         # GET packages → existing package
@@ -807,13 +801,11 @@ class TestUpload(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(mock_post.call_count, 3)
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
-    @patch("commands.ota_client.requests.post")
-    @patch("commands.ota_client._compute_sha256", return_value="a" * 64)
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
+    @patch("raisin_ota.client.requests.post")
+    @patch("raisin_ota.client._compute_sha256", return_value="a" * 64)
     def test_blob_upload_streams_the_body_and_names_the_hash_in_a_header(
         self, _sha, mock_post, mock_get, _ep, _auth
     ):
@@ -846,13 +838,11 @@ class TestUpload(unittest.TestCase):
         self.assertNotIn("files", blob_call.kwargs)
         self.assertIn("data", blob_call.kwargs)
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
-    @patch("commands.ota_client.requests.post")
-    @patch("commands.ota_client._compute_sha256", return_value="aabbcc")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
+    @patch("raisin_ota.client.requests.post")
+    @patch("raisin_ota.client._compute_sha256", return_value="aabbcc")
     def test_upload_package_blob_dedup(self, _sha, mock_post, mock_get, _ep, _auth):
         # GET blob exists → True (skip upload)
         # GET packages → existing package
@@ -890,13 +880,11 @@ class TestUpload(unittest.TestCase):
         # Only manifest + tag, no blob upload
         self.assertEqual(mock_post.call_count, 2)
 
-    @patch("commands.ota_client.authenticate")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
-    @patch("commands.ota_client.requests.post")
-    @patch("commands.ota_client._compute_sha256", return_value="aabbcc")
+    @patch("raisin_ota.client.authenticate")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
+    @patch("raisin_ota.client.requests.post")
+    @patch("raisin_ota.client._compute_sha256", return_value="aabbcc")
     def test_upload_package_401_retry(self, _sha, mock_post, mock_get, _ep, mock_auth):
         # authenticate() is called 3 times:
         #   1) initial upload_package call
@@ -946,10 +934,8 @@ class TestUpload(unittest.TestCase):
         # authenticate() called 3 times: initial + re-auth + recursive call
         self.assertEqual(mock_auth.call_count, 3)
 
-    @patch("commands.ota_client.authenticate", return_value=None)
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
+    @patch("raisin_ota.client.authenticate", return_value=None)
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
     def test_upload_package_auth_fails(self, _ep, _auth):
         result = ota.upload_package(Path("/fake.zip"), "mypkg", "1.0.0", "release")
         self.assertFalse(result)
@@ -1063,6 +1049,229 @@ class TestMalformedReleaseYaml(unittest.TestCase):
         self.assertEqual(result["dependencies"], ["depA"])
 
 
+class TestRobotCallsSayWhyTheyFailed(unittest.TestCase):
+    """An agent has to act differently for each failure; the CLI never did.
+
+    `fetch_robot_desired_state` answered `None` for a 404, a 429, a 401, a 5xx
+    and being offline alike. For a CLI that is right — all of them mean "no
+    opinion, carry on". A resident process must back off for one, stop and
+    become visible for another, and keep polling normally for a third, and it
+    cannot when they arrive as the same value.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        _as_robot(self)
+
+    def tearDown(self):
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _fetch(self, **kwargs):
+        with (
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.get", **kwargs),
+        ):
+            return ota.fetch_robot_desired_state()
+
+    def test_a_document_comes_back_as_one(self):
+        result = self._fetch(
+            return_value=_mock_response(json_data={"data": {"halt": False}})
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value, {"halt": False})
+
+    def test_being_throttled_is_distinguishable(self):
+        throttled = _mock_response(status_code=429, headers={"Retry-After": "45"})
+        throttled.raise_for_status.side_effect = requests.HTTPError(response=throttled)
+
+        result = self._fetch(return_value=throttled)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.throttled)
+        self.assertEqual(result.retry_after, 45.0)
+        self.assertFalse(result.unauthorized)
+
+    def test_a_refused_credential_is_distinguishable(self):
+        """A revoked key answers this way, and retrying it is useless and loud."""
+        refused = _mock_response(status_code=401)
+        refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
+
+        result = self._fetch(return_value=refused)
+
+        self.assertTrue(result.unauthorized)
+        self.assertFalse(result.throttled)
+
+    def test_an_absent_opinion_is_not_a_failure_to_report(self):
+        """404 means the node is unknown or the server is old. Keep polling."""
+        result = self._fetch(return_value=_mock_response(status_code=404))
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.unauthorized)
+        self.assertFalse(result.throttled)
+        self.assertFalse(result.unreachable)
+
+    def test_being_offline_is_distinguishable(self):
+        result = self._fetch(side_effect=requests.ConnectionError("no route"))
+
+        self.assertTrue(result.unreachable)
+        self.assertFalse(result.unauthorized)
+
+    def test_a_missing_retry_after_is_not_invented(self):
+        """Backing off by a guessed number is the agent's decision, not this one's."""
+        throttled = _mock_response(status_code=429, headers={})
+        throttled.raise_for_status.side_effect = requests.HTTPError(response=throttled)
+
+        result = self._fetch(return_value=throttled)
+
+        self.assertTrue(result.throttled)
+        self.assertIsNone(result.retry_after)
+
+
+class TestRobotResultsSpeakOneVocabulary(unittest.TestCase):
+    """Every robot-facing result answers the same questions the same way.
+
+    A caller loops over these and decides: back off, stop, or try again. If one
+    result type spells a failure differently from another, that caller handles
+    the case on one call and silently not on the other — which is the defect
+    this whole shape exists to remove, reintroduced by copy-paste.
+    """
+
+    RESULTS = (ota.RobotCallResult, ota.FlushResult)
+    FAILURE_FIELDS = (
+        "status",
+        "throttled",
+        "retry_after",
+        "unauthorized",
+        "unreachable",
+        "detail",
+    )
+
+    def test_every_result_answers_every_failure_question(self):
+        for result_type in self.RESULTS:
+            with self.subTest(result=result_type.__name__):
+                instance = result_type()
+                for field in self.FAILURE_FIELDS:
+                    self.assertTrue(
+                        hasattr(instance, field),
+                        f"{result_type.__name__} cannot say '{field}'",
+                    )
+
+    def test_the_vocabulary_is_shared_rather_than_copied(self):
+        """Inherited, so adding a seventh question reaches every result."""
+        for result_type in self.RESULTS:
+            with self.subTest(result=result_type.__name__):
+                self.assertTrue(issubclass(result_type, ota.RobotCallOutcome))
+
+    def test_a_result_that_copied_the_fields_would_not_pass(self):
+        """A guard nothing can fail is not a guard."""
+
+        @dataclass(frozen=True)
+        class Impostor:
+            status: Optional[int] = None
+            throttled: bool = False
+            retry_after: Optional[float] = None
+            unauthorized: bool = False
+            unreachable: bool = False
+            detail: Optional[str] = None
+
+        self.assertFalse(issubclass(Impostor, ota.RobotCallOutcome))
+
+
+class TestFlushSaysWhyItDidNotDrain(unittest.TestCase):
+    """The same collapse `fetch` had, on the other robot-facing call.
+
+    It matters at exactly one moment: a site comes back from an outage and a
+    thousand robots reconnect at once, each holding a queue. Every cycle then
+    spends a poll *and* a flush, the flush is certain to fail while the fleet
+    is over its budget, and the agent cannot tell — so it spends the request
+    again next cycle. The flush doubles the load precisely when the throttle
+    is already biting.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        _as_robot(self)
+        ota._install_session_id = "session-flush"
+        ota.record_install_event("started", archive_name="dso")
+
+    def tearDown(self):
+        ota._install_session_id = None
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _flush(self, **kwargs):
+        with (
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.post", **kwargs),
+        ):
+            return ota.flush_install_events()
+
+    def test_a_drained_queue_reports_as_drained(self):
+        (event,) = ota._read_install_event_queue()
+        result = self._flush(
+            return_value=_mock_response(
+                json_data={"data": {"acks": [{"eventId": event["eventId"]}]}}
+            )
+        )
+
+        self.assertTrue(result.drained)
+        self.assertEqual(result.remaining, 0)
+
+    def test_being_throttled_is_distinguishable(self):
+        throttled = _mock_response(status_code=429, headers={"Retry-After": "30"})
+        throttled.raise_for_status.side_effect = requests.HTTPError(response=throttled)
+
+        result = self._flush(return_value=throttled)
+
+        self.assertFalse(result.drained)
+        self.assertTrue(result.throttled)
+        self.assertEqual(result.retry_after, 30.0)
+
+    def test_a_refused_credential_is_distinguishable(self):
+        refused = _mock_response(status_code=401)
+        refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
+
+        result = self._flush(return_value=refused)
+
+        self.assertTrue(result.unauthorized)
+        self.assertFalse(result.throttled)
+
+    def test_being_offline_is_distinguishable(self):
+        result = self._flush(side_effect=requests.ConnectionError("no route"))
+
+        self.assertTrue(result.unreachable)
+        self.assertFalse(result.drained)
+
+    def test_what_did_not_go_is_still_on_disk(self):
+        """Whatever the reason, the queue is what makes a later run useful."""
+        self._flush(side_effect=requests.ConnectionError("no route"))
+
+        self.assertEqual(len(ota._read_install_event_queue()), 1)
+
+    def test_no_credential_is_not_a_server_refusal(self):
+        """A developer machine has nothing to report as; that is not a 401."""
+        _as_robot(self, None)
+
+        result = ota.flush_install_events()
+
+        self.assertFalse(result.drained)
+        self.assertFalse(result.unauthorized)
+
+
 class TestHaltStopsTheInstall(unittest.TestCase):
     """A halt tells this node to stop. It is not "no archive available".
 
@@ -1088,7 +1297,7 @@ class TestHaltStopsTheInstall(unittest.TestCase):
         _as_robot(self)
 
         with patch(
-            "commands.ota_client._resolve_desired_state",
+            "raisin_ota.client._resolve_desired_state",
             return_value=(True, None, None, None),
         ):
             with self.assertRaises(ota.OtaInstallHalted):
@@ -1105,11 +1314,13 @@ class TestHaltStopsTheInstall(unittest.TestCase):
         )
         from commands.install import install_command
 
-        with patch(
-            "commands.install.download_all_from_archive",
-            side_effect=ota.OtaInstallHalted("halted by tenant"),
-        ), patch("commands.ota_client.download_package") as mock_download, patch(
-            "commands.install.requests.Session"
+        with (
+            patch(
+                "commands.install.download_all_from_archive",
+                side_effect=ota.OtaInstallHalted("halted by tenant"),
+            ),
+            patch("raisin_ota.client.download_package") as mock_download,
+            patch("commands.install.requests.Session"),
         ):
             result = install_command([], "release")
 
@@ -1146,16 +1357,17 @@ class TestUnusableTreeStopsTheInstall(unittest.TestCase):
         )
         from commands.install import install_command
 
-        with patch(
-            "commands.install.download_all_from_archive",
-            side_effect=install_tree.InstallTreeUnusable(
-                "release/install and release/versions are on different filesystems"
+        with (
+            patch(
+                "commands.install.download_all_from_archive",
+                side_effect=install_tree.InstallTreeUnusable(
+                    "release/install and release/versions are on different filesystems"
+                ),
             ),
-        ), patch("commands.ota_client.download_package") as mock_download, patch(
-            "commands.install.requests.Session"
-        ), patch(
-            "builtins.print"
-        ) as mock_print:
+            patch("raisin_ota.client.download_package") as mock_download,
+            patch("commands.install.requests.Session"),
+            patch("builtins.print") as mock_print,
+        ):
             result = install_command([], "release")
 
         self.assertFalse(result)
@@ -1182,8 +1394,8 @@ class TestNodeLevelArchivePin(unittest.TestCase):
         g.script_directory = self._orig
         self._tmp.cleanup()
 
-    @patch("commands.ota_client._fetch_archive_manifest", return_value=None)
-    @patch("commands.ota_client._resolve_desired_state")
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
     def test_an_env_pinned_archive_outranks_desired_state(
         self, mock_desired, _mock_fetch
     ):
@@ -1205,12 +1417,11 @@ class TestNodeLevelArchivePin(unittest.TestCase):
         )
         from commands.install import install_command
 
-        with patch(
-            "commands.install.download_all_from_archive", return_value={}
-        ), patch("commands.ota_client.download_package") as mock_download, patch(
-            "commands.install.requests.Session"
-        ), patch.dict(
-            os.environ, {"RAISIN_ARCHIVE_NAME": "node-archive"}
+        with (
+            patch("commands.install.download_all_from_archive", return_value={}),
+            patch("raisin_ota.client.download_package") as mock_download,
+            patch("commands.install.requests.Session"),
+            patch.dict(os.environ, {"RAISIN_ARCHIVE_NAME": "node-archive"}),
         ):
             result = install_command([], "release")
 
@@ -1252,8 +1463,8 @@ class TestPackageLookup(unittest.TestCase):
             }
         )
 
-    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._get_auth_context", return_value=("https://x", {}))
+    @patch("raisin_ota.client.requests.get")
     def test_lookup_searches_rather_than_sending_an_unknown_parameter(
         self, mock_get, _ctx
     ):
@@ -1266,16 +1477,16 @@ class TestPackageLookup(unittest.TestCase):
         self.assertEqual(sent["search"], "raisin")
         self.assertLessEqual(sent["limit"], 100)
 
-    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._get_auth_context", return_value=("https://x", {}))
+    @patch("raisin_ota.client.requests.get")
     def test_lookup_returns_the_exact_name_not_the_first_result(self, mock_get, _ctx):
         """`search` is a substring match over name and description."""
         mock_get.return_value = self._page(["raisin_gui", "raisin", "raisin_plugin"])
 
         self.assertEqual(ota._fetch_package_id_by_name("raisin"), "id-raisin")
 
-    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._get_auth_context", return_value=("https://x", {}))
+    @patch("raisin_ota.client.requests.get")
     def test_lookup_walks_pages_to_find_the_exact_name(self, mock_get, _ctx):
         mock_get.side_effect = [
             self._page(["raisin_a"], total=2, page=1, limit=1),
@@ -1286,8 +1497,8 @@ class TestPackageLookup(unittest.TestCase):
             ota._fetch_package_id_by_name("raisin", page_size=1), "id-raisin"
         )
 
-    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._get_auth_context", return_value=("https://x", {}))
+    @patch("raisin_ota.client.requests.get")
     def test_a_rejected_request_is_reported_as_a_rejection(self, mock_get, _ctx):
         """Not as an absent package — that sends the operator to the wrong place."""
         rejected = _mock_response(
@@ -1317,8 +1528,8 @@ class TestPackageLookup(unittest.TestCase):
         self.assertIn("property name should not exist", output)
         self.assertNotIn("not found", output.lower())
 
-    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._get_auth_context", return_value=("https://x", {}))
+    @patch("raisin_ota.client.requests.get")
     def test_a_missing_package_is_reported_as_missing(self, mock_get, _ctx):
         mock_get.return_value = self._page([])
 
@@ -1329,8 +1540,8 @@ class TestPackageLookup(unittest.TestCase):
         self.assertIn("not found", output.lower())
         self.assertNotIn("reject", output.lower())
 
-    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._get_auth_context", return_value=("https://x", {}))
+    @patch("raisin_ota.client.requests.get")
     def test_a_refused_page_does_not_become_a_shorter_list(self, mock_get, _ctx):
         """Half a list reads as "these are all the packages" — the same lie."""
         refused = _mock_response(status_code=400, json_data={"success": False})
@@ -1343,8 +1554,8 @@ class TestPackageLookup(unittest.TestCase):
         with patch("builtins.print"):
             self.assertIsNone(ota._list_all_packages(page_size=2))
 
-    @patch("commands.ota_client._get_auth_context", return_value=("https://x", {}))
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._get_auth_context", return_value=("https://x", {}))
+    @patch("raisin_ota.client.requests.get")
     def test_listing_every_package_stays_within_the_page_limit(self, mock_get, _ctx):
         mock_get.side_effect = [
             self._page(["a", "b"], total=3, page=1, limit=2),
@@ -1409,7 +1620,7 @@ class TestInstallEventQueue(unittest.TestCase):
 
         self.assertEqual([e["eventId"] for e in self._queued()], ["old-1"])
 
-    @patch("commands.ota_client.requests.post")
+    @patch("raisin_ota.client.requests.post")
     def test_acks_for_events_we_never_sent_do_not_spin(self, mock_post):
         """The guard must watch our queue, not whether the response was empty."""
         ota.record_install_event("started", archive_name="dso")
@@ -1429,7 +1640,7 @@ class TestInstallEventQueue(unittest.TestCase):
 
         result = ota.flush_install_events()
 
-        self.assertFalse(result)
+        self.assertFalse(result.drained)
         self.assertEqual(len(self._queued()), 1)
         self.assertEqual(len(posts), 1)
 
@@ -1481,15 +1692,19 @@ class TestInstallEventQueue(unittest.TestCase):
         queued = self._queued()
         acks = [{"eventId": e["eventId"], "status": "created"} for e in queued]
 
-        with _robot_identity(), patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
-        ), patch(
-            "commands.ota_client.requests.post",
-            return_value=_mock_response(
-                json_data={"success": True, "data": {"created": 2, "acks": acks}}
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
             ),
-        ) as mock_post:
+            patch(
+                "raisin_ota.client.requests.post",
+                return_value=_mock_response(
+                    json_data={"success": True, "data": {"created": 2, "acks": acks}}
+                ),
+            ) as mock_post,
+        ):
             ok = ota.flush_install_events()
 
         self.assertTrue(ok)
@@ -1503,16 +1718,20 @@ class TestInstallEventQueue(unittest.TestCase):
     def test_offline_flush_keeps_the_queue_for_later(self):
         ota.record_install_event("started")
 
-        with _robot_identity(), patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
-        ), patch(
-            "commands.ota_client.requests.post",
-            side_effect=requests.ConnectionError("offline"),
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.post",
+                side_effect=requests.ConnectionError("offline"),
+            ),
         ):
-            ok = ota.flush_install_events()
+            result = ota.flush_install_events()
 
-        self.assertFalse(ok)
+        self.assertFalse(result.drained)
         self.assertEqual(len(self._queued()), 1)
 
     def test_replayed_batch_keeps_the_same_event_ids(self):
@@ -1520,20 +1739,25 @@ class TestInstallEventQueue(unittest.TestCase):
         ota.record_install_event("started")
         first = [e["eventId"] for e in self._queued()]
 
-        with _robot_identity(), patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
-        ), patch(
-            "commands.ota_client.requests.post",
-            side_effect=requests.ConnectionError("offline"),
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.post",
+                side_effect=requests.ConnectionError("offline"),
+            ),
         ):
             ota.flush_install_events()
 
         self.assertEqual([e["eventId"] for e in self._queued()], first)
 
     def test_delayed_flush_preserves_occurred_at_ordering(self):
-        with patch("commands.ota_client.time.time", side_effect=[100.5, 300.25]), patch(
-            "commands.ota_client.time.gmtime", side_effect=time.gmtime
+        with (
+            patch("raisin_ota.client.time.time", side_effect=[100.5, 300.25]),
+            patch("raisin_ota.client.time.gmtime", side_effect=time.gmtime),
         ):
             ota.record_install_event("started")
             ota.record_install_event("succeeded")
@@ -1563,10 +1787,14 @@ class TestInstallEventQueue(unittest.TestCase):
                 }
             )
 
-        with _robot_identity(), patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
-        ), patch("commands.ota_client.requests.post", side_effect=capture):
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.post", side_effect=capture),
+        ):
             ota.flush_install_events()
 
         self.assertEqual(posted, [ota._INSTALL_EVENT_BATCH_LIMIT, 5])
@@ -1586,11 +1814,14 @@ class TestInstallEventQueue(unittest.TestCase):
 
     def test_half_a_credential_yields_no_identity_so_nothing_is_recorded(self):
         """Resolution refuses it, and the core is then simply unconfigured."""
-        with patch.dict(
-            os.environ,
-            {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
-            clear=True,
-        ), patch("builtins.print"):
+        with (
+            patch.dict(
+                os.environ,
+                {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
+                clear=True,
+            ),
+            patch("builtins.print"),
+        ):
             self.assertIsNone(rc.resolve_robot_identity())
 
         with _no_robot_identity():
@@ -1603,15 +1834,18 @@ class TestInstallEventQueue(unittest.TestCase):
         for i in range(cap + 25):
             ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
 
-        with _robot_identity(), patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
-        ), patch(
-            "commands.ota_client.requests.post",
-            side_effect=requests.ConnectionError("offline"),
-        ), patch(
-            "builtins.print"
-        ) as mock_print:
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.post",
+                side_effect=requests.ConnectionError("offline"),
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             ota.flush_install_events()
 
         remaining = self._queued()
@@ -1629,9 +1863,9 @@ class TestInstallEventQueue(unittest.TestCase):
         # server, which answers 401 and makes this pass for the wrong reason.
         _as_robot(self, None)
 
-        ok = ota.flush_install_events()
+        result = ota.flush_install_events()
 
-        self.assertFalse(ok)
+        self.assertFalse(result.drained)
         self.assertEqual(len(self._queued()), 1)
 
 
@@ -1690,9 +1924,9 @@ class TestInstallEventEmission(unittest.TestCase):
         )
         return {"version": version, "dependencies": []}
 
-    @patch("commands.ota_client._extract_and_read_deps")
-    @patch("commands.ota_client._download_package_blob")
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._extract_and_read_deps")
+    @patch("raisin_ota.client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_started_event_names_the_archive(self, mock_manifest, mock_blob, mock_x):
         mock_manifest.return_value = self.MANIFEST
         mock_blob.return_value = (True, None)
@@ -1708,8 +1942,8 @@ class TestInstallEventEmission(unittest.TestCase):
         self.assertEqual(started[0]["archiveVersion"], "2026.1.0")
         self.assertEqual(started[0]["platform"], "linux-22.04-x86_64")
 
-    @patch("commands.ota_client._download_package_blob")
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_download_failure_is_noted_but_not_terminal_yet(
         self, mock_manifest, mock_blob
     ):
@@ -1724,9 +1958,9 @@ class TestInstallEventEmission(unittest.TestCase):
         self.assertEqual([e["eventType"] for e in self._events()], ["started"])
         self.assertEqual(ota.pending_install_failure(), ("download", "disk_full"))
 
-    @patch("commands.ota_client._extract_and_read_deps", return_value=None)
-    @patch("commands.ota_client._download_package_blob")
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._extract_and_read_deps", return_value=None)
+    @patch("raisin_ota.client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_extract_failure_is_noted_at_the_unpack_stage(
         self, mock_manifest, mock_blob, _mock_x
     ):
@@ -1740,9 +1974,9 @@ class TestInstallEventEmission(unittest.TestCase):
         self.assertEqual([e["eventType"] for e in self._events()], ["started"])
         self.assertEqual(ota.pending_install_failure(), ("unpack", "unpack_failed"))
 
-    @patch("commands.ota_client._extract_and_read_deps")
-    @patch("commands.ota_client._download_package_blob")
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._extract_and_read_deps")
+    @patch("raisin_ota.client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_first_failure_wins_when_several_packages_fail(
         self, mock_manifest, mock_blob, mock_x
     ):
@@ -1764,9 +1998,9 @@ class TestInstallEventEmission(unittest.TestCase):
 
         self.assertEqual(ota.pending_install_failure(), ("download", "server_error"))
 
-    @patch("commands.ota_client._extract_and_read_deps")
-    @patch("commands.ota_client._download_package_blob")
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._extract_and_read_deps")
+    @patch("raisin_ota.client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_partial_archive_install_is_not_a_success(
         self, mock_manifest, mock_blob, mock_x
     ):
@@ -1793,9 +2027,9 @@ class TestInstallEventEmission(unittest.TestCase):
         self.assertEqual(results, {})  # nothing committed
         self.assertIsNotNone(ota.pending_install_failure())
 
-    @patch("commands.ota_client._extract_and_read_deps")
-    @patch("commands.ota_client._download_package_blob")
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._extract_and_read_deps")
+    @patch("raisin_ota.client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_success_is_reported_by_the_cli_not_the_download_layer(
         self, mock_manifest, mock_blob, mock_x
     ):
@@ -1891,15 +2125,18 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         return fake
 
     def _run(self, installable, **kwargs):
-        with patch(
-            "commands.ota_client._fetch_archive_manifest", return_value=self.MANIFEST
-        ), patch(
-            "commands.ota_client._download_package_blob", return_value=(True, None)
-        ), patch(
-            "commands.ota_client._extract_and_read_deps",
-            side_effect=self._extract_into(installable),
-        ), patch(
-            "commands.ota_client.report_software_snapshot", return_value=True
+        with (
+            patch(
+                "raisin_ota.client._fetch_archive_manifest", return_value=self.MANIFEST
+            ),
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch(
+                "raisin_ota.client._extract_and_read_deps",
+                side_effect=self._extract_into(installable),
+            ),
+            patch("raisin_ota.client.report_software_snapshot", return_value=True),
         ):
             return ota.download_all_from_archive(
                 "release", self.live, archive_version="2026.2.0", **kwargs
@@ -1926,7 +2163,7 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
     def test_an_archive_with_no_version_is_refused_before_staging(self):
         """The version becomes a directory name, so a falsy one cannot commit."""
         with patch(
-            "commands.ota_client._fetch_archive_manifest",
+            "raisin_ota.client._fetch_archive_manifest",
             return_value=(self.MANIFEST[0], "arch-1", None),
         ):
             results = ota.download_all_from_archive(
@@ -1940,7 +2177,7 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
     def test_an_archive_with_an_empty_version_is_refused(self):
         """`0001-` does not match the generation pattern, so the tree loses it."""
         with patch(
-            "commands.ota_client._fetch_archive_manifest",
+            "raisin_ota.client._fetch_archive_manifest",
             return_value=(self.MANIFEST[0], "arch-1", ""),
         ):
             results = ota.download_all_from_archive(
@@ -1956,9 +2193,10 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         ota.clear_pending_install_failure()
         ota._install_session_id = "session-tx-nocommit"
 
-        with patch("commands.install_tree.commit_version", return_value=None), patch(
-            "builtins.print"
-        ) as mock_print:
+        with (
+            patch("raisin_ota.install_tree.commit_version", return_value=None),
+            patch("builtins.print") as mock_print,
+        ):
             results = self._run({"pkg1", "pkg2"})
 
         self.assertEqual(results, {})
@@ -1972,14 +2210,18 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         ota.clear_pending_install_failure()
         ota._install_session_id = "session-tx-2"
 
-        with patch(
-            "commands.ota_client._fetch_archive_manifest",
-            return_value=(self.MANIFEST[0], "arch-2", "2026.3.0"),
-        ), patch(
-            "commands.ota_client._download_package_blob", return_value=(True, None)
-        ), patch(
-            "commands.ota_client._extract_and_read_deps",
-            side_effect=self._extract_into({"pkg1"}),
+        with (
+            patch(
+                "raisin_ota.client._fetch_archive_manifest",
+                return_value=(self.MANIFEST[0], "arch-2", "2026.3.0"),
+            ),
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch(
+                "raisin_ota.client._extract_and_read_deps",
+                side_effect=self._extract_into({"pkg1"}),
+            ),
         ):
             ota.download_all_from_archive(
                 "release", self.live, archive_version="2026.3.0"
@@ -1999,16 +2241,19 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         ota._install_session_id = "session-tx-3"
         ota.clear_pending_install_failure()
 
-        with patch(
-            "commands.ota_client._fetch_archive_manifest",
-            return_value=(self.MANIFEST[0], "arch-1", "2026.3.0"),
-        ), patch(
-            "commands.ota_client._download_package_blob", return_value=(True, None)
-        ), patch(
-            "commands.ota_client._extract_and_read_deps",
-            side_effect=self._extract_into({"pkg1"}),
-        ), patch(
-            "commands.ota_client.report_software_snapshot", return_value=True
+        with (
+            patch(
+                "raisin_ota.client._fetch_archive_manifest",
+                return_value=(self.MANIFEST[0], "arch-1", "2026.3.0"),
+            ),
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch(
+                "raisin_ota.client._extract_and_read_deps",
+                side_effect=self._extract_into({"pkg1"}),
+            ),
+            patch("raisin_ota.client.report_software_snapshot", return_value=True),
         ):
             ota.download_all_from_archive(
                 "release",
@@ -2032,16 +2277,19 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
             install_dir.mkdir(parents=True, exist_ok=True)
             return {"version": version_, "dependencies": []}
 
-        with patch(
-            "commands.ota_client._fetch_archive_manifest",
-            return_value=(self.MANIFEST[0], "arch-1", version),
-        ), patch(
-            "commands.ota_client._download_package_blob", return_value=(True, None)
-        ), patch(
-            "commands.ota_client._extract_and_read_deps", side_effect=hollow
-        ), patch(
-            "commands.ota_client.report_software_snapshot", return_value=True
-        ) as mock_snapshot:
+        with (
+            patch(
+                "raisin_ota.client._fetch_archive_manifest",
+                return_value=(self.MANIFEST[0], "arch-1", version),
+            ),
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch("raisin_ota.client._extract_and_read_deps", side_effect=hollow),
+            patch(
+                "raisin_ota.client.report_software_snapshot", return_value=True
+            ) as mock_snapshot,
+        ):
             results = ota.download_all_from_archive(
                 "release", self.live, archive_version=version
             )
@@ -2215,9 +2463,12 @@ class TestDownloadBlobErrorPropagation(unittest.TestCase):
 
     def _call(self, robot=True):
         identity = _robot_identity() if robot else _no_robot_identity()
-        with identity, patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
+        with (
+            identity,
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
         ):
             return ota._download_package_blob(
                 "arch-1",
@@ -2236,29 +2487,35 @@ class TestDownloadBlobErrorPropagation(unittest.TestCase):
             iter_content=[body],
             headers={"X-Content-Hash": hashlib.sha256(body).hexdigest()},
         )
-        with patch("commands.ota_client.requests.get", return_value=resp):
+        with patch("raisin_ota.client.requests.get", return_value=resp):
             ok, code = self._call(robot=True)
 
         self.assertTrue(ok)
         self.assertIsNone(code)
 
     def test_robot_path_propagates_the_taxonomy_code(self):
-        with patch(
-            "commands.ota_client.requests.get",
-            side_effect=requests.ConnectionError("refused"),
-        ), patch("commands.ota_client.time.sleep"):
+        with (
+            patch(
+                "raisin_ota.client.requests.get",
+                side_effect=requests.ConnectionError("refused"),
+            ),
+            patch("raisin_ota.client.time.sleep"),
+        ):
             ok, code = self._call(robot=True)
 
         self.assertFalse(ok)
         self.assertEqual(code, "network")
 
-    @patch("commands.ota_client._get_auth_context", return_value=("tok", {}))
+    @patch("raisin_ota.client._get_auth_context", return_value=("tok", {}))
     def test_legacy_path_propagates_the_taxonomy_code(self, _ctx):
         resp = _mock_response(status_code=503)
-        with patch(
-            "commands.ota_client.requests.get",
-            side_effect=requests.HTTPError(response=resp),
-        ), patch("commands.ota_client.time.sleep"):
+        with (
+            patch(
+                "raisin_ota.client.requests.get",
+                side_effect=requests.HTTPError(response=resp),
+            ),
+            patch("raisin_ota.client.time.sleep"),
+        ):
             ok, code = self._call(robot=False)
 
         self.assertFalse(ok)
@@ -2286,7 +2543,7 @@ class TestResumableDownload(unittest.TestCase):
 
     def test_successful_download_lands_at_final_path(self):
         with patch(
-            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+            "raisin_ota.client.requests.get", return_value=self._resp(self.BODY)
         ):
             ok, code = ota._download_to_path("https://ota.example.com/x", self.dest)
 
@@ -2301,8 +2558,9 @@ class TestResumableDownload(unittest.TestCase):
             iter_content=[b"corrupted"],
             headers={"X-Content-Hash": self.digest, "Content-Length": "9"},
         )
-        with patch("commands.ota_client.requests.get", return_value=bad), patch(
-            "commands.ota_client.time.sleep"
+        with (
+            patch("raisin_ota.client.requests.get", return_value=bad),
+            patch("raisin_ota.client.time.sleep"),
         ):
             ok, code = ota._download_to_path(
                 "https://ota.example.com/x", self.dest, max_attempts=1
@@ -2326,8 +2584,9 @@ class TestResumableDownload(unittest.TestCase):
                 "Content-Length": str(len(self.BODY)),
             },
         )
-        with patch("commands.ota_client.requests.get", return_value=resp), patch(
-            "commands.ota_client.time.sleep"
+        with (
+            patch("raisin_ota.client.requests.get", return_value=resp),
+            patch("raisin_ota.client.time.sleep"),
         ):
             ok, code = ota._download_to_path(
                 "https://ota.example.com/x", self.dest, max_attempts=1
@@ -2356,8 +2615,9 @@ class TestResumableDownload(unittest.TestCase):
             sent.append(dict(headers or {}))
             return refused if len(sent) == 1 else self._resp(self.BODY)
 
-        with patch("commands.ota_client.requests.get", side_effect=get), patch(
-            "commands.ota_client.time.sleep"
+        with (
+            patch("raisin_ota.client.requests.get", side_effect=get),
+            patch("raisin_ota.client.time.sleep"),
         ):
             ok, code = ota._download_to_path(
                 "https://ota.example.com/x", self.dest, max_attempts=1
@@ -2380,7 +2640,7 @@ class TestResumableDownload(unittest.TestCase):
                 "Content-Range": f"bytes 8-{len(self.BODY) - 1}/{len(self.BODY)}",
             },
         )
-        with patch("commands.ota_client.requests.get", return_value=resp) as mock_get:
+        with patch("raisin_ota.client.requests.get", return_value=resp) as mock_get:
             ok, _ = ota._download_to_path("https://ota.example.com/x", self.dest)
 
         sent = mock_get.call_args.kwargs["headers"]
@@ -2406,8 +2666,9 @@ class TestResumableDownload(unittest.TestCase):
                 "Content-Range": f"bytes 4-{len(self.BODY) - 1}/{len(self.BODY)}",
             },
         )
-        with patch("commands.ota_client.requests.get", return_value=resp), patch(
-            "commands.ota_client.time.sleep"
+        with (
+            patch("raisin_ota.client.requests.get", return_value=resp),
+            patch("raisin_ota.client.time.sleep"),
         ):
             ok, code = ota._download_to_path(
                 "https://ota.example.com/x", self.dest, max_attempts=1
@@ -2425,7 +2686,7 @@ class TestResumableDownload(unittest.TestCase):
         os.utime(self.part, (stale, stale))
 
         with patch(
-            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+            "raisin_ota.client.requests.get", return_value=self._resp(self.BODY)
         ) as mock_get:
             ok, _ = ota._download_to_path("https://ota.example.com/x", self.dest)
 
@@ -2439,7 +2700,7 @@ class TestResumableDownload(unittest.TestCase):
         ota._write_part_state(self.part, "0" * 64)
 
         with patch(
-            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+            "raisin_ota.client.requests.get", return_value=self._resp(self.BODY)
         ):
             ok, _ = ota._download_to_path("https://ota.example.com/x", self.dest)
 
@@ -2448,8 +2709,9 @@ class TestResumableDownload(unittest.TestCase):
 
     def test_insufficient_disk_space_fails_before_writing(self):
         usage = MagicMock(free=16)
-        with patch("commands.ota_client.shutil.disk_usage", return_value=usage), patch(
-            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
+        with (
+            patch("raisin_ota.client.shutil.disk_usage", return_value=usage),
+            patch("raisin_ota.client.requests.get", return_value=self._resp(self.BODY)),
         ):
             ok, code = ota._download_to_path(
                 "https://ota.example.com/x", self.dest, max_attempts=1
@@ -2471,9 +2733,10 @@ class TestResumableDownload(unittest.TestCase):
                 raise item
             return item
 
-        with patch("commands.ota_client.requests.get", side_effect=side_effect), patch(
-            "commands.ota_client.time.sleep"
-        ) as mock_sleep:
+        with (
+            patch("raisin_ota.client.requests.get", side_effect=side_effect),
+            patch("raisin_ota.client.time.sleep") as mock_sleep,
+        ):
             ok, code = ota._download_to_path("https://ota.example.com/x", self.dest)
 
         self.assertTrue(ok)
@@ -2481,10 +2744,13 @@ class TestResumableDownload(unittest.TestCase):
         self.assertEqual(mock_sleep.call_count, 1)
 
     def test_retries_are_capped_and_report_the_last_error(self):
-        with patch(
-            "commands.ota_client.requests.get",
-            side_effect=requests.ConnectionError("reset"),
-        ) as mock_get, patch("commands.ota_client.time.sleep"):
+        with (
+            patch(
+                "raisin_ota.client.requests.get",
+                side_effect=requests.ConnectionError("reset"),
+            ) as mock_get,
+            patch("raisin_ota.client.time.sleep"),
+        ):
             ok, code = ota._download_to_path(
                 "https://ota.example.com/x", self.dest, max_attempts=3
             )
@@ -2495,9 +2761,13 @@ class TestResumableDownload(unittest.TestCase):
 
     def test_permanent_failure_is_not_retried(self):
         usage = MagicMock(free=1)
-        with patch("commands.ota_client.shutil.disk_usage", return_value=usage), patch(
-            "commands.ota_client.requests.get", return_value=self._resp(self.BODY)
-        ) as mock_get, patch("commands.ota_client.time.sleep"):
+        with (
+            patch("raisin_ota.client.shutil.disk_usage", return_value=usage),
+            patch(
+                "raisin_ota.client.requests.get", return_value=self._resp(self.BODY)
+            ) as mock_get,
+            patch("raisin_ota.client.time.sleep"),
+        ):
             ok, code = ota._download_to_path(
                 "https://ota.example.com/x", self.dest, max_attempts=5
             )
@@ -2508,10 +2778,13 @@ class TestResumableDownload(unittest.TestCase):
 
     def test_backoff_is_exponential_and_jittered(self):
         delays = []
-        with patch(
-            "commands.ota_client.requests.get",
-            side_effect=requests.ConnectionError("reset"),
-        ), patch("commands.ota_client.time.sleep", side_effect=delays.append):
+        with (
+            patch(
+                "raisin_ota.client.requests.get",
+                side_effect=requests.ConnectionError("reset"),
+            ),
+            patch("raisin_ota.client.time.sleep", side_effect=delays.append),
+        ):
             ota._download_to_path(
                 "https://ota.example.com/x", self.dest, max_attempts=4
             )
@@ -2574,11 +2847,9 @@ class TestDownload(unittest.TestCase):
         _sync_ota_context()
         self._tmp_script_dir.cleanup()
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_fetch_archive_manifest_returns_data(self, mock_get, _ep, _auth):
         # Server returns paginated response wrapped in {data: {archives: [...]}}
         archive_list = [
@@ -2605,11 +2876,9 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(archive_version, "v2024.01")
         self.assertEqual(len(packages), 1)
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_fetch_archive_manifest_uses_exact_version_param(
         self, mock_get, _ep, _auth
     ):
@@ -2638,11 +2907,9 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(params["version"], "1.0.3")
         self.assertNotIn("search", params)
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_fetch_archive_manifest_strips_v_prefix_on_send(self, mock_get, _ep, _auth):
         # Server stores versions without the `v` prefix and normalizes the
         # leading `v` case-insensitively (`/^v/i`). The client must strip
@@ -2683,11 +2950,9 @@ class TestDownload(unittest.TestCase):
             params = mock_get.call_args.kwargs["params"]
             self.assertEqual(params["version"], "1.0.3")
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_fetch_archive_manifest_tolerates_null_version(self, mock_get, _ep, _auth):
         # A nulled `version` field used to crash with AttributeError on
         # `None.lstrip(...)`. The strict filter should ignore the bad row
@@ -2719,11 +2984,9 @@ class TestDownload(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result[1], "arch-good")
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_fetch_archive_manifest_caching(self, mock_get, _ep, _auth):
         archive_list = [
             {
@@ -2746,11 +3009,9 @@ class TestDownload(unittest.TestCase):
         # Only one HTTP call thanks to caching
         self.assertEqual(mock_get.call_count, 1)
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_fetch_archive_by_tag_returns_archive(self, mock_get, _ep, _auth):
         tag_response = _mock_response(
             json_data={
@@ -2792,11 +3053,9 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         self.assertEqual(mock_get.call_count, 2)
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_fetch_archive_by_tag_returns_none_when_platform_missing(
         self, mock_get, _ep, _auth
     ):
@@ -2819,11 +3078,9 @@ class TestDownload(unittest.TestCase):
         # No second call to /archives/{id}
         self.assertEqual(mock_get.call_count, 1)
 
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_fetch_archive_by_tag_returns_none_on_404(self, mock_get, _ep, _auth):
         err_resp = MagicMock()
         err_resp.status_code = 404
@@ -2836,10 +3093,8 @@ class TestDownload(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_download_package_blob_uses_robot_endpoint_when_key_configured(
         self, mock_get, _ep
     ):
@@ -2889,18 +3144,21 @@ class TestDownload(unittest.TestCase):
 
     def test_key_without_a_node_is_not_a_usable_identity(self):
         """Robot endpoints resolve a node, so half a credential fails every call."""
-        with patch.dict(
-            os.environ,
-            {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
-            clear=True,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch.dict(
+                os.environ,
+                {"RAISIN_ROBOT_API_KEY": "robot-key"},  # pragma: allowlist secret
+                clear=True,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             identity = rc.resolve_robot_identity()
 
         self.assertIsNone(identity)
         mock_print.assert_called_once()
 
-    @patch("commands.ota_client._get_auth_context", return_value=("tok", {}))
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._get_auth_context", return_value=("tok", {}))
+    @patch("raisin_ota.client.requests.get")
     def test_stream_download_never_leaves_a_partial_at_the_final_path(
         self, mock_get, _auth
     ):
@@ -2912,8 +3170,9 @@ class TestDownload(unittest.TestCase):
             iter_content=chunks(), headers={"Content-Length": "20"}
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch(
-            "commands.ota_client.time.sleep"
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("raisin_ota.client.time.sleep"),
         ):
             download_path = Path(tmpdir) / "pkg.zip"
 
@@ -2925,10 +3184,8 @@ class TestDownload(unittest.TestCase):
             self.assertEqual(code, "network")
             self.assertFalse(download_path.exists())
 
-    @patch("commands.ota_client._stream_download", return_value=True)
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
+    @patch("raisin_ota.client._stream_download", return_value=True)
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
     def test_download_package_blob_keeps_legacy_path_without_robot_key(
         self, _ep, mock_stream
     ):
@@ -2951,10 +3208,8 @@ class TestDownload(unittest.TestCase):
             "mypkg",
         )
 
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.post")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.post")
     def test_report_software_snapshot_posts_robot_payload(self, mock_post, _ep):
         mock_post.return_value = _mock_response()
         packages = [
@@ -3022,8 +3277,8 @@ class TestDownload(unittest.TestCase):
 
         self.assertEqual(packages, [])
 
-    @patch("commands.ota_client._fetch_archive_by_tag")
-    @patch("commands.ota_client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_by_tag")
+    @patch("raisin_ota.client._download_package_blob")
     def test_download_all_uses_tag_when_provided(self, mock_dl, mock_fetch_by_tag):
         mock_fetch_by_tag.return_value = (
             [{"packageName": "raisin", "manifestHash": "abc", "packageId": "p1"}],
@@ -3039,7 +3294,7 @@ class TestDownload(unittest.TestCase):
         args = mock_fetch_by_tag.call_args.args
         self.assertEqual(args[2], "stable")  # tag is third positional
 
-    @patch("commands.ota_client._fetch_archive_by_tag")
+    @patch("raisin_ota.client._fetch_archive_by_tag")
     def test_download_all_returns_empty_when_tag_unresolvable(self, mock_fetch_by_tag):
         # When the requested tag can't be resolved (and tag IS 'stable' so
         # no further fallback), the function should surface an empty result
@@ -3052,8 +3307,8 @@ class TestDownload(unittest.TestCase):
             )
         self.assertEqual(result, {})
 
-    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
-    @patch("commands.ota_client._fetch_archive_by_tag")
+    @patch("raisin_ota.client._download_package_blob", return_value=(True, None))
+    @patch("raisin_ota.client._fetch_archive_by_tag")
     def test_download_all_falls_back_to_stable_when_requested_tag_missing(
         self, mock_fetch_by_tag, _mock_dl
     ):
@@ -3083,9 +3338,9 @@ class TestDownload(unittest.TestCase):
         # ran the success path.
         self.assertEqual(result, {})
 
-    @patch("commands.ota_client._fetch_archive_manifest")
-    @patch("commands.ota_client._fetch_archive_by_tag")
-    @patch("commands.ota_client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_manifest")
+    @patch("raisin_ota.client._fetch_archive_by_tag")
+    @patch("raisin_ota.client._download_package_blob")
     def test_archive_version_takes_precedence_over_tag(
         self, mock_dl, mock_by_tag, mock_by_version
     ):
@@ -3103,8 +3358,8 @@ class TestDownload(unittest.TestCase):
         mock_by_version.assert_called_once()
         mock_by_tag.assert_not_called()
 
-    @patch("commands.ota_client._download_package_blob")
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._download_package_blob")
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_download_package_happy_path(self, mock_manifest, mock_blob):
         packages = [
             {
@@ -3167,8 +3422,8 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(metadata["requestedArchiveVersion"], None)
         self.assertIn("installedAt", metadata)
 
-    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._download_package_blob", return_value=(True, None))
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_download_package_version_matching(self, mock_manifest, mock_blob):
         packages = [
             {
@@ -3216,10 +3471,10 @@ class TestDownload(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["version"], "1.5.0")
 
-    @patch("commands.ota_client._queue_snapshot_report")
-    @patch("commands.ota_client.get_install_session_id", return_value="session-1")
-    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._queue_snapshot_report")
+    @patch("raisin_ota.client.get_install_session_id", return_value="session-1")
+    @patch("raisin_ota.client._download_package_blob", return_value=(True, None))
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_download_package_defers_snapshot_report(
         self, mock_manifest, mock_blob, _session_id, mock_queue
     ):
@@ -3252,7 +3507,7 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(mock_queue.call_args.kwargs["archive_id"], "arch-1")
         self.assertEqual(mock_queue.call_args.kwargs["install_session_id"], "session-1")
 
-    @patch("commands.ota_client._report_snapshot_from_install_metadata")
+    @patch("raisin_ota.client._report_snapshot_from_install_metadata")
     def test_pending_snapshot_reports_are_deduplicated_until_flush(self, mock_report):
         install_base = Path("/tmp/install-base")
 
@@ -3290,7 +3545,7 @@ class TestDownload(unittest.TestCase):
         )
         self.assertEqual(ota._pending_snapshot_reports, {})
 
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_download_package_not_in_archive(self, mock_manifest):
         packages = [
             {
@@ -3314,7 +3569,7 @@ class TestDownload(unittest.TestCase):
 
         self.assertIsNone(result)
 
-    @patch("commands.ota_client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
     def test_download_package_manifest_unavailable(self, _manifest):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
@@ -3324,7 +3579,7 @@ class TestDownload(unittest.TestCase):
             )
         self.assertIsNone(result)
 
-    @patch("commands.ota_client._fetch_archive_by_tag", return_value=None)
+    @patch("raisin_ota.client._fetch_archive_by_tag", return_value=None)
     def test_download_package_returns_none_when_tag_unresolvable(self, _by_tag):
         # Per-package install returns None when the tag can't be resolved
         # (and tag is 'stable' so no further fallback). install.py's
@@ -3340,10 +3595,10 @@ class TestDownload(unittest.TestCase):
     # Without this the test reaches the real OTA endpoint; the assertion is
     # about tag resolution, not about downloading anything.
     @patch(
-        "commands.ota_client._download_package_blob",
+        "raisin_ota.client._download_package_blob",
         return_value=(False, "network"),
     )
-    @patch("commands.ota_client._fetch_archive_by_tag")
+    @patch("raisin_ota.client._fetch_archive_by_tag")
     def test_download_package_falls_back_to_stable_when_requested_tag_missing(
         self, mock_fetch_by_tag, _mock_blob
     ):
@@ -3378,17 +3633,19 @@ class TestDownload(unittest.TestCase):
 
     def _robot_download(self, headers, target):
         """Run a robot-authenticated download of b'abc' with the given headers."""
-        with _robot_identity(), patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
-        ), patch(
-            "commands.ota_client.requests.get",
-            return_value=_mock_response(iter_content=[b"abc"], headers=headers),
-        ), patch(
-            "commands.ota_client.time.sleep"
-        ), patch(
-            "builtins.print"
-        ) as mock_print:
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.get",
+                return_value=_mock_response(iter_content=[b"abc"], headers=headers),
+            ),
+            patch("raisin_ota.client.time.sleep"),
+            patch("builtins.print") as mock_print,
+        ):
             ok, _code = ota._download_package_blob(
                 "arch-1",
                 "pkg-1",
@@ -3573,16 +3830,25 @@ class TestDownload(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _desired_state(self, payload, platform="ubuntu-24.04-arm64"):
-        with _robot_identity(), patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
-        ), patch(
-            "commands.ota_client.requests.get",
-            return_value=_mock_response(json_data={"success": True, "data": payload}),
-        ), patch(
-            "builtins.print"
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.get",
+                return_value=_mock_response(
+                    json_data={"success": True, "data": payload}
+                ),
+            ),
+            patch("builtins.print") as printed,
         ):
-            return ota._resolve_desired_state(platform)
+            result = ota._resolve_desired_state(platform)
+            # Kept so a test can assert on what the operator was told; the
+            # patch is inside this helper, so an outer one would be shadowed.
+            self.printed = " ".join(str(c) for c in printed.call_args_list)
+            return result
 
     def test_desired_state_supplies_the_package_manifest(self):
         """#37: the target carries the package list, so no JWT is needed."""
@@ -3631,10 +3897,10 @@ class TestDownload(unittest.TestCase):
 
         self.assertIsNone(manifest)
 
-    @patch("commands.ota_client._extract_and_read_deps")
-    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
-    @patch("commands.ota_client._fetch_archive_manifest")
-    @patch("commands.ota_client._resolve_desired_state")
+    @patch("raisin_ota.client._extract_and_read_deps")
+    @patch("raisin_ota.client._download_package_blob", return_value=(True, None))
+    @patch("raisin_ota.client._fetch_archive_manifest")
+    @patch("raisin_ota.client._resolve_desired_state")
     def test_install_uses_the_desired_state_manifest_without_jwt(
         self, mock_desired, mock_fetch, _mock_blob, mock_extract
     ):
@@ -3687,6 +3953,25 @@ class TestDownload(unittest.TestCase):
 
         self.assertEqual((halted, name, version), (False, "raisin-robot", "2026.1.0"))
 
+    def test_an_unconfigured_node_is_explained(self):
+        """The server has a word for this state; silence is not it."""
+        self._desired_state({"halt": False, "reason": "unconfigured"})
+
+        self.assertNotEqual(
+            self.printed.strip(), "", "an explained state was reported as silence"
+        )
+
+    def test_a_reason_this_client_does_not_know_still_says_something(self):
+        """The server has nine reasons and this client knew two of them.
+
+        A new one arriving is normal — the server moves faster than the fleet —
+        so the failure mode has to be "names a reason I do not recognise",
+        never "says nothing at all".
+        """
+        self._desired_state({"halt": False, "reason": "some_future_reason"})
+
+        self.assertIn("some_future_reason", self.printed)
+
     def test_resolve_desired_state_honours_halt(self):
         halted, name, version, _manifest = self._desired_state(
             {"halt": True, "haltSources": ["tenant"], "reason": "node_pin"}
@@ -3711,15 +3996,20 @@ class TestDownload(unittest.TestCase):
         self.assertIsNone(name)
 
     def _desired_state_output(self, payload, platform="ubuntu-24.04-arm64"):
-        with _robot_identity(), patch(
-            "commands.ota_client.get_ota_endpoint",
-            return_value="https://ota.example.com",
-        ), patch(
-            "commands.ota_client.requests.get",
-            return_value=_mock_response(json_data={"success": True, "data": payload}),
-        ), patch(
-            "builtins.print"
-        ) as mock_print:
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.get",
+                return_value=_mock_response(
+                    json_data={"success": True, "data": payload}
+                ),
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             ota._resolve_desired_state(platform)
         return " ".join(str(c) for c in mock_print.call_args_list)
 
@@ -3757,8 +4047,8 @@ class TestDownload(unittest.TestCase):
                 (False, None, None, None),
             )
 
-    @patch("commands.ota_client._fetch_archive_with_stable_fallback")
-    @patch("commands.ota_client._resolve_desired_state")
+    @patch("raisin_ota.client._fetch_archive_with_stable_fallback")
+    @patch("raisin_ota.client._resolve_desired_state")
     def test_download_all_from_archive_aborts_when_halted(
         self, mock_desired, mock_fetch
     ):
@@ -3770,8 +4060,8 @@ class TestDownload(unittest.TestCase):
 
         mock_fetch.assert_not_called()
 
-    @patch("commands.ota_client._fetch_archive_manifest", return_value=None)
-    @patch("commands.ota_client._resolve_desired_state")
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
     def test_caller_pinned_archive_outranks_desired_state(
         self, mock_desired, mock_fetch
     ):
@@ -3865,13 +4155,11 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
             "raisin-robot-debug",
         )
 
-    @patch("commands.ota_client._download_blob_by_hash", return_value=True)
-    @patch("commands.ota_client._fetch_package_id_by_name", return_value="pkg-uuid")
-    @patch("commands.ota_client.authenticate", return_value="tok")
-    @patch(
-        "commands.ota_client.get_ota_endpoint", return_value="https://ota.example.com"
-    )
-    @patch("commands.ota_client.requests.get")
+    @patch("raisin_ota.client._download_blob_by_hash", return_value=True)
+    @patch("raisin_ota.client._fetch_package_id_by_name", return_value="pkg-uuid")
+    @patch("raisin_ota.client.authenticate", return_value="tok")
+    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
+    @patch("raisin_ota.client.requests.get")
     def test_download_package_at_timestamp(
         self, mock_get, _ep, _auth, mock_pkg_id, mock_blob_dl
     ):
@@ -3925,10 +4213,10 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         self.assertEqual(metadata["blobHash"], "abc123" * 10 + "abcd")
         self.assertIn("installedAt", metadata)
 
-    @patch("commands.ota_client.report_software_snapshot", return_value=True)
-    @patch("commands.ota_client.get_install_session_id", return_value="session-1")
-    @patch("commands.ota_client._download_package_blob", return_value=(True, None))
-    @patch("commands.ota_client._fetch_archive_manifest")
+    @patch("raisin_ota.client.report_software_snapshot", return_value=True)
+    @patch("raisin_ota.client.get_install_session_id", return_value="session-1")
+    @patch("raisin_ota.client._download_package_blob", return_value=(True, None))
+    @patch("raisin_ota.client._fetch_archive_manifest")
     def test_download_all_from_archive(
         self, mock_manifest, mock_blob, _session_id, mock_report_snapshot
     ):
@@ -4017,7 +4305,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         )
 
     @patch(
-        "commands.ota_client._fetch_archive_manifest",
+        "raisin_ota.client._fetch_archive_manifest",
         return_value=([], "arch-1", "v2024.01"),
     )
     def test_download_package_uses_archive_name_override(self, mock_manifest):
@@ -4043,7 +4331,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         )
 
     @patch(
-        "commands.ota_client._fetch_archive_manifest",
+        "raisin_ota.client._fetch_archive_manifest",
         return_value=([], "arch-1", "v2024.01"),
     )
     def test_download_all_from_archive_uses_archive_name_override(self, mock_manifest):
@@ -4067,7 +4355,7 @@ class TestArchiveNameAndTimestamp(unittest.TestCase):
         )
 
     @patch(
-        "commands.ota_client._fetch_archive_manifest",
+        "raisin_ota.client._fetch_archive_manifest",
         return_value=([], "arch-1", "v2024.01"),
     )
     def test_download_all_from_archive_preserves_explicit_debug_archive_name(
@@ -4106,16 +4394,12 @@ class TestInstallCliEventReporting(unittest.TestCase):
 
         from commands import install as install_mod
 
-        with patch.object(
-            install_mod, "install_command", return_value=overall_success
-        ), patch.object(
-            install_mod, "report_install_outcome"
-        ) as mock_outcome, patch.object(
-            install_mod, "flush_install_events"
-        ) as mock_flush, patch.object(
-            install_mod, "flush_pending_snapshot_reports"
-        ), patch.object(
-            install_mod, "clear_install_session"
+        with (
+            patch.object(install_mod, "install_command", return_value=overall_success),
+            patch.object(install_mod, "report_install_outcome") as mock_outcome,
+            patch.object(install_mod, "flush_install_events") as mock_flush,
+            patch.object(install_mod, "flush_pending_snapshot_reports"),
+            patch.object(install_mod, "clear_install_session"),
         ):
             try:
                 # It is a click Command; call the underlying function.
@@ -4212,9 +4496,7 @@ class TestInstallIntegration(unittest.TestCase):
             [],
         )
 
-        with patch(
-            "commands.ota_client.download_package", return_value=None
-        ) as mock_dl:
+        with patch("raisin_ota.client.download_package", return_value=None) as mock_dl:
             with patch("commands.install.requests.Session") as MockSession:
                 session = MagicMock()
                 MockSession.return_value = session
@@ -4239,9 +4521,7 @@ class TestInstallIntegration(unittest.TestCase):
             [],
         )
 
-        with patch(
-            "commands.ota_client.download_package", return_value=None
-        ) as mock_dl:
+        with patch("raisin_ota.client.download_package", return_value=None) as mock_dl:
             with patch("commands.install.requests.Session") as MockSession:
                 session = MagicMock()
                 MockSession.return_value = session

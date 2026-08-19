@@ -380,7 +380,8 @@ def init_environment(script_file_path, yes_flag):
 
     # The OTA core does not read these globals, nor does it resolve a
     # credential; hand it both.
-    from commands import ota_client, robot_credentials
+    from raisin_ota import client as ota_client
+    from commands import robot_credentials
 
     ota_client.configure(
         ota_client.OtaContext(
