@@ -1047,6 +1047,92 @@ class TestMalformedReleaseYaml(unittest.TestCase):
         self.assertEqual(result["dependencies"], ["depA"])
 
 
+class TestRobotCallsSayWhyTheyFailed(unittest.TestCase):
+    """An agent has to act differently for each failure; the CLI never did.
+
+    `fetch_robot_desired_state` answered `None` for a 404, a 429, a 401, a 5xx
+    and being offline alike. For a CLI that is right — all of them mean "no
+    opinion, carry on". A resident process must back off for one, stop and
+    become visible for another, and keep polling normally for a third, and it
+    cannot when they arrive as the same value.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        _as_robot(self)
+
+    def tearDown(self):
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _fetch(self, **kwargs):
+        with (
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.get", **kwargs),
+        ):
+            return ota.fetch_robot_desired_state()
+
+    def test_a_document_comes_back_as_one(self):
+        result = self._fetch(
+            return_value=_mock_response(json_data={"data": {"halt": False}})
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value, {"halt": False})
+
+    def test_being_throttled_is_distinguishable(self):
+        throttled = _mock_response(status_code=429, headers={"Retry-After": "45"})
+        throttled.raise_for_status.side_effect = requests.HTTPError(response=throttled)
+
+        result = self._fetch(return_value=throttled)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.throttled)
+        self.assertEqual(result.retry_after, 45.0)
+        self.assertFalse(result.unauthorized)
+
+    def test_a_refused_credential_is_distinguishable(self):
+        """A revoked key answers this way, and retrying it is useless and loud."""
+        refused = _mock_response(status_code=401)
+        refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
+
+        result = self._fetch(return_value=refused)
+
+        self.assertTrue(result.unauthorized)
+        self.assertFalse(result.throttled)
+
+    def test_an_absent_opinion_is_not_a_failure_to_report(self):
+        """404 means the node is unknown or the server is old. Keep polling."""
+        result = self._fetch(return_value=_mock_response(status_code=404))
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.unauthorized)
+        self.assertFalse(result.throttled)
+        self.assertFalse(result.unreachable)
+
+    def test_being_offline_is_distinguishable(self):
+        result = self._fetch(side_effect=requests.ConnectionError("no route"))
+
+        self.assertTrue(result.unreachable)
+        self.assertFalse(result.unauthorized)
+
+    def test_a_missing_retry_after_is_not_invented(self):
+        """Backing off by a guessed number is the agent's decision, not this one's."""
+        throttled = _mock_response(status_code=429, headers={})
+        throttled.raise_for_status.side_effect = requests.HTTPError(response=throttled)
+
+        result = self._fetch(return_value=throttled)
+
+        self.assertTrue(result.throttled)
+        self.assertIsNone(result.retry_after)
+
+
 class TestHaltStopsTheInstall(unittest.TestCase):
     """A halt tells this node to stop. It is not "no archive available".
 
