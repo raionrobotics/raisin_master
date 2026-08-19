@@ -1435,16 +1435,60 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
     }
 
 
-def fetch_robot_desired_state() -> Optional[dict]:
+@dataclass(frozen=True)
+class RobotCallResult:
+    """What a robot-facing call produced, and why it did not.
+
+    A CLI only ever needed "did I get a document" — every failure meant "no
+    opinion, carry on". A resident agent has to act differently for each: back
+    off when throttled, stop and become visible when its credential is refused,
+    keep polling normally when the server simply has no opinion, and buffer
+    when it cannot be reached. Collapsing those into `None` makes that
+    impossible, so the reason travels with the result.
+
+    The mechanism reports; deciding what to do is the caller's.
+    """
+
+    value: Optional[dict] = None
+    status: Optional[int] = None
+    throttled: bool = False
+    retry_after: Optional[float] = None
+    unauthorized: bool = False
+    unreachable: bool = False
+    detail: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.value is not None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _retry_after_seconds(response) -> Optional[float]:
+    """`Retry-After` as seconds, or None.
+
+    Not defaulted: how long to wait when the server does not say is a policy
+    decision, and inventing a number here would hide that it was never given.
+    """
+    raw = getattr(response, "headers", {}) or {}
+    value = raw.get("Retry-After")
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_robot_desired_state() -> RobotCallResult:
     """Ask the OTA server what this robot node is supposed to be running.
 
-    Returns the resolved desired-state document, or None when robot auth is
-    not configured or the server cannot answer. Never raises: desired state is
-    an optional refinement of the caller's own archive selection.
+    Never raises — desired state is an optional refinement of the caller's own
+    archive selection — but the reason for an empty answer is carried on the
+    result rather than discarded.
     """
     headers = _robot_auth_headers()
     if not headers:
-        return None
+        return RobotCallResult(detail="no robot credential configured")
 
     base = get_ota_endpoint().rstrip("/")
     try:
@@ -1453,14 +1497,32 @@ def fetch_robot_desired_state() -> Optional[dict]:
         )
         if resp.status_code == 404:
             # Either the node is not registered or the server predates the
-            # endpoint. Both mean "no opinion", not "install nothing".
-            return None
+            # endpoint. Both mean "no opinion", not "install nothing" — and
+            # neither is a reason to stop asking.
+            return RobotCallResult(status=404, detail="no desired state for this node")
+        if resp.status_code == 429:
+            return RobotCallResult(
+                status=429,
+                throttled=True,
+                retry_after=_retry_after_seconds(resp),
+                detail="throttled by the OTA server",
+            )
+        if resp.status_code in (401, 403):
+            return RobotCallResult(
+                status=resp.status_code,
+                unauthorized=True,
+                detail="the OTA server refused this robot credential",
+            )
         resp.raise_for_status()
         state = _unwrap_response(resp.json())
-        return state if isinstance(state, dict) else None
+        return RobotCallResult(
+            value=state if isinstance(state, dict) else None, status=resp.status_code
+        )
+    except (requests.ConnectionError, requests.Timeout) as e:
+        return RobotCallResult(unreachable=True, detail=str(e))
     except (requests.RequestException, ValueError) as e:
         print(f"⚠️ Failed to fetch OTA desired state: {e}")
-        return None
+        return RobotCallResult(detail=str(e))
 
 
 def _resolve_desired_state(platform_str: str) -> tuple:
@@ -1477,7 +1539,13 @@ def _resolve_desired_state(platform_str: str) -> tuple:
     robot credential. A server that does not send it yields None here, and the
     caller falls back to the JWT route.
     """
-    state = fetch_robot_desired_state()
+    result = fetch_robot_desired_state()
+    if result.unauthorized:
+        # Worth saying plainly: a revoked or mistyped credential otherwise
+        # reads as "the server has no opinion", and the legacy-route warnings
+        # that follow point at the wrong thing.
+        print(f"⚠️ {result.detail}.")
+    state = result.value
     if not state:
         return (False, None, None, None)
 
