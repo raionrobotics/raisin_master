@@ -486,6 +486,19 @@ def build_string_size_expr(string_type, value_expr):
     return f"{value_expr}.size()"
 
 
+def normalize_cpp_literal(data_type, value):
+    if data_type == "bool" and value.lower() in {"true", "false"}:
+        return value.lower()
+    return value
+
+
+def normalize_cpp_constant(data_type, definition):
+    if data_type != "bool":
+        return definition
+    name, value = definition.split("=", 1)
+    return f"{name.rstrip()}={normalize_cpp_literal(data_type, value.strip())}"
+
+
 def build_sequence_size_entry(is_vector, base_type, data_name, line_suffix):
     if base_type in STRING_TYPES:
         string_size_expr = build_string_size_expr(base_type, "v")
@@ -557,6 +570,7 @@ def process_service_content(content, project_name):
 
             members.append(f"using _{data_name}_type = {transformed_type};")
             if len(parts) == 3:
+                initial_value = normalize_cpp_literal(data_type, initial_value)
                 members.append(f"{transformed_type} {data_name} = {initial_value};")
             else:
                 members.append(f"{transformed_type} {data_name};")
@@ -587,7 +601,8 @@ def process_service_content(content, project_name):
 
         elif "=" in line:
             parts = line.split(" ", 1)
-            members.append(f"static constexpr {TYPE_MAPPING[parts[0]]} {parts[1]};")
+            definition = normalize_cpp_constant(parts[0], parts[1])
+            members.append(f"static constexpr {TYPE_MAPPING[parts[0]]} {definition};")
 
     return includes, members, buffer_members, buffer_size
 
@@ -1263,6 +1278,7 @@ def create_message_file(msg_file, project_directory, install_dir):
 
             members.append(f"using _{data_name}_type = {transformed_type};")
             if len(parts) == 3:
+                initial_value = normalize_cpp_literal(data_type, initial_value)
                 members.append(f"{transformed_type} {data_name} = {initial_value};")
             else:
                 members.append(f"{transformed_type} {data_name};")
@@ -1292,7 +1308,8 @@ def create_message_file(msg_file, project_directory, install_dir):
 
         elif "=" in line:
             parts = line.split(" ", 1)
-            members.append(f"static constexpr {TYPE_MAPPING[parts[0]]} {parts[1]};")
+            definition = normalize_cpp_constant(parts[0], parts[1])
+            members.append(f"static constexpr {TYPE_MAPPING[parts[0]]} {definition};")
 
     # Insert includes and members into the template
     message_content = message_content.replace("@@INCLUDE_PATH@@", "\n".join(includes))
