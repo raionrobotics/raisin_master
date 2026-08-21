@@ -2,9 +2,12 @@
 cppcheck static-analysis command for RAISIN.
 """
 
+import json
 import os
+import shlex
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
 
@@ -15,11 +18,12 @@ from commands.build_dir import resolve_build_dir
 from commands.utils import get_build_jobs
 
 # Checks to enable in cppcheck
-_ENABLE = "warning,performance,portability" # style is disabled now
+_ENABLE = "warning,performance,portability"
 
 # subtrees to skip (always)
 _IGNORE_SUBTREES = [
     "generated",
+    "src/raisin_plugin/raisin_fast_lio_plugin",
 ]
 
 # Any directory whose name contains one of these substrings (case-insensitive)
@@ -48,18 +52,30 @@ def _discover_ignore_subtrees(root: Path) -> list:
     """Find directories under root whose name marks a third-party subtree."""
     found = []
     for dirpath, dirnames, _ in os.walk(root):
-        # Prune noisy directories in place so os.walk does not descend.
         dirnames[:] = [d for d in dirnames if d not in _SCAN_PRUNE_DIRS]
         for name in list(dirnames):
             low = name.lower()
             if any(token in low for token in _IGNORE_DIR_TOKENS):
                 rel = os.path.relpath(os.path.join(dirpath, name), root)
                 found.append(rel)
-                # Do not descend into a subtree we are already skipping.
                 dirnames.remove(name)
     return found
 
-# External/system locations to skip
+# Headers that define macros used without a trailing semicolon (they expand to
+# a {...} block). cppcheck does not follow -isystem when resolving quoted
+# includes, so without these definitions it reports the first call site as
+# unknownMacro (severity: error) and stops analyzing the rest of the file.
+# Each entry is probed against the compile database's include directories and
+# force-included via --include= when found.
+_FORCE_INCLUDE_PROBES = [
+    "raisim/raisim_message.hpp",  # RSFATAL_IF, RSINFO, ... logging macros
+]
+
+# Finding ids that mean cppcheck failed to parse a file: everything after the
+# failure point is unchecked, so the report is silently incomplete. These fail
+# the command (see the gate in run_cppcheck).
+_PARSE_FAILURE_IDS = ("unknownMacro", "syntaxError")
+
 _SUPPRESS_PATH_GLOBS = [
     "*/usr/*",       # system headers (pcl, eigen, gstreamer, libstdc++, ...)
     "*/.cache/*",    # vcpkg-installed dependencies
@@ -104,6 +120,85 @@ def _resolve_compile_db(build_dir: Path) -> Path:
             "Build the project first, e.g.: raisin build -t <build type>"
         )
     return compile_db
+
+
+def _find_force_includes(compile_db: Path) -> list:
+    """Resolve _FORCE_INCLUDE_PROBES to header paths via the compile database.
+
+    Walks every -I/-isystem directory the build actually uses (relative ones
+    are resolved against each entry's working directory), so the result tracks
+    the build instead of a hardcoded path and cross-builds keep working.
+    """
+    try:
+        entries = json.loads(compile_db.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        click.echo(
+            f"⚠️  Could not read {compile_db} for include probing ({e}); "
+            "skipping forced includes.",
+            err=True,
+        )
+        return []
+
+    include_dirs = []
+    seen = set()
+    for entry in entries:
+        args = entry.get("arguments")
+        if not args:
+            args = shlex.split(entry.get("command", ""))
+        base = Path(entry.get("directory", "."))
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            path = None
+            if arg in ("-I", "-isystem") and i + 1 < len(args):
+                path = args[i + 1]
+                i += 1
+            elif arg.startswith("-I"):
+                path = arg[2:]
+            elif arg.startswith("-isystem"):
+                path = arg[len("-isystem"):]
+            i += 1
+            if not path:
+                continue
+            full = Path(path)
+            if not full.is_absolute():
+                full = base / full
+            if full not in seen:
+                seen.add(full)
+                include_dirs.append(full)
+
+    found = []
+    for probe in _FORCE_INCLUDE_PROBES:
+        for inc_dir in include_dirs:
+            header = inc_dir / probe
+            if header.is_file():
+                found.append(header)
+                break
+        else:
+            click.echo(
+                f"⚠️  {probe} not found under any include directory of the "
+                "compile database; macros it defines will stay unknown.",
+                err=True,
+            )
+    return found
+
+
+def _parse_failures(xml_text: str) -> list:
+    """Collect (id, file:line) pairs for findings that mean parsing failed."""
+    try:
+        results = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    failures = []
+    for err in results.iter("error"):
+        if err.get("id") not in _PARSE_FAILURE_IDS:
+            continue
+        loc = err.find("location")
+        where = (
+            f"{loc.get('file')}:{loc.get('line')}" if loc is not None else "<unknown>"
+        )
+        failures.append((err.get("id"), where))
+    return failures
 
 
 def _generate_html(xml_path: Path, report_dir: Path, source_dir: Path):
@@ -219,9 +314,6 @@ def run_cppcheck(
     cache_dir = build_dir / "cppcheck-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    suppressions = root / "cppcheck-suppressions.txt"
-
-    # XML and HTML reports all live under one directory.
     report_path = Path(report_dir)
     if not report_path.is_absolute():
         report_path = root / report_path
@@ -240,8 +332,8 @@ def run_cppcheck(
         "--xml",
         "--quiet",
     ]
-    if suppressions.is_file():
-        cmd.append(f"--suppressions-list={suppressions}")
+    for header in _find_force_includes(compile_db):
+        cmd.append(f"--include={header}")
     ignore_subtrees = _IGNORE_SUBTREES + _discover_ignore_subtrees(root)
     for rel in ignore_subtrees:
         rel = rel.replace(os.sep, "/")
@@ -269,13 +361,25 @@ def run_cppcheck(
         if md is not None:
             click.echo(f"📝 Markdown summary: {md}")
 
+    # Parse-failure gate: an unknownMacro/syntaxError aborts analysis of the
+    # rest of its file, so the report above silently under-counts. Fail loudly
+    # instead of letting a truncated report pass as clean.
+    failures = _parse_failures(diagnostics)
+    if failures:
+        listing = "\n".join(f"  [{fid}] {where}" for fid, where in failures)
+        raise click.ClickException(
+            "cppcheck could not fully parse the following, so their analysis "
+            f"is incomplete:\n{listing}\n"
+            "Fix: add the macro-defining header to _FORCE_INCLUDE_PROBES in "
+            "commands/cppcheck.py."
+        )
+
     if strict and result.returncode != 0:
         raise click.ClickException("cppcheck reported findings (strict mode).")
 
     if result.returncode == 0:
         click.echo("✅ cppcheck finished.")
     else:
-        # Report-only: surface the non-zero code but do not fail the command.
         click.echo(
             f"⚠️  cppcheck exited with code {result.returncode} (report-only).",
             err=True,
