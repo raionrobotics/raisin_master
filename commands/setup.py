@@ -1543,19 +1543,11 @@ def build_pure_cmake_projects(
     cache = {} if force_rebuild else _load_build_cache()
     built = set()
 
-    # Determine which configuration to build.
-    #
-    # install_prefix has no build-type component, so every configuration installs
-    # into the same directory. Building both in one run means the second one
-    # overwrites the first, and which one survives depends on install order and on
-    # the _has_project_cmake_config() cache check, which cannot tell the two apart
-    # either. Build exactly one configuration.
-    #
-    # Release is the default. Set RAISIN_PURE_CMAKE_TYPE=debug to build the pure
-    # CMake dependencies with debug info instead. Plugins built in either
-    # configuration link against whichever one is installed: the vendored projects
-    # keep build-type independent library names (e.g. GTSAM_BUILD_TYPE_POSTFIXES
-    # is forced OFF).
+    # Exactly one configuration: install_prefix has no build-type component, so building
+    # both in one run has the second overwrite the first. Release by default;
+    # RAISIN_PURE_CMAKE_TYPE=debug builds the pure CMake dependencies with debug info.
+    # Plugins link against whichever is installed -- the vendored projects keep
+    # build-type independent library names (GTSAM_BUILD_TYPE_POSTFIXES is forced OFF).
     known_configs = {"debug": ("debug", "Debug"), "release": ("release", "Release")}
     requested = (
         build_type or os.environ.get("RAISIN_PURE_CMAKE_TYPE") or "release"
