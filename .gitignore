@@ -80,3 +80,6 @@ vcpkg_installed/*
 
 # Worktrees
 .worktrees/
+
+# raisin test intermediates (gcov scratch files)
+/tmp/

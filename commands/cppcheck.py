@@ -185,10 +185,15 @@ def _find_force_includes(compile_db: Path) -> list:
 
 def _parse_failures(xml_text: str) -> list:
     """Collect (id, file:line) pairs for findings that mean parsing failed."""
+    # Fail closed: a malformed report is itself a sign of an incomplete run
+    # (crashed worker, truncated stderr), so it must not pass the gate.
     try:
         results = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
+    except ET.ParseError as e:
+        raise click.ClickException(
+            f"cppcheck XML report is malformed ({e}); cannot verify the "
+            "analysis is complete. The raw output is in report.xml."
+        ) from e
     failures = []
     for err in results.iter("error"):
         if err.get("id") not in _PARSE_FAILURE_IDS:

@@ -105,12 +105,15 @@ COVERAGE_EXCLUDE_PATTERNS = [
 def _run_gcovr_html(build_dir: Path, root: Path, filter_pattern: str, index: Path) -> str:
     """Run gcovr to write an --html-details report; return its stdout summary."""
     index.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = root / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         "gcovr",
         "--root",
         str(root),
+        f"--gcov-object-directory={tmp_dir}",
         "--filter",
-        filter_pattern,
+        re.escape(str(root) + os.sep) + filter_pattern,
         # Tolerate gcov's negative-branch-count bug (GCC #68080); warn instead
         # of aborting so the report is still produced.
         "--gcov-ignore-parse-errors=negative_hits.warn_once_per_file",
@@ -123,11 +126,16 @@ def _run_gcovr_html(build_dir: Path, root: Path, filter_pattern: str, index: Pat
     for pattern in COVERAGE_EXCLUDE_PATTERNS:
         cmd.extend(["--exclude", pattern])
     try:
-        proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        proc = subprocess.run(
+            cmd, check=True, capture_output=True, text=True, cwd=tmp_dir
+        )
     except subprocess.CalledProcessError as e:
         raise click.ClickException(
             f"gcovr failed with exit code {e.returncode}\n{e.stderr or ''}"
         ) from e
+    finally:
+        for stray in root.glob("*.gcov"):
+            stray.replace(tmp_dir / stray.name)
     return proc.stdout or ""
 
 
@@ -415,7 +423,11 @@ def run_unittests(
         from commands.cppcheck import run_cppcheck
         from commands.utils import get_build_jobs
         click.echo("🔎 Running cppcheck static analysis...")
-        run_cppcheck(build_type, jobs=get_build_jobs(), strict=False, report_dir=cppcheck_output)
+        # Report-only here: a cppcheck failure must not block the test run.
+        try:
+            run_cppcheck(build_type, jobs=get_build_jobs(), strict=False, report_dir=cppcheck_output)
+        except click.ClickException as e:
+            click.echo(f"⚠️  cppcheck failed: {e.message}", err=True)
 
     executables = _discover_tests(build_dir, suffixes)
 
