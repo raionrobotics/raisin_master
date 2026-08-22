@@ -1532,7 +1532,11 @@ def build_pure_cmake_projects(
     raisin_march: Optional[str] = None,
 ):
     """
-    Build pure CMake projects in both debug and release dirs and install them to install_dir.
+    Build pure CMake projects in one configuration and install them to install_dir.
+
+    The configuration is build_type when given, otherwise RAISIN_PURE_CMAKE_TYPE,
+    otherwise release. Only one is built because install_dir is shared across
+    configurations.
 
     Uses a hash-based cache to skip rebuilding unchanged projects.
     Pass force_rebuild=True to bypass the cache and rebuild everything.
@@ -1556,11 +1560,21 @@ def build_pure_cmake_projects(
     cache = {} if force_rebuild else _load_build_cache()
     built = set()
 
-    # Determine which configurations to build
-    all_configs = [("debug", "Debug"), ("release", "Release")]
-    if build_type:
-        normalized = build_type.lower()
-        all_configs = [(t, c) for t, c in all_configs if t == normalized]
+    # Exactly one configuration: install_prefix has no build-type component, so building
+    # both in one run has the second overwrite the first. Release by default;
+    # RAISIN_PURE_CMAKE_TYPE=debug builds the pure CMake dependencies with debug info.
+    # Plugins link against whichever is installed -- the vendored projects keep
+    # build-type independent library names (GTSAM_BUILD_TYPE_POSTFIXES is forced OFF).
+    known_configs = {"debug": ("debug", "Debug"), "release": ("release", "Release")}
+    requested = (
+        build_type or os.environ.get("RAISIN_PURE_CMAKE_TYPE") or "release"
+    ).lower()
+    if requested not in known_configs:
+        raise SystemExit(
+            f"\u274c Unknown pure_cmake build type '{requested}'. "
+            "Use 'debug' or 'release'."
+        )
+    all_configs = [known_configs[requested]]
 
     print(f"🏗️  Building {len(projects)} pure CMake project(s) into: {install_prefix}")
 
