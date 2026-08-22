@@ -6,6 +6,7 @@ Generates message/service headers and configures CMakeLists.txt.
 
 import os
 import re
+import fnmatch
 import sys
 import glob
 import json
