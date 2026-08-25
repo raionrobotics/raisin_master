@@ -528,10 +528,48 @@ def _install_event_marker_seen(session_id: str, marker: str) -> bool:
     return bool(_read_install_event_state().get(session_id, {}).get(marker))
 
 
+_SEEN_AT = "seenAt"
+
+
+def _prune_retired_sessions(state: dict, keep: str, now: float) -> dict:
+    """Drop guards for sessions that can no longer be resumed.
+
+    `clear_install_session` removes the session it retires, but a session that
+    dies by TTL instead — a crash mid-install, then more than a day before the
+    next run — is retired by nothing. Its guards stayed for the life of the
+    machine, in a file read on every event.
+
+    Pruned on write, not on read: the guard is read far more often than it is
+    written, and pruning on read would have a read that changes nothing rewrite
+    the file.
+
+    An entry from before this existed carries no time. It is stamped rather than
+    dropped: dropping it could re-emit `started` for a session still inside its
+    TTL, which is the duplicate this guard exists to prevent. It ages out on the
+    same clock as everything else, one TTL later.
+    """
+    pruned = {}
+    for session, markers in state.items():
+        if not isinstance(markers, dict):
+            continue
+        seen_at = markers.get(_SEEN_AT)
+        if not isinstance(seen_at, (int, float)):
+            markers = {**markers, _SEEN_AT: now}
+        elif session != keep and now - seen_at > _INSTALL_SESSION_TTL_SECONDS:
+            continue
+        pruned[session] = markers
+    return pruned
+
+
 def _mark_install_event(session_id: str, marker: str) -> None:
     """Persist the marker so a restarted process does not re-emit the event."""
-    state = _read_install_event_state()
-    state.setdefault(session_id, {})[marker] = True
+    # One reading of the clock, shared by the prune and the stamp, so an entry
+    # cannot be stamped later than the sweep that decided to keep it.
+    now = time.time()
+    state = _prune_retired_sessions(_read_install_event_state(), session_id, now)
+    entry = state.setdefault(session_id, {})
+    entry[marker] = True
+    entry.setdefault(_SEEN_AT, now)
     path = _install_event_state_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

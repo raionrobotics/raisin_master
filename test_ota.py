@@ -15,6 +15,7 @@ import base64
 import contextlib
 import errno
 import hashlib
+import itertools
 import json
 import os
 import shutil
@@ -1756,7 +1757,14 @@ class TestInstallEventQueue(unittest.TestCase):
 
     def test_delayed_flush_preserves_occurred_at_ordering(self):
         with (
-            patch("raisin_ota.client.time.time", side_effect=[100.5, 300.25]),
+            # A clock that keeps running, not two readings. The subject here is
+            # that the stamps come out ordered and distinct; budgeting an exact
+            # number of `time.time()` calls made it break the first time
+            # anything else in the path read the clock.
+            patch(
+                "raisin_ota.client.time.time",
+                side_effect=itertools.count(100.5, 199.75),
+            ),
             patch("raisin_ota.client.time.gmtime", side_effect=time.gmtime),
         ):
             ota.record_install_event("started")
@@ -5248,6 +5256,101 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
         _unusable, printed = self.resolve(403)
 
         self.assertIn("403", printed)
+
+
+class TestTheEventGuardFileDoesNotGrowForever(unittest.TestCase):
+    """One entry per install session, and only the current one was ever removed.
+
+    `clear_install_session` pops the session it is retiring. A session that dies
+    by TTL instead — a crash mid-install, then more than a day before the next
+    run — is never retired by anything, so its guards stay in the file for the
+    life of the machine. On a robot that polls every minute and installs often,
+    the file that decides whether a `started` event has already been sent grows
+    without bound and is read on every event.
+
+    Entries carry the time they were first written now, and one past the same
+    TTL a session gets is dropped when the file is next written. Written rather
+    than read: pruning on read would make a read that touches nothing rewrite
+    the file, and the guard is read far more often than it is written.
+
+    An entry from before this change has no timestamp. It is stamped rather than
+    dropped — dropping it could re-emit `started` for a session still inside its
+    TTL, which is the exact duplicate this guard exists to prevent.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        self._robot = _robot_identity()
+        self._robot.__enter__()
+        self.addCleanup(self._robot.__exit__, None, None, None)
+
+    def state(self):
+        return ota._read_install_event_state()
+
+    def write_state(self, raw):
+        path = ota._install_event_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+    def test_a_session_older_than_the_ttl_is_dropped(self):
+        stale = time.time() - ota._INSTALL_SESSION_TTL_SECONDS - 1
+        self.write_state({"old-session": {"started": True, "seenAt": stale}})
+
+        ota._mark_install_event("new-session", "started")
+
+        self.assertNotIn("old-session", self.state())
+
+    def test_a_recent_session_survives(self):
+        """Otherwise a resumed install re-reports `started`."""
+        recent = time.time() - 60
+        self.write_state({"other-session": {"started": True, "seenAt": recent}})
+
+        ota._mark_install_event("new-session", "started")
+
+        self.assertIn("other-session", self.state())
+
+    def test_an_entry_written_before_this_change_is_stamped_not_dropped(self):
+        self.write_state({"legacy-session": {"started": True}})
+
+        ota._mark_install_event("new-session", "started")
+
+        self.assertIn("legacy-session", self.state())
+        self.assertIn("seenAt", self.state()["legacy-session"])
+
+    def test_a_stamped_legacy_entry_ages_out_like_any_other(self):
+        self.write_state({"legacy-session": {"started": True}})
+        ota._mark_install_event("new-session", "started")
+
+        with patch(
+            "raisin_ota.client.time.time",
+            return_value=time.time() + ota._INSTALL_SESSION_TTL_SECONDS + 1,
+        ):
+            ota._mark_install_event("newer-session", "started")
+
+        self.assertNotIn("legacy-session", self.state())
+
+    def test_the_session_being_written_is_never_pruned_out_from_under_itself(self):
+        """A long install, or a process that has been up longer than the TTL.
+
+        Rare, and the consequence is the one thing this guard exists to stop: an
+        install still in progress loses its `started` marker and reports a
+        second one. The exemption is cheap; the duplicate is not.
+        """
+        stale = time.time() - ota._INSTALL_SESSION_TTL_SECONDS - 1
+        self.write_state({"long-running": {"started": True, "seenAt": stale}})
+
+        ota._mark_install_event("long-running", "terminal")
+
+        self.assertTrue(ota._install_event_marker_seen("long-running", "started"))
+
+    def test_the_guard_it_was_asked_to_write_is_readable_afterwards(self):
+        """Pruning must not eat the thing being written."""
+        ota._mark_install_event("new-session", "started")
+
+        self.assertTrue(ota._install_event_marker_seen("new-session", "started"))
 
 
 # ============================================================================
