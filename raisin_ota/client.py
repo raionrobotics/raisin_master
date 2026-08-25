@@ -2003,6 +2003,12 @@ def _attempt_download(
             existing = 0
 
     request_headers = dict(headers or {})
+    # Both checks that make a download trustworthy count decoded bytes: the
+    # Content-Length comparison and the sha256 of the body. A proxy applying
+    # transparent compression satisfies neither, and a resumed `Range` against a
+    # re-compressed body splices two different objects together. Nothing in
+    # front of this server compresses today; asking costs one header.
+    request_headers.setdefault("Accept-Encoding", "identity")
     if existing:
         request_headers["Range"] = f"bytes={existing}-"
         request_headers["If-Range"] = f'"{known_hash}"'

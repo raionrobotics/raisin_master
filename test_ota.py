@@ -5417,6 +5417,64 @@ class TestTheTokenCacheIsNotWorldReadable(unittest.TestCase):
             self.assertEqual(ota._load_cached_token(), "a.b.c")
 
 
+class TestDownloadsAskForNoEncoding(unittest.TestCase):
+    """A proxy that compresses would break both checks the download depends on.
+
+    Nothing in front of this server compresses today, so this is hardening
+    rather than a live bug — but the two things it protects are the two things
+    that make a download trustworthy, and both count *decoded* bytes: the
+    Content-Length comparison and the sha256 of the body. A transparently
+    compressed response satisfies neither, and a resumed `Range` on a
+    re-compressed body splices garbage.
+    """
+
+    def request_headers_for(self, existing=0):
+        captured = {}
+
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def raise_for_status(self_inner):
+                return None
+
+            def iter_content(self_inner, chunk_size=None):
+                return iter([b""])
+
+        def fake_get(url, headers=None, **kw):
+            captured.update(headers or {})
+            raise AssertionError("stop after the request is built")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            part = Path(tmpdir) / "blob.part"
+            if existing:
+                part.write_bytes(b"x" * existing)
+                ota._write_part_state(part, "a" * 64)
+            with patch("raisin_ota.client.requests.get", side_effect=fake_get):
+                with contextlib.suppress(AssertionError):
+                    ota._attempt_download(
+                        "https://ota.example.com/blob",
+                        part,
+                        Path(tmpdir) / "blob",
+                        {"Authorization": "Bearer x"},
+                        None,
+                        30,
+                    )
+        return captured
+
+    def test_identity_encoding_is_requested(self):
+        self.assertEqual(self.request_headers_for().get("Accept-Encoding"), "identity")
+
+    def test_the_callers_own_headers_survive(self):
+        self.assertEqual(self.request_headers_for().get("Authorization"), "Bearer x")
+
+
 # ============================================================================
 # Entry point
 # ============================================================================
