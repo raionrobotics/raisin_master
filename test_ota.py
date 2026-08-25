@@ -5183,6 +5183,73 @@ class TestAPackageDroppedFromAnArchiveGoesAway(unittest.TestCase):
             self.assertEqual(self.live_packages(release), ["mine", "pkg1"])
 
 
+class TestARefusedCredentialIsNotSilence(unittest.TestCase):
+    """A credential the server rejects must not read as "no opinion".
+
+    Both answers came back as `unauthorized` with one message —
+    `the OTA server refused this robot credential` — and the run then continued
+    down the same path it takes when nothing is assigned. On a machine that can
+    authenticate as a user that is a silent downgrade: the install succeeds,
+    attributed to a person, and the credential stays broken because nothing ever
+    failed. On one that cannot, it ends at `No archive found`.
+
+    They are different problems and want different sentences:
+
+        401  the credential is not valid — mistyped, expired or revoked
+        403  the credential is valid and not permitted here — a missing scope,
+             or pinned to another node
+
+    The second is a configuration error a person can fix from the message. The
+    first is not fixable by editing anything.
+    """
+
+    def resolve(self, status):
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.get",
+                return_value=_mock_response(status_code=status, json_data={}),
+            ),
+            patch("builtins.print") as printed,
+        ):
+            try:
+                ota._resolve_desired_state("ubuntu-24.04-arm64")
+                return None, " ".join(str(c) for c in printed.call_args_list)
+            except ota.OtaDesiredStateUnusable as unusable:
+                return unusable, " ".join(str(c) for c in printed.call_args_list)
+
+    def test_a_rejected_credential_is_not_a_shrug(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                unusable, _printed = self.resolve(status)
+
+                self.assertIsNotNone(
+                    unusable, f"{status} continued as though nothing was wrong"
+                )
+
+    def test_an_invalid_credential_says_so(self):
+        unusable, _printed = self.resolve(401)
+
+        self.assertIn("not valid", str(unusable))
+
+    def test_a_credential_that_is_not_permitted_says_that_instead(self):
+        """Not the same sentence: one is fixable by configuration, one is not."""
+        unusable, _printed = self.resolve(403)
+
+        message = str(unusable)
+        self.assertNotIn("not valid", message)
+        self.assertIn("not permitted", message)
+
+    def test_the_operator_is_told_before_the_refusal(self):
+        _unusable, printed = self.resolve(403)
+
+        self.assertIn("403", printed)
+
+
 # ============================================================================
 # Entry point
 # ============================================================================

@@ -1596,10 +1596,22 @@ def fetch_robot_desired_state() -> RobotCallResult:
                 detail="throttled by the OTA server",
             )
         if resp.status_code in (401, 403):
+            # Two different problems, and one message for both told an operator
+            # to check the wrong thing. A 403 is fixable by configuration — the
+            # credential is real and either lacks a scope or is pinned to
+            # another node. A 401 is not: it is mistyped, expired or revoked,
+            # and no amount of editing a unit file changes that.
             return RobotCallResult(
                 status=resp.status_code,
                 unauthorized=True,
-                detail="the OTA server refused this robot credential",
+                detail=(
+                    "the OTA server says this robot credential is not valid "
+                    "(mistyped, expired or revoked)"
+                    if resp.status_code == 401
+                    else "the OTA server says this robot credential is not "
+                    "permitted for this node (a missing scope, or pinned to "
+                    "another node)"
+                ),
             )
         resp.raise_for_status()
         state = _unwrap_response(resp.json())
@@ -1642,10 +1654,15 @@ def _resolve_desired_state(platform_str: str) -> tuple:
     """
     result = fetch_robot_desired_state()
     if result.unauthorized:
-        # Worth saying plainly: a revoked or mistyped credential otherwise
-        # reads as "the server has no opinion", and the legacy-route warnings
-        # that follow point at the wrong thing.
-        print(f"⚠️ {result.detail}.")
+        # Said before it is raised, because the run may legitimately continue:
+        # a person whose robot credential is broken can still install as
+        # themselves, and should be told which of the two it was.
+        print(f"⚠️ {result.detail} (HTTP {result.status}).")
+        # Not "no opinion". The server answered, and the answer was no. Letting
+        # that fall through is a silent downgrade to the user route on any
+        # machine that has one — the install succeeds, attributed to a person,
+        # and the credential stays broken because nothing ever failed.
+        _unusable(result.detail or "the OTA server refused this robot credential")
     state = result.value
     if not state:
         return (False, None, None, None)
