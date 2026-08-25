@@ -345,8 +345,30 @@ def _archive_identity_from_tree(
     *previous* archive, and only its own install metadata knows which one that
     was. A tree adopted from a pre-versioning install has no such metadata and
     yields None.
+
+    Scoped to this machine's platform. The pattern used to be
+    `*/*/*/*/<build>/…`, and those four wildcards are
+    `<package>/<os_type>/<os_version>/<architecture>` — so the OS, the version
+    and the architecture were all accepted as anything and whichever path sorted
+    first won. `archiveId` is per-platform, so a robot that installed its own
+    software never saw it; a tree that came from somewhere else did — a golden
+    image cloned across hardware, a disk swap, a workspace restored from another
+    robot's backup. An x86 machine holding an arm64 tree reported itself as
+    running the arm64 archive, and the agent comparing that against what it was
+    assigned could conclude it was already converged: install nothing, report
+    nothing, and read as a quiet healthy node forever.
+
+    The platform is not an argument and does not need to be — the process said
+    what it was at startup. This asked the tree instead. `_unusable_packages`
+    already scopes through `package_dir`, and the sibling reader
+    `_collect_archive_snapshot_packages` rejects a foreign entry on
+    `metadata["platform"]`; this was the one that checked neither.
+
+    Derived from `package_dir` rather than spelled out again, so a change to the
+    tree's shape cannot leave this reading the old one.
     """
-    pattern = f"*/*/*/*/{build_type}/{_INSTALL_METADATA_FILE}"
+    scoped = _ctx().package_dir(Path(install_base_path), "*", build_type)
+    pattern = str(scoped.relative_to(Path(install_base_path)) / _INSTALL_METADATA_FILE)
     for metadata_path in sorted(Path(install_base_path).glob(pattern)):
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))

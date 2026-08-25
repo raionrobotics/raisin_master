@@ -4714,6 +4714,125 @@ class TestPublishIntegration(unittest.TestCase):
             self.assertIn("OTA", output)
 
 
+class TestArchiveIdentityIsThisMachines(unittest.TestCase):
+    """`_archive_identity_from_tree` must answer about *this* machine.
+
+    The pattern was `*/*/*/*/<build>/ota-install.json`, and those four wildcards
+    are `<package>/<os_type>/<os_version>/<architecture>` -- so the OS, the
+    version and the architecture were all accepted as anything, and whichever
+    path sorted first won.
+
+    Where it bites: `archiveId` is per-platform, so a robot that
+    installed its own software never sees this. A tree that did not come from
+    this machine does -- a golden image cloned across hardware, a disk swap, a
+    workspace restored from another robot's backup. Two callers then act on the
+    answer: `_report_restored_snapshot` tells the fleet the wrong archive is
+    running, and the OTA agent compares it against what it was assigned and can
+    conclude it is already converged. It then installs nothing, reports nothing,
+    and reads as a quiet healthy node forever.
+
+    Its sibling `_collect_archive_snapshot_packages` globs just as widely but
+    rejects a foreign entry on `metadata["platform"]`. This one checked neither
+    the path nor the field.
+    """
+
+    ARM = ("ubuntu", "24.04", "arm64")
+    X86 = ("ubuntu", "24.04", "x86_64")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name) / "release" / "install"
+
+    def as_machine(self, platform):
+        os_type, os_version, architecture = platform
+        ota.configure(
+            ota.OtaContext(
+                workspace=Path(self.tmp.name),
+                os_type=os_type,
+                os_version=os_version,
+                architecture=architecture,
+                robot=TEST_ROBOT_IDENTITY,
+            )
+        )
+
+    def tree_holding(self, platform, package, archive_id, name, version):
+        os_type, os_version, architecture = platform
+        path = (
+            self.base
+            / package
+            / os_type
+            / os_version
+            / architecture
+            / "release"
+            / ota._INSTALL_METADATA_FILE
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "source": "archive",
+                    "archiveId": archive_id,
+                    "archiveName": name,
+                    "archiveVersion": version,
+                    "platform": f"{os_type}-{os_version}-{architecture}",
+                    "buildType": "release",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_its_own_tree_still_reads(self):
+        """The regression guard: scoping must not make every tree unreadable."""
+        self.as_machine(self.X86)
+        self.tree_holding(self.X86, "raisin", "x86-id", "raisin-robot", "1.0.0")
+
+        self.assertEqual(
+            ota._archive_identity_from_tree(self.base, "release"),
+            ("x86-id", "raisin-robot", "1.0.0"),
+        )
+
+    def test_another_machines_tree_reads_as_nothing_installed(self):
+        """Not as a confident wrong answer. `None` is a state to install from."""
+        self.as_machine(self.X86)
+        self.tree_holding(self.ARM, "raisin", "arm-id", "foreign-archive", "9.9.9")
+
+        self.assertIsNone(ota._archive_identity_from_tree(self.base, "release"))
+
+    def test_a_tree_holding_both_answers_with_this_machines(self):
+        """The sharp case: `arm64` sorts before `x86_64`, so the foreign one won.
+
+        A count or a first-match is not enough here -- the answer has to be
+        selected by platform, not merely be present.
+        """
+        self.as_machine(self.X86)
+        self.tree_holding(self.ARM, "raisin", "arm-id", "foreign-archive", "9.9.9")
+        self.tree_holding(self.X86, "raisin", "x86-id", "raisin-robot", "1.0.0")
+
+        self.assertEqual(
+            ota._archive_identity_from_tree(self.base, "release"),
+            ("x86-id", "raisin-robot", "1.0.0"),
+        )
+
+    def test_the_same_architecture_on_another_os_version_is_still_foreign(self):
+        """`archiveId` is per-platform, and the version is part of the platform."""
+        self.as_machine(self.X86)
+        self.tree_holding(
+            ("ubuntu", "22.04", "x86_64"), "raisin", "old-id", "raisin-robot", "1.0.0"
+        )
+
+        self.assertIsNone(ota._archive_identity_from_tree(self.base, "release"))
+
+    def test_a_build_type_this_machine_did_not_ask_for_is_still_ignored(self):
+        """Scoping the platform must not lose the check that was already there."""
+        self.as_machine(self.X86)
+        self.tree_holding(self.X86, "raisin", "dbg-id", "raisin-robot", "1.0.0")
+        moved = self.base / "raisin" / "ubuntu" / "24.04" / "x86_64"
+        (moved / "release").rename(moved / "debug")
+
+        self.assertIsNone(ota._archive_identity_from_tree(self.base, "release"))
+
+
 # ============================================================================
 # Entry point
 # ============================================================================
