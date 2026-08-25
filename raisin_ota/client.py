@@ -979,8 +979,16 @@ def _save_token(token: str):
             "endpoint": get_ota_endpoint(),
             "expiresAt": _extract_jwt_expiry(token),
         }
-        with open(cache_path, "w") as f:
+        # 0600, like the robot key file beside it. This is a bearer token: on a
+        # shared machine a readable copy grants that account the same access
+        # until it expires, which is the threat the key file check exists for.
+        # `os.open` sets the mode at creation so there is no window where it is
+        # readable, and `chmod` afterwards tightens one an older version left
+        # loose — upgrading should fix the file, not walk past it.
+        fd = os.open(cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write(json.dumps(data))
+        os.chmod(cache_path, 0o600)
     except Exception:
         pass
 

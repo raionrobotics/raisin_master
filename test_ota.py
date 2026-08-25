@@ -5353,6 +5353,70 @@ class TestTheEventGuardFileDoesNotGrowForever(unittest.TestCase):
         self.assertTrue(ota._install_event_marker_seen("new-session", "started"))
 
 
+class TestTheTokenCacheIsNotWorldReadable(unittest.TestCase):
+    """It is a bearer token, and the key file next to it is held to 0600.
+
+    `robot_credentials` refuses a robot key file that is group- or
+    world-readable, and writes its own with `os.open(..., 0o600)`. The token
+    cache was written with `open(path, "w")` — whatever the umask allows, 0644
+    on a normal machine. On a shared box, copying it grants that account the
+    same access until the token expires, which is the threat the key file check
+    exists for.
+
+    Same secret class, same handling. Refusing to *read* a loose one is a
+    separate question: this file is written by the tool for itself, so the tool
+    can simply not create the problem.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+
+    def mode_after_saving(self, existing_mode=None):
+        path = ota._get_token_cache_path()
+        if existing_mode is not None:
+            path.write_text("{}", encoding="utf-8")
+            os.chmod(path, existing_mode)
+        with patch(
+            "raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com"
+        ):
+            ota._save_token("a.b.c")
+        return os.stat(path).st_mode & 0o777
+
+    def test_a_new_cache_is_owner_only(self):
+        self.assertEqual(self.mode_after_saving(), 0o600)
+
+    def test_a_loose_one_left_by_an_older_version_is_tightened(self):
+        """Upgrading must fix the file, not walk past it."""
+        self.assertEqual(self.mode_after_saving(existing_mode=0o644), 0o600)
+
+    def test_it_is_never_briefly_readable_on_the_way_there(self):
+        """The mode is set at creation, not fixed afterwards.
+
+        `chmod` after the write leaves a window where the token is on disk and
+        readable. Asserting on that race from in-process is not possible, so
+        this asserts the property that makes it impossible instead: with `chmod`
+        unavailable the file is still 0600, which can only be true if creation
+        set it.
+        """
+        with patch("raisin_ota.client.os.chmod", side_effect=OSError("nope")):
+            mode = self.mode_after_saving()
+
+        self.assertEqual(mode, 0o600)
+
+    def test_the_token_is_still_readable_afterwards(self):
+        """Tightening the mode must not make the tool unable to read its own file."""
+        self.mode_after_saving()
+
+        with patch(
+            "raisin_ota.client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ):
+            self.assertEqual(ota._load_cached_token(), "a.b.c")
+
+
 # ============================================================================
 # Entry point
 # ============================================================================
