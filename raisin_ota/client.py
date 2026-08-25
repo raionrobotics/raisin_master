@@ -2637,6 +2637,50 @@ def download_package(
     return result
 
 
+def _prune_packages_the_archive_dropped(
+    staging: Path, keep: set, build_type: str
+) -> None:
+    """Remove archive-installed packages this archive does not name.
+
+    Staging is cloned from the live tree so a version can be built without
+    touching what is running, and the download loop only writes the packages the
+    new archive lists. Without this, a package archive A had and archive B does
+    not stayed installed after switching to B — on `LD_LIBRARY_PATH`, visible to
+    `index` and `deploy_install_packages`, and reported in the snapshot as part
+    of B. `stage_version` promises "one complete package tree"; it was the union
+    of every archive the machine had ever run.
+
+    Only packages carrying archive metadata. One a person installed by hand has
+    none, nobody claimed it was part of this archive, and removing what someone
+    put there is not this function's business. Unreadable metadata is left alone
+    for the same reason: not knowing where a directory came from is not grounds
+    for deleting it.
+
+    Staging only, so nothing the machine is running changes — a failure after
+    this still commits nothing.
+    """
+    dropped = []
+    for entry in sorted(staging.iterdir()):
+        if not entry.is_dir() or entry.name in keep:
+            continue
+        metadata_path = (
+            _ctx().package_dir(staging, entry.name, build_type) / _INSTALL_METADATA_FILE
+        )
+        try:
+            recorded = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(recorded, dict) and recorded.get("source") == "archive":
+            shutil.rmtree(entry, ignore_errors=True)
+            dropped.append(entry.name)
+
+    if dropped:
+        print(
+            f"🧹 Removed {len(dropped)} package(s) this archive no longer "
+            f"includes: {', '.join(dropped)}."
+        )
+
+
 def download_all_from_archive(
     build_type: str,
     install_base_path: Path,
@@ -2857,6 +2901,14 @@ def download_all_from_archive(
             f"incomplete archive install: missing {', '.join(missing)}",
         )
         return {}
+
+    # After the completeness check and before the commit: a tree that is not
+    # going live is not worth tidying, and one that is must not carry a package
+    # nobody asked for. Skipped for a filtered install, which is deliberately
+    # partial — `--package` names what to refresh, not what the tree should
+    # contain.
+    if not package_filter:
+        _prune_packages_the_archive_dropped(staging, requested, build_type)
 
     # Moving the symlink is what makes an install real. If it did not move,
     # nothing was installed — and the health check below would read the tree

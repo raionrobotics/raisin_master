@@ -5035,6 +5035,154 @@ class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
         )
 
 
+class TestAPackageDroppedFromAnArchiveGoesAway(unittest.TestCase):
+    """Switching archives must not leave the one you switched away from behind.
+
+    Staging clones the live tree so a version can be built without touching what
+    is running, and the download loop only writes the packages the new archive
+    names. A package that archive A had and archive B does not was therefore
+    still installed after switching to B — still on `LD_LIBRARY_PATH`, still
+    visible to `index` and to `deploy_install_packages`, and still reported in
+    the snapshot as part of B.
+
+    `stage_version`'s docstring says "one complete package tree", which was then
+    not quite true: it was the union of every archive the machine had ever run.
+
+    Locally-installed packages are left alone. They have no archive metadata,
+    nobody said they were part of B, and removing what a person put there by
+    hand is not this function's business.
+    """
+
+    def archive_metadata(self, name, archive_id):
+        return json.dumps(
+            {
+                "source": "archive",
+                "archiveId": archive_id,
+                "archiveName": "raisin-robot",
+                "archiveVersion": "1.0.0",
+                "packageName": name,
+                "platform": "ubuntu-24.04-arm64",
+                "buildType": "release",
+            }
+        )
+
+    def seed_live_tree(self, tmpdir, packages, local=()):
+        """A committed generation holding `packages` from an archive.
+
+        Paths built by `package_dir`, not spelled out. Spelling them out put the
+        fixture on `ubuntu/24.04/arm64` while the context under test was
+        somewhere else, so the metadata was never found and the code under test
+        did nothing — a red that pointed at the wrong file.
+        """
+        g.script_directory = tmpdir
+        _sync_ota_context()
+        release = Path(tmpdir) / "release"
+        release.mkdir(parents=True, exist_ok=True)
+        staging = install_tree.stage_version(release, "1.0.0")
+        for name in packages:
+            d = ota._ctx().package_dir(staging, name, "release")
+            d.mkdir(parents=True)
+            (d / ota._INSTALL_METADATA_FILE).write_text(
+                self.archive_metadata(name, "arch-A"), encoding="utf-8"
+            )
+        for name in local:
+            d = ota._ctx().package_dir(staging, name, "release")
+            d.mkdir(parents=True)
+            (d / "release.yaml").write_text("version: 0.1.0\n", encoding="utf-8")
+        install_tree.commit_version(release, "1.0.0")
+        return release
+
+    def install_archive_holding(self, tmpdir, package_names):
+        packages = [
+            {
+                "packageId": f"p-{n}",
+                "packageName": n,
+                "manifestHash": "a" * 64,
+                "tagName": "0.2.0",
+            }
+            for n in package_names
+        ]
+
+        def extract(download_file, install_dir, package_name, version, **kw):
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "release.yaml").write_text("version: 0.2.0\n")
+            return {"version": version, "dependencies": []}
+
+        with (
+            _robot_identity(),
+            patch("raisin_ota.client._resolve_desired_state") as mock_desired,
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch("raisin_ota.client._extract_and_read_deps", side_effect=extract),
+            patch("raisin_ota.client.record_install_event"),
+            patch("raisin_ota.client.report_software_snapshot"),
+        ):
+            mock_desired.return_value = (
+                False,
+                "raisin-robot",
+                "2.0.0",
+                (packages, "arch-B", "2.0.0"),
+            )
+            g.script_directory = tmpdir
+            _sync_ota_context()
+            return ota.download_all_from_archive(
+                "release", Path(tmpdir) / "release" / "install"
+            )
+
+    def live_packages(self, release):
+        live = release / "install"
+        return sorted(p.name for p in live.iterdir() if p.is_dir())
+
+    def test_a_package_the_new_archive_does_not_have_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = self.seed_live_tree(tmpdir, ["pkg1", "pkg2"])
+
+            self.install_archive_holding(tmpdir, ["pkg1"])
+
+            self.assertEqual(self.live_packages(release), ["pkg1"])
+
+    def test_the_packages_it_does_have_survive(self):
+        """The other half: pruning must not empty the tree it is tidying."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = self.seed_live_tree(tmpdir, ["pkg1", "pkg2"])
+
+            self.install_archive_holding(tmpdir, ["pkg1", "pkg2"])
+
+            self.assertEqual(self.live_packages(release), ["pkg1", "pkg2"])
+
+    def test_a_package_installed_by_the_timestamp_route_is_left_alone(self):
+        """It records `source: timestamp`, and no archive claimed it.
+
+        The case the `source` check exists for. Without it, `installed by some
+        other route` and `installed by the archive we are replacing` are the
+        same thing, and switching archives quietly deletes the first.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = self.seed_live_tree(tmpdir, ["pkg1"])
+            other = ota._ctx().package_dir(
+                release / "install", "by-timestamp", "release"
+            )
+            other.mkdir(parents=True)
+            (other / ota._INSTALL_METADATA_FILE).write_text(
+                json.dumps({"source": "timestamp", "packageName": "by-timestamp"}),
+                encoding="utf-8",
+            )
+
+            self.install_archive_holding(tmpdir, ["pkg1"])
+
+            self.assertIn("by-timestamp", self.live_packages(release))
+
+    def test_a_locally_installed_package_is_left_alone(self):
+        """No archive said it was there, so no archive gets to say it is not."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = self.seed_live_tree(tmpdir, ["pkg1"], local=["mine"])
+
+            self.install_archive_holding(tmpdir, ["pkg1"])
+
+            self.assertEqual(self.live_packages(release), ["mine", "pkg1"])
+
+
 # ============================================================================
 # Entry point
 # ============================================================================
