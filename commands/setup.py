@@ -1891,7 +1891,7 @@ def deploy_install_packages():
                         # Ensure data was loaded and is a dictionary
                         if release_data and isinstance(release_data, dict):
                             # Safely get the list of dependencies, default to empty list
-                            dependencies = release_data.get("g.vcpkg_dependencies", [])
+                            dependencies = release_data.get("vcpkg_dependencies", [])
                             if dependencies and isinstance(dependencies, list):
                                 # Use set.update() to add all items from the list
                                 g.vcpkg_dependencies.update(dependencies)
@@ -1926,7 +1926,7 @@ def collect_src_vcpkg_dependencies(repos_to_ignore=None):
     Scans subdirectories in '{g.script_directory}/src' for 'release.yaml' files.
 
     For each 'release.yaml' found, it reads the file and checks for a
-    'g.vcpkg_dependencies' node. If the node exists, its contents (a list of
+    'vcpkg_dependencies' node. If the node exists, its contents (a list of
     strings) are merged into a master set to collect all unique dependencies.
 
     Returns:
@@ -1961,7 +1961,7 @@ def collect_src_vcpkg_dependencies(repos_to_ignore=None):
                     # Ensure data was loaded and is a dictionary
                     if release_data and isinstance(release_data, dict):
                         # Safely get the list of dependencies, defaulting to an empty list
-                        dependencies = release_data.get("g.vcpkg_dependencies", [])
+                        dependencies = release_data.get("vcpkg_dependencies", [])
 
                         if dependencies and isinstance(dependencies, list):
                             print(
