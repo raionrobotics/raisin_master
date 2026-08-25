@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import install_tree
+from .install_tree import safe_component
 
 # Module-level cached auth token (lives for the CLI session)
 _cached_token = None
@@ -154,14 +155,29 @@ class OtaContext:
         return f"{self.os_type}-{self.os_version}-{self.architecture}"
 
     def package_dir(self, base: Path, package: str, build_type: str) -> Path:
-        """Where one package's files live under an install tree."""
+        """Where one package's files live under an install tree.
+
+        The package name comes from the server's manifest and becomes a
+        directory, so it is checked here — the one place the layout is built,
+        and the place every caller that writes a package goes through. Without
+        it, `../ESCAPED` put a package tree outside the install base and
+        `a/../../../../OUTSIDE` put it anywhere the process could write, which
+        on a robot is anywhere at all.
+
+        `build_type` is checked with it, but for a weaker reason and it is worth
+        being clear about the difference: it is *caller*-supplied, not
+        server-supplied — a `click.Choice(["debug", "release"])` on the CLI and
+        an environment-settable default in the agent. Nothing in a server
+        response reaches it. So this half is depth on a path component rather
+        than a vector being closed.
+        """
         return (
             Path(base)
-            / package
+            / safe_component(package, "package name")
             / self.os_type
             / self.os_version
             / self.architecture
-            / build_type
+            / safe_component(build_type, "build type")
         )
 
 

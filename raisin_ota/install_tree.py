@@ -290,8 +290,45 @@ def _clone_tree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, copy_function=os.link, symlinks=True)
 
 
+def safe_component(value: str, what: str) -> str:
+    """`value`, if it can be one directory name. A `ValueError` naming it if not.
+
+    Names arriving from the server end up as directory names: a version becomes
+    `versions/<gen>-<version>`, a package name a directory under the install
+    base. A separator in one of them leaves the tree it was meant to stay in,
+    and on a robot the process writing it is root.
+
+    Measured before this existed, staging into a throwaway tree:
+
+        '1.0.0'                        -> release/versions/0001-1.0.0        inside
+        '../ESCAPED'                   -> release/versions/0002-../ESCAPED   inside
+        '1.0/../../../OUTSIDE/pwned'   -> OUTSIDE/pwned                      OUTSIDE
+
+    Note the middle line. The generation prefix defeats a bare `..` by accident
+    — `0002-..` is a literal name, not the parent — which is why this needs a
+    separator to work and why the code reads as safe. `..` is refused anyway:
+    the prefix is a coincidence of the naming scheme, not a guard, and a later
+    change to it would turn that line into an escape with nothing failing.
+
+    Refused rather than sanitised. A value this tool cannot use as a name is not
+    one it should rename: a tree on disk under a name the server does not know
+    is a robot the fleet cannot reason about.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{what} is empty, so it cannot name a directory")
+    if "/" in value or "\\" in value or "\x00" in value or value == "..":
+        raise ValueError(
+            f"{what} {value!r} cannot be a directory name; refusing to write "
+            f"outside the tree it belongs in"
+        )
+    return value
+
+
 def stage_version(release, version: str) -> Path:
     """Prepare a new tree seeded from the live one. Nothing here is live yet."""
+    # Before the mkdir below, which creates the parent and would otherwise leave
+    # a directory behind on the way to refusing.
+    version = safe_component(version, "version")
     staging = versions_dir(release) / f"{_next_generation(release):04d}-{version}"
     staging.parent.mkdir(parents=True, exist_ok=True)
 

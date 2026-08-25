@@ -213,5 +213,65 @@ class TestCoreDoesNotImportTheCli(unittest.TestCase):
         self.assertEqual(caught, ["from commands import globals as g"])
 
 
+class TestAPackageNameCannotLeaveTheTree(unittest.TestCase):
+    """Package names arrive in the server's manifest and become directories.
+
+    Worse than the version case, because there is no generation prefix to
+    accidentally defeat a bare `..`. Measured before this was guarded:
+
+        'raisin_robot'            -> release/install/raisin_robot/...   inside
+        '../ESCAPED'              -> release/ESCAPED/...                OUTSIDE
+        'a/../../../../OUTSIDE'   -> OUTSIDE/...                        OUTSIDE
+
+    `package_dir` is the single place the layout is built, and every caller that
+    writes a package goes through it, so the check belongs here rather than at
+    each of them.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name) / "release" / "install"
+        self.context = ota.OtaContext(
+            workspace=Path(self._tmp.name),
+            os_type="ubuntu",
+            os_version="24.04",
+            architecture="x86_64",
+        )
+
+    def test_an_ordinary_package_still_resolves(self):
+        resolved = self.context.package_dir(self.base, "raisin_robot", "release")
+
+        self.assertEqual(
+            resolved,
+            self.base / "raisin_robot" / "ubuntu" / "24.04" / "x86_64" / "release",
+        )
+
+    def test_a_glob_is_still_allowed(self):
+        """Load-bearing: the live-tree reader asks for `*` as the package."""
+        resolved = self.context.package_dir(self.base, "*", "release")
+
+        self.assertEqual(resolved.parts[-5], "*")
+
+    def test_a_parent_reference_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.context.package_dir(self.base, "..", "release")
+
+    def test_a_separator_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.context.package_dir(self.base, "a/../../../../OUTSIDE", "release")
+
+    def test_the_refusal_names_the_package(self):
+        with self.assertRaises(ValueError) as caught:
+            self.context.package_dir(self.base, "../ESCAPED", "release")
+
+        self.assertIn("../ESCAPED", str(caught.exception))
+
+    def test_the_build_type_is_checked_too(self):
+        """It is a path component from the same request, and nothing else checks it."""
+        with self.assertRaises(ValueError):
+            self.context.package_dir(self.base, "raisin_robot", "../../etc")
+
+
 if __name__ == "__main__":
     unittest.main()
