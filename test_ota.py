@@ -3844,7 +3844,20 @@ class TestDownload(unittest.TestCase):
             ),
             patch("builtins.print") as printed,
         ):
-            result = ota._resolve_desired_state(platform)
+            try:
+                result = ota._resolve_desired_state(platform)
+            except ota.OtaDesiredStateUnusable as unusable:
+                # Absorbed here because these tests are about what the operator
+                # was *told*. An answer that cannot be used now raises, and
+                # `download_all_from_archive` catches it and carries on if a
+                # user credential can still resolve an archive — so the message
+                # below is still printed, and still worth pinning. Whether the
+                # refusal itself happens is the subject of
+                # TestARobotRefusesRatherThanSubstituting.
+                self.unusable = unusable
+                result = (False, None, None, None)
+            else:
+                self.unusable = None
             # Kept so a test can assert on what the operator was told; the
             # patch is inside this helper, so an outer one would be shadowed.
             self.printed = " ".join(str(c) for c in printed.call_args_list)
@@ -4010,7 +4023,11 @@ class TestDownload(unittest.TestCase):
             ),
             patch("builtins.print") as mock_print,
         ):
-            ota._resolve_desired_state(platform)
+            # Absorbed for the same reason as in `_desired_state`: this helper
+            # exists to read what the operator was told, and the message is
+            # printed before the refusal is raised.
+            with contextlib.suppress(ota.OtaDesiredStateUnusable):
+                ota._resolve_desired_state(platform)
         return " ".join(str(c) for c in mock_print.call_args_list)
 
     def test_no_target_says_the_node_is_unassigned(self):
@@ -4831,6 +4848,191 @@ class TestArchiveIdentityIsThisMachines(unittest.TestCase):
         (moved / "release").rename(moved / "debug")
 
         self.assertIsNone(ota._archive_identity_from_tree(self.base, "release"))
+
+
+class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
+    """An answer the robot cannot use must not become a different install.
+
+    `_resolve_desired_state` returned `(False, None, None, None)` for every
+    answer it could not act on — platform mismatch, `no_target`, `unconfigured`,
+    a reason this client does not recognise — and the caller reads that as "the
+    server expressed no preference" and continues down its own priority order:
+    `desired state > archive_version > tag > legacy latest`.
+
+    For a person at a terminal that is right. They ran a command, they want
+    software, and the fleet's opinion is advisory.
+
+    For a machine converging on an assignment it inverts the contract. Its only
+    job is to run what it was assigned; installing something else and reporting
+    success means the fleet shows a version nobody chose, and shows it as
+    healthy. On a machine with no user credential the fall-through fails
+    instead, with `No archive found for 'raisin-robot'` — which names neither
+    the assignment nor why it could not be used.
+
+    `OtaInstallHalted` already argues this case for the neighbouring one:
+
+        A halt is an instruction; an empty result is an absence, and the two
+        must not share a representation.
+
+    "The thing you were told to install is unusable" is also an instruction.
+    """
+
+    PAYLOADS = {
+        "another platform": {
+            "halt": False,
+            "reason": "node_pin",
+            "target": {
+                "name": "raisin-robot",
+                "version": "2026.1.0",
+                "platform": "ubuntu-22.04-x86_64",
+            },
+        },
+        "no target": {"halt": False, "reason": "no_target"},
+        "unconfigured": {"halt": False, "reason": "unconfigured"},
+        "a reason this client does not know": {"halt": False, "reason": "quarantined"},
+    }
+
+    def resolve(self, payload, as_robot=True, platform="ubuntu-24.04-arm64"):
+        identity = _robot_identity() if as_robot else _no_robot_identity()
+        with (
+            identity,
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.get",
+                return_value=_mock_response(
+                    json_data={"success": True, "data": payload}
+                ),
+            ),
+            patch("builtins.print"),
+        ):
+            return ota._resolve_desired_state(platform)
+
+    def test_a_robot_refuses_every_answer_it_cannot_use(self):
+        for description, payload in self.PAYLOADS.items():
+            with self.subTest(description):
+                with self.assertRaises(ota.OtaDesiredStateUnusable):
+                    self.resolve(payload)
+
+    def test_the_refusal_carries_why(self):
+        """It becomes the failure reason the fleet is told, so it has to say something."""
+        with self.assertRaises(ota.OtaDesiredStateUnusable) as caught:
+            self.resolve(self.PAYLOADS["another platform"])
+
+        message = str(caught.exception)
+        self.assertIn("ubuntu-22.04-x86_64", message)
+        self.assertIn("ubuntu-24.04-arm64", message)
+
+    def test_an_unrecognised_reason_reaches_the_message(self):
+        with self.assertRaises(ota.OtaDesiredStateUnusable) as caught:
+            self.resolve(self.PAYLOADS["a reason this client does not know"])
+
+        self.assertIn("quarantined", str(caught.exception))
+
+    # The caller decides whether anything can follow. These two are the whole
+    # of it, and they are asserted where the decision is made rather than where
+    # the refusal is raised -- an earlier version of this class tested the
+    # no-robot-identity case at `_resolve_desired_state` and passed without the
+    # code, because without a credential the function returns before it reaches
+    # any of these branches at all.
+
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_nothing_can_follow_so_the_assignment_is_the_answer(
+        self, mock_desired, _mock_manifest
+    ):
+        """A machine with no user credential: every route past this needs a JWT.
+
+        Before this, the failure read `No archive found for 'raisin-robot'` --
+        an archive nobody assigned to this machine, named in the error for a
+        machine that was assigned something else entirely.
+        """
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable(
+            "the OTA server assigned an archive for 'ubuntu-22.04-x86_64' but "
+            "this node is 'ubuntu-24.04-arm64'"
+        )
+
+        # `tag=None` is how an unattended caller asks: it wants what it was
+        # assigned and nothing else, so it does not offer a tag to fall back to.
+        # That path gives up at `manifest is None`; the default `tag="stable"`
+        # gives up one branch earlier, and both have to carry the reason.
+        with tempfile.TemporaryDirectory() as tmpdir, _robot_identity():
+            with self.assertRaises(ota.OtaDesiredStateUnusable) as caught:
+                ota.download_all_from_archive("release", Path(tmpdir), tag=None)
+
+        self.assertIn("ubuntu-22.04-x86_64", str(caught.exception))
+
+    @patch("raisin_ota.client._fetch_archive_with_stable_fallback", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_the_tag_route_giving_up_carries_the_reason_too(
+        self, mock_desired, _mock_tag
+    ):
+        """Otherwise it announces a fall back to GitHub releases per repo.
+
+        Two stacked substitutions, and neither visible as a failure — which is
+        the shape this whole change is about.
+        """
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+
+        with tempfile.TemporaryDirectory() as tmpdir, _robot_identity():
+            with self.assertRaises(ota.OtaDesiredStateUnusable):
+                ota.download_all_from_archive("release", Path(tmpdir))
+
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_a_caller_that_can_still_resolve_one_carries_on(self, mock_desired):
+        """The person at a terminal, unchanged. They ran a command; they want software."""
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("unusable")
+
+        # `_fetch_archive_with_stable_fallback`, not `_fetch_archive_manifest`:
+        # `tag` defaults to "stable", so that is the route a caller who pinned
+        # nothing actually takes. Patching the other one left the tag route
+        # unpatched, it resolved nothing, and the refusal was re-raised — which
+        # is correct behaviour and a wrong test.
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            _robot_identity(),
+            patch(
+                "raisin_ota.client._fetch_archive_with_stable_fallback",
+                return_value=([], "arch-1", "1.0.0"),
+            ),
+        ):
+            # No packages in the manifest, so nothing is downloaded and the call
+            # returns without reaching the network. What matters is that it got
+            # past the refusal.
+            ota.download_all_from_archive("release", Path(tmpdir))
+
+    def test_a_usable_target_is_unaffected(self):
+        halted, name, version, _manifest = self.resolve(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-24.04-arm64",
+                },
+            }
+        )
+
+        self.assertFalse(halted)
+        self.assertEqual((name, version), ("raisin-robot", "2026.1.0"))
+
+    def test_a_halt_is_still_a_halt(self):
+        """Two instructions; neither may become the other.
+
+        A halt comes back as a flag and `download_all_from_archive` turns it
+        into `OtaInstallHalted` — an asymmetry with the refusal below, which is
+        raised where it is found. Kept rather than tidied: the halt flag is part
+        of this function's published tuple and several callers read it, while
+        the refusal has no caller that could do anything but re-raise. Pinned so
+        the halt path cannot quietly start raising the other one.
+        """
+        self.assertEqual(
+            self.resolve({"halt": True, "haltSources": ["tenant"]}),
+            (True, None, None, None),
+        )
 
 
 # ============================================================================

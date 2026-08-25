@@ -21,6 +21,7 @@ extension it will never call.
 from .client import (
     ContentHashMismatch,
     OtaContext,
+    OtaDesiredStateUnusable,
     OtaInstallHalted,
     RobotIdentity,
     configure,
@@ -31,6 +32,7 @@ __all__ = [
     "ContentHashMismatch",
     "InstallTreeUnusable",
     "OtaContext",
+    "OtaDesiredStateUnusable",
     "OtaInstallHalted",
     "RobotIdentity",
     "configure",

@@ -1613,6 +1613,19 @@ def fetch_robot_desired_state() -> RobotCallResult:
         return RobotCallResult(detail=str(e))
 
 
+def _unusable(reason: str) -> None:
+    """The server answered and the answer cannot be acted on.
+
+    Always raised, and caught immediately by `download_all_from_archive`, which
+    is the only caller and the only place that knows whether anything else could
+    follow. Raising here rather than returning a fourth kind of empty tuple
+    keeps the reason attached to the thing that produced it — the reason is what
+    the fleet is eventually told, and a reason reconstructed later is a reason
+    that drifts.
+    """
+    raise OtaDesiredStateUnusable(reason)
+
+
 def _resolve_desired_state(platform_str: str) -> tuple:
     """Fold the server's desired state into an archive selection.
 
@@ -1677,6 +1690,13 @@ def _resolve_desired_state(platform_str: str) -> tuple:
                 f"(reason: {reason or 'none given'}), which this client does "
                 f"not recognise. Continuing on the legacy route."
             )
+        # After the branch, not before it: each line above is what a caller with
+        # a user credential does next, and it is accurate for them. The refusal
+        # only bites where nothing can follow.
+        _unusable(
+            f"the OTA server has no usable target for this node "
+            f"(reason: {reason or 'none given'})"
+        )
         return (False, None, None, None)
 
     target_platform = _normalize_optional_string(target.get("platform"))
@@ -1685,11 +1705,16 @@ def _resolve_desired_state(platform_str: str) -> tuple:
             f"⚠️ OTA desired state targets '{target_platform}' but this node "
             f"is '{platform_str}'. Ignoring it."
         )
+        _unusable(
+            f"the OTA server assigned an archive for '{target_platform}' but "
+            f"this node is '{platform_str}'"
+        )
         return (False, None, None, None)
 
     name = _normalize_optional_string(target.get("name"))
     version = _normalize_optional_string(target.get("version"))
     if not name or not version:
+        _unusable("the OTA server assigned a target with no archive name or version")
         return (False, None, None, None)
 
     print(
@@ -1708,6 +1733,26 @@ def _resolve_desired_state(platform_str: str) -> tuple:
 
 class ContentHashMismatch(Exception):
     """Downloaded bytes did not match the digest the server advertised."""
+
+
+class OtaDesiredStateUnusable(Exception):
+    """The machine was told what to run and cannot use the answer.
+
+    Raised for the same reason `OtaInstallHalted` is, and the sibling docstring
+    below makes the argument: an instruction and an absence must not share a
+    representation. Returning "no opinion" here let the caller continue down
+    `archive_version > tag > legacy latest` and install something nobody
+    assigned — or, on a machine with no user credential, fail with `No archive
+    found`, which names neither the assignment nor why it was unusable.
+
+    Only when a robot identity is configured. A person at a terminal who runs an
+    install wants software, and the fleet's opinion is advisory to them; the
+    fall-through is the right default for that caller and is unchanged.
+
+    Raised here rather than returned as a flag, unlike a halt: this function is
+    only reached when the caller pinned nothing, so there is no decision left
+    for the caller to make.
+    """
 
 
 class OtaInstallHalted(Exception):
@@ -2634,10 +2679,25 @@ def download_all_from_archive(
     archive_name = get_archive_name(build_type, archive_name)
 
     desired_manifest = None
+    # Kept so the failure this machine reports is the one that actually
+    # happened. An assignment that cannot be used is not "no archive found for
+    # 'raisin-robot'", which is what the chain below says when it comes up
+    # empty, and which names neither the assignment nor why it was unusable.
+    unusable_desired_state = None
     if not caller_pinned_archive:
-        halted, desired_name, desired_version, desired_manifest = (
-            _resolve_desired_state(platform_str)
-        )
+        try:
+            halted, desired_name, desired_version, desired_manifest = (
+                _resolve_desired_state(platform_str)
+            )
+        except OtaDesiredStateUnusable as unusable:
+            # Not fatal on its own. A caller with a user credential can still
+            # resolve an archive the ordinary way, and for a person at a
+            # terminal that is the right default — they ran a command and want
+            # software. It becomes fatal below only if nothing else answers,
+            # which on a machine with no user credential is guaranteed: every
+            # route past this point needs a JWT.
+            halted, desired_name, desired_version = False, None, None
+            unusable_desired_state = unusable
         if halted:
             raise OtaInstallHalted("the OTA server has halted installs for this node")
         if desired_name and desired_version:
@@ -2656,6 +2716,8 @@ def download_all_from_archive(
             # Neither the requested tag nor 'stable' resolved on OTA.
             # Return empty so install.py falls back to GitHub releases
             # for each repo declared in configuration_setting.yaml.
+            if unusable_desired_state:
+                raise unusable_desired_state
             print(
                 f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
                 f"with tag '{tag}' or 'stable' — falling back to GitHub "
@@ -2666,6 +2728,11 @@ def download_all_from_archive(
         manifest = _fetch_archive_manifest(archive_name, platform_str, None)
 
     if manifest is None:
+        # The assignment is the better answer when there is one: it says what
+        # this machine was told to run and why that could not happen, where the
+        # line below names an archive nobody chose for it.
+        if unusable_desired_state:
+            raise unusable_desired_state
         print(f"⚠️ No archive found for '{archive_name}' on {platform_str}")
         return {}
 
