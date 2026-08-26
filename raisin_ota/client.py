@@ -322,16 +322,67 @@ def _read_install_session() -> Optional[str]:
     return session_id
 
 
-def _persist_install_session(session_id: str) -> None:
+def _persist_install_session(
+    session_id: str, archive: Optional[dict] = None, started_at: Optional[float] = None
+) -> None:
     path = _install_session_path()
+    record = {
+        "installSessionId": session_id,
+        "startedAt": time.time() if started_at is None else started_at,
+    }
+    if archive:
+        record["archive"] = archive
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"installSessionId": session_id, "startedAt": time.time()}),
-            encoding="utf-8",
-        )
+        path.write_text(json.dumps(record), encoding="utf-8")
     except OSError:
         pass
+
+
+def _session_archive(session_id: str) -> Optional[dict]:
+    """The archive this session is for, if it has said which.
+
+    On disk rather than in memory because a session outlives the process that
+    opened it: `get_install_session_id` resumes one after a crash so a partial
+    install can be finished, and the attempt that resumes has to report against
+    the same archive.
+    """
+    try:
+        data = json.loads(_install_session_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("installSessionId") != session_id:
+        return None
+    archive = data.get("archive")
+    return archive if isinstance(archive, dict) else None
+
+
+def _remember_session_archive(session_id: str, archive: dict) -> None:
+    """Note which archive this session is for, on the session's own record.
+
+    Only ever an update to the record already naming this session — never
+    written from nothing. A caller may pass a session id the file does not
+    name, and creating a record for it would evict a live session's resume
+    point, which is worth more than an archive label.
+
+    `startedAt` is carried over unchanged: it is the session's expiry, and
+    refreshing it here would let an install that keeps reporting outlive the
+    window that decides whether a crashed one may still be resumed.
+    """
+    try:
+        data = json.loads(_install_session_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict) or data.get("installSessionId") != session_id:
+        return
+    if isinstance(data.get("archive"), dict):
+        return
+    started_at = data.get("startedAt")
+    _persist_install_session(
+        session_id,
+        archive=archive,
+        started_at=started_at if isinstance(started_at, (int, float)) else None,
+    )
 
 
 def get_install_session_id() -> str:
@@ -673,6 +724,27 @@ def record_install_event(
         session_id, marker
     ):
         return None
+
+    # An event that does not name its archive is invisible to anything that
+    # filters events by one, and only the caller that starts an install has the
+    # archive to hand. The session is already the unit these are grouped by and
+    # the server refuses one used for a second archive, so the client can write
+    # the archive down once per session instead of every caller carrying it.
+    archive = {
+        "archiveId": archive_id,
+        "archiveName": archive_name,
+        "archiveVersion": archive_version,
+        "platform": platform,
+    }
+    named = {key: value for key, value in archive.items() if value is not None}
+    if named.get("archiveId"):
+        _remember_session_archive(session_id, named)
+    else:
+        remembered = _session_archive(session_id) or {}
+        archive_id = archive_id or remembered.get("archiveId")
+        archive_name = archive_name or remembered.get("archiveName")
+        archive_version = archive_version or remembered.get("archiveVersion")
+        platform = platform or remembered.get("platform")
 
     event = {
         "eventId": str(uuid.uuid4()),

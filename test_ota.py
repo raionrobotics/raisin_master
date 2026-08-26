@@ -5475,6 +5475,168 @@ class TestDownloadsAskForNoEncoding(unittest.TestCase):
         self.assertEqual(self.request_headers_for().get("Authorization"), "Bearer x")
 
 
+class TestATerminalEventNamesItsArchive(unittest.TestCase):
+    """An event that does not say which archive it is about is a lost event.
+
+    `archiveId` is optional per event and the rollout aggregate copes — it picks
+    sessions by archive and takes each one whole. Nothing else does: listing an
+    archive's install events filters on the field, so the list shows starts and
+    no outcomes. Measured against a running server, every terminal event on it
+    carried no archive at all.
+
+    ## Why not fill it in at flush time
+
+    That was the first plan and it does not survive the case that matters most.
+    `started` is emitted once per session, and a session *resumes* after a crash
+    — deliberately, so a partial install can be finished. So:
+
+        cycle N    started emitted, flushed, acked, dropped from the queue
+        crash
+        cycle N+1  same session resumes; `started` is suppressed by the guard
+                   the install fails, the rollback reports alone
+
+    At that flush the queue holds one event and nothing to borrow from. A robot
+    that crashed and reverted is exactly the robot this has to describe.
+
+    ## So the session remembers it
+
+    Which is a thing the session already is: the server refuses a session used
+    for a second archive, so "this session's archive" is not a new concept, only
+    one the client had not written down. It goes in the session file, which
+    outlives the process for the same reason the session id does.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        ota.clear_pending_install_failure()
+        _as_robot(self)
+        # Through the real allocation, which is what writes the session record.
+        self.session = ota.get_install_session_id()
+
+    def queued(self):
+        return ota._read_install_event_queue()
+
+    def start_tagged(self):
+        ota.record_install_event(
+            "started",
+            archive_id="arch-1",
+            archive_name="raisin-robot",
+            archive_version="1.0.0",
+            platform="ubuntu-24.04-arm64",
+        )
+
+    def test_a_terminal_event_inherits_the_session_archive(self):
+        self.start_tagged()
+
+        ota.record_install_event("succeeded")
+
+        self.assertEqual(self.queued()[-1]["archiveId"], "arch-1")
+
+    def test_it_inherits_the_name_and_version_too(self):
+        # The listing shows these; an id alone still reads as blank on the sheet.
+        self.start_tagged()
+
+        ota.record_install_event("failed", error_code=ota.ERROR_UNKNOWN)
+
+        event = self.queued()[-1]
+        self.assertEqual(event["archiveName"], "raisin-robot")
+        self.assertEqual(event["archiveVersion"], "1.0.0")
+
+    def test_an_event_that_names_its_own_archive_keeps_it(self):
+        self.start_tagged()
+
+        ota.record_install_event("rolled_back", archive_id="arch-2")
+
+        self.assertEqual(self.queued()[-1]["archiveId"], "arch-2")
+
+    def test_it_survives_the_process_that_learned_it(self):
+        """The crash case. A resumed session must still know its archive."""
+        self.start_tagged()
+        # What a restart leaves: nothing in memory, the session file on disk.
+        ota._install_session_id = None
+
+        ota.record_install_event("rolled_back")
+
+        self.assertEqual(self.queued()[-1]["archiveId"], "arch-1")
+
+    def test_a_different_session_inherits_nothing(self):
+        self.start_tagged()
+
+        ota.record_install_event("succeeded", install_session_id="a-second-session")
+
+        self.assertNotIn("archiveId", self.queued()[-1])
+
+    def session_record(self):
+        return json.loads(ota._install_session_path().read_text(encoding="utf-8"))
+
+    def test_it_does_not_evict_the_session_that_can_still_be_resumed(self):
+        """A caller may name a session the record does not.
+
+        Writing a record for it would take away the resume point of the session
+        that is actually running, and a resume point is worth more than a label.
+        """
+        ota.record_install_event(
+            "started", archive_id="arch-1", install_session_id="a-foreign-session"
+        )
+
+        self.assertEqual(self.session_record()["installSessionId"], self.session)
+        self.assertNotIn("archive", self.session_record())
+
+    def test_noting_the_archive_does_not_restart_the_session_clock(self):
+        """`startedAt` is the session's expiry, not a last-touched stamp.
+
+        Refresh it here and an install that keeps reporting keeps its session
+        resumable past the window that decides whether a crashed one may be.
+        """
+        before = self.session_record()["startedAt"]
+
+        self.start_tagged()
+
+        self.assertEqual(self.session_record()["startedAt"], before)
+
+    def test_the_first_archive_a_session_names_stands(self):
+        # The server refuses a session used for a second archive, so a later,
+        # different one is a mistake to preserve the evidence of, not adopt.
+        self.start_tagged()
+
+        ota.record_install_event("progress", archive_id="arch-2")
+
+        self.assertEqual(self.session_record()["archive"]["archiveId"], "arch-1")
+
+    def test_a_start_with_no_archive_does_not_claim_the_session(self):
+        """A refusal opens an attempt with no target, and may still say which
+        platform asked. Letting that partial record stand would lock the real
+        archive out, because the first one a session names is the one that
+        stands.
+        """
+        ota.record_install_event("started", platform="ubuntu-24.04-arm64")
+
+        ota.record_install_event(
+            "failed",
+            error_code=ota.ERROR_UNKNOWN,
+            archive_id="arch-1",
+            archive_name="raisin-robot",
+            archive_version="1.0.0",
+        )
+
+        self.assertEqual(self.session_record()["archive"]["archiveId"], "arch-1")
+
+    def test_a_session_that_never_named_one_reports_without_it(self):
+        # Not a crash and not a guess: a refusal opens an attempt with no target.
+        ota.record_install_event("started")
+
+        ota.record_install_event("failed", error_code=ota.ERROR_UNKNOWN)
+
+        self.assertNotIn("archiveId", self.queued()[-1])
+
+
 # ============================================================================
 # Entry point
 # ============================================================================
