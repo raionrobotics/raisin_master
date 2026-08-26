@@ -167,8 +167,8 @@ class OtaContext:
         `build_type` is checked with it, but for a weaker reason and it is worth
         being clear about the difference: it is *caller*-supplied, not
         server-supplied — a `click.Choice(["debug", "release"])` on the CLI and
-        an environment-settable default in the agent. Nothing in a server
-        response reaches it. So this half is depth on a path component rather
+        an environment-settable default in an unattended caller. Nothing in a
+        server response reaches it. So this half is depth on a path component rather
         than a vector being closed.
         """
         return (
@@ -370,9 +370,9 @@ def _archive_identity_from_tree(
     software never saw it; a tree that came from somewhere else did — a golden
     image cloned across hardware, a disk swap, a workspace restored from another
     robot's backup. An x86 machine holding an arm64 tree reported itself as
-    running the arm64 archive, and the agent comparing that against what it was
-    assigned could conclude it was already converged: install nothing, report
-    nothing, and read as a quiet healthy node forever.
+    running the arm64 archive. Anything reconciling that against what the
+    machine was assigned can conclude it is already up to date: install nothing,
+    report nothing, and stay that way.
 
     The platform is not an argument and does not need to be — the process said
     what it was at startup. This asked the tree instead. `_unusable_packages`
