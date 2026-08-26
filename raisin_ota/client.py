@@ -1743,6 +1743,12 @@ def fetch_robot_desired_state() -> RobotCallResult:
         return RobotCallResult(detail=str(e))
 
 
+#: Reasons that mean nothing was assigned, as opposed to something was and this
+#: machine cannot act on it. Only the second kind is an instruction, and only an
+#: instruction can be misunderstood — so only the second kind refuses.
+_MEANS_NOTHING_ASSIGNED = frozenset({"no_target", "unconfigured"})
+
+
 def _unusable(reason: str) -> None:
     """The server answered and the answer cannot be acted on.
 
@@ -1754,6 +1760,18 @@ def _unusable(reason: str) -> None:
     that drifts.
     """
     raise OtaDesiredStateUnusable(reason)
+
+
+def _give_up_on_the_assignment(unusable: "OtaDesiredStateUnusable"):
+    """Raise, having first written down why — this is the last frame that knows.
+
+    `install_command` catches this one frame up and turns it into a return
+    value, and the terminal event is closed after that. Without the note the
+    attempt reports `unknown` for the one failure whose cause was in hand all
+    along.
+    """
+    note_install_failure("desired_state", ERROR_SERVER_ERROR, str(unusable))
+    raise unusable
 
 
 def _resolve_desired_state(platform_str: str) -> tuple:
@@ -1799,21 +1817,30 @@ def _resolve_desired_state(platform_str: str) -> tuple:
                 "⚠️ The OTA server has an archive assigned to this node but "
                 f"could not resolve it: {detail}."
             )
-        elif reason == "no_target":
+        elif reason in _MEANS_NOTHING_ASSIGNED:
             # Say this plainly: an unassigned node is in a normal state, but
             # the legacy-route warnings that follow read as a broken
             # credential rather than as "nobody told this robot what to run".
-            print(
-                "ℹ️  No archive is assigned to this robot node yet. "
-                "Assign one on the OTA server to install as this robot; "
-                "continuing on the legacy route, which authenticates as a user."
-            )
-        elif reason == "unconfigured":
-            print(
-                "ℹ️  This robot node is not configured on the OTA server yet. "
-                "Register it before assigning an archive; continuing on the "
-                "legacy route, which authenticates as a user."
-            )
+            if reason == "unconfigured":
+                print(
+                    "ℹ️  This robot node is not configured on the OTA server "
+                    "yet. Register it before assigning an archive; continuing "
+                    "on the legacy route, which authenticates as a user."
+                )
+            else:
+                print(
+                    "ℹ️  No archive is assigned to this robot node yet. "
+                    "Assign one on the OTA server to install as this robot; "
+                    "continuing on the legacy route, which authenticates as a "
+                    "user."
+                )
+            # And then do that, which the refusal below would not. Nothing was
+            # assigned, so nothing was misunderstood: the sentence this raises
+            # for is "you were told what to run and cannot use the answer", and
+            # a node the fleet has no plan for was told nothing. Refusing here
+            # made a normal state end the install as a reported failure, and
+            # said the opposite of the line above it while doing so.
+            return (False, None, None, None)
         else:
             # The server has more reasons than this client knows, and it gains
             # them faster than a fleet updates. A reason we cannot interpret is
@@ -1823,7 +1850,9 @@ def _resolve_desired_state(platform_str: str) -> tuple:
             print(
                 f"ℹ️  The OTA server reports no target for this node "
                 f"(reason: {reason or 'none given'}), which this client does "
-                f"not recognise. Continuing on the legacy route."
+                f"not recognise. Nothing will be installed as this robot; a "
+                f"user credential, if this machine has one, continues on the "
+                f"legacy route."
             )
         # After the branch, not before it: each line above is what a caller with
         # a user credential does next, and it is accurate for them. The refusal
@@ -2778,6 +2807,23 @@ def download_package(
     return result
 
 
+def _drop_empty_parents(directory: Path, stop_at: Path) -> None:
+    """Walk back up removing what is now empty, and stop at the first thing that is not.
+
+    Removing a build leaves the platform components above it holding nothing.
+    Nothing here reads those — every reader globs through to the build type —
+    but a package directory that survives with no build under it says the
+    package is installed to anyone who looks, and the shortest way to keep the
+    tree honest is not to leave it.
+    """
+    while directory != stop_at and stop_at in directory.parents:
+        try:
+            directory.rmdir()
+        except OSError:
+            return
+        directory = directory.parent
+
+
 def _prune_packages_the_archive_dropped(
     staging: Path, keep: set, build_type: str
 ) -> None:
@@ -2797,6 +2843,13 @@ def _prune_packages_the_archive_dropped(
     for the same reason: not knowing where a directory came from is not grounds
     for deleting it.
 
+    The build, not the package directory above it. `package_dir` ends in the
+    build type and `install.py` gives debug and release the same install base,
+    so a package directory holds both — and the platform components in between
+    mean it can also hold a tree carried over from another machine. This archive
+    speaks for one build on one platform; the rest of that directory is not its
+    to drop.
+
     Staging only, so nothing the machine is running changes — a failure after
     this still commits nothing.
     """
@@ -2804,15 +2857,16 @@ def _prune_packages_the_archive_dropped(
     for entry in sorted(staging.iterdir()):
         if not entry.is_dir() or entry.name in keep:
             continue
-        metadata_path = (
-            _ctx().package_dir(staging, entry.name, build_type) / _INSTALL_METADATA_FILE
-        )
+        installed = _ctx().package_dir(staging, entry.name, build_type)
         try:
-            recorded = json.loads(metadata_path.read_text(encoding="utf-8"))
+            recorded = json.loads(
+                (installed / _INSTALL_METADATA_FILE).read_text(encoding="utf-8")
+            )
         except (OSError, ValueError):
             continue
         if isinstance(recorded, dict) and recorded.get("source") == "archive":
-            shutil.rmtree(entry, ignore_errors=True)
+            shutil.rmtree(installed, ignore_errors=True)
+            _drop_empty_parents(installed.parent, stop_at=staging)
             dropped.append(entry.name)
 
     if dropped:
@@ -2902,7 +2956,7 @@ def download_all_from_archive(
             # Return empty so install.py falls back to GitHub releases
             # for each repo declared in configuration_setting.yaml.
             if unusable_desired_state:
-                raise unusable_desired_state
+                _give_up_on_the_assignment(unusable_desired_state)
             print(
                 f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
                 f"with tag '{tag}' or 'stable' — falling back to GitHub "
@@ -2917,7 +2971,7 @@ def download_all_from_archive(
         # this machine was told to run and why that could not happen, where the
         # line below names an archive nobody chose for it.
         if unusable_desired_state:
-            raise unusable_desired_state
+            _give_up_on_the_assignment(unusable_desired_state)
         print(f"⚠️ No archive found for '{archive_name}' on {platform_str}")
         return {}
 

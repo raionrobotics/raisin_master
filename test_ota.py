@@ -1329,6 +1329,126 @@ class TestHaltStopsTheInstall(unittest.TestCase):
         mock_download.assert_not_called()
 
 
+class TestAnUnusableAssignmentReachesTheOperator(unittest.TestCase):
+    """Raising it was half the job; nothing caught it.
+
+    Review finding on this branch. `install_command` catches `OtaInstallHalted`
+    and `InstallTreeUnusable`; the new one went straight through it and out of
+    `install_cli_command`, which is where the attempt is closed. So instead of
+    the banner a halt gets, an unusable assignment produced a traceback — and
+    `report_install_outcome`, `flush_install_events` and
+    `flush_pending_snapshot_reports` all sit after the call that raised.
+
+    The failure the fleet most needs told is the one that told nobody.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+
+    def run_install(self, mock_config):
+        mock_config.return_value = (
+            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
+            {"org": "ghtoken"},
+            "devel",
+            None,
+            [],
+        )
+        from commands.install import install_command
+
+        with (
+            patch(
+                "commands.install.download_all_from_archive",
+                side_effect=ota.OtaDesiredStateUnusable(
+                    "the OTA server assigned an archive for 'ubuntu-22.04-x86_64' "
+                    "but this node is 'ubuntu-24.04-arm64'"
+                ),
+            ),
+            patch("raisin_ota.client.download_package") as self.download,
+            patch("commands.install.requests.Session"),
+            patch("builtins.print") as self.printed,
+        ):
+            return install_command([], "release")
+
+    @patch("commands.install.load_configuration")
+    def test_it_is_a_failed_install_rather_than_a_traceback(self, mock_config):
+        self.assertFalse(self.run_install(mock_config))
+
+    @patch("commands.install.load_configuration")
+    def test_it_does_not_send_the_robot_somewhere_else(self, mock_config):
+        # The whole argument for raising: what it was assigned is unusable, so
+        # installing something else is not a recovery.
+        self.run_install(mock_config)
+
+        self.download.assert_not_called()
+
+    @patch("commands.install.load_configuration")
+    def test_the_reason_is_on_screen(self, mock_config):
+        """It is the only place the operator learns which assignment, and why."""
+        self.run_install(mock_config)
+
+        said = " ".join(str(call) for call in self.printed.call_args_list)
+        self.assertIn("ubuntu-22.04-x86_64", said)
+
+
+class TestTheFleetIsToldWhyTheAssignmentWasUnusable(unittest.TestCase):
+    """A terminal event that says `unknown` is a failure nobody can act on.
+
+    Giving up on the assignment is the moment the reason is known and the last
+    moment it exists — the exception is caught one frame up and turned into a
+    return value. Noted here, it reaches the terminal event the CLI closes with.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota.clear_pending_install_failure()
+        self.addCleanup(ota.clear_pending_install_failure)
+
+    def give_up(self, **kwargs):
+        with tempfile.TemporaryDirectory() as tmpdir, _robot_identity():
+            with contextlib.suppress(ota.OtaDesiredStateUnusable):
+                ota.download_all_from_archive("release", Path(tmpdir), **kwargs)
+
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_the_route_that_pinned_nothing_notes_it(self, mock_desired, _mock_manifest):
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+
+        self.give_up(tag=None)
+
+        stage, code, message = ota._pending_install_failure
+        self.assertEqual(stage, "desired_state")
+        self.assertIn("assigned elsewhere", message)
+
+    @patch("raisin_ota.client._fetch_archive_with_stable_fallback", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_and_so_does_the_tag_route(self, mock_desired, _mock_tag):
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+
+        self.give_up()
+
+        self.assertIn("assigned elsewhere", ota._pending_install_failure[2])
+
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_an_earlier_cause_still_outranks_it(self, mock_desired):
+        """`note_install_failure` keeps the first, and this is the last thing to run."""
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+        ota.note_install_failure("download", ota.ERROR_NETWORK, "the download failed")
+
+        self.give_up()
+
+        self.assertEqual(ota._pending_install_failure[0], "download")
+
+
 class TestUnusableTreeStopsTheInstall(unittest.TestCase):
     """A tree that cannot be prepared is not "OTA unavailable".
 
@@ -4895,9 +5015,22 @@ class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
                 "platform": "ubuntu-22.04-x86_64",
             },
         },
+        "a target with no version": {
+            "halt": False,
+            "reason": "node_pin",
+            "target": {"name": "raisin-robot", "platform": "ubuntu-24.04-arm64"},
+        },
+        "a reason this client does not know": {"halt": False, "reason": "quarantined"},
+    }
+
+    #: Answers that are not instructions at all. Review finding on this branch:
+    #: these two print "continuing on the legacy route" and then refused, so the
+    #: output said one thing and the code did the other — and an unassigned
+    #: robot, which the code below calls a normal state in so many words, ended
+    #: an install as a reported failure.
+    ABSENCES = {
         "no target": {"halt": False, "reason": "no_target"},
         "unconfigured": {"halt": False, "reason": "unconfigured"},
-        "a reason this client does not know": {"halt": False, "reason": "quarantined"},
     }
 
     def resolve(self, payload, as_robot=True, platform="ubuntu-24.04-arm64"):
@@ -4923,6 +5056,33 @@ class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
             with self.subTest(description):
                 with self.assertRaises(ota.OtaDesiredStateUnusable):
                     self.resolve(payload)
+
+    def test_but_nothing_assigned_is_not_one_of_them(self):
+        """Nobody was told anything, so nothing was misunderstood.
+
+        The exception says "told what to run and cannot use the answer". These
+        two are the other case, and treating them as instructions turned a node
+        the fleet has no plan for into a failed install.
+        """
+        for description, payload in self.ABSENCES.items():
+            with self.subTest(description):
+                self.assertEqual(self.resolve(payload), (False, None, None, None))
+
+    @patch("raisin_ota.client._fetch_archive_with_stable_fallback", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_an_unassigned_node_can_still_reach_the_fallback(
+        self, mock_desired, _mock_tag
+    ):
+        """Which is what the line it prints promises, and what it did before.
+
+        `{}` is how this tells `install.py` to try GitHub releases per package.
+        A refusal here is raised ahead of that return, so refusing for an
+        absence did not just mislabel the state — it removed the route.
+        """
+        mock_desired.return_value = (False, None, None, None)
+
+        with tempfile.TemporaryDirectory() as tmpdir, _robot_identity():
+            self.assertEqual(ota.download_all_from_archive("release", Path(tmpdir)), {})
 
     def test_the_refusal_carries_why(self):
         """It becomes the failure reason the fleet is told, so it has to say something."""
@@ -5189,6 +5349,92 @@ class TestAPackageDroppedFromAnArchiveGoesAway(unittest.TestCase):
             self.install_archive_holding(tmpdir, ["pkg1"])
 
             self.assertEqual(self.live_packages(release), ["mine", "pkg1"])
+
+
+class TestPruningStaysInsideTheBuildItIsPruning(unittest.TestCase):
+    """A package directory is shared; only the leaf under it belongs to a build.
+
+    `package_dir` puts the build type last — `<pkg>/<os>/<ver>/<arch>/<type>` —
+    and `install.py` hands debug and release the same install base. So one
+    package directory holds both builds, and removing the directory removes the
+    build nobody said anything about.
+
+    Review finding on this branch. The same shape covers the platform
+    components: a tree carried over from another machine sits under the same
+    package name and is not this archive's to delete either.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        self.staging = Path(self._tmp.name) / "staging"
+        self.staging.mkdir(parents=True)
+
+    def install(self, package, build_type="release", where=None):
+        directory = where or ota._ctx().package_dir(self.staging, package, build_type)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / ota._INSTALL_METADATA_FILE).write_text(
+            json.dumps({"source": "archive", "packageName": package}),
+            encoding="utf-8",
+        )
+        return directory
+
+    def test_the_other_build_of_a_dropped_package_stays(self):
+        self.install("pkg2", "release")
+        debug = self.install("pkg2", "debug")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "debug")
+
+        self.assertFalse(debug.exists())
+        self.assertTrue(
+            ota._ctx().package_dir(self.staging, "pkg2", "release").exists()
+        )
+
+    def test_a_tree_from_another_platform_stays(self):
+        foreign = self.staging / "pkg2" / "ubuntu" / "22.04" / "arm64" / "release"
+        self.install("pkg2", "release", where=foreign)
+        self.install("pkg2", "release")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "release")
+
+        self.assertTrue(foreign.exists())
+
+    def test_the_build_that_dropped_it_still_loses_it(self):
+        """The point of the function, unchanged."""
+        self.install("pkg2", "release")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "release")
+
+        self.assertFalse(
+            ota._ctx().package_dir(self.staging, "pkg2", "release").exists()
+        )
+
+    def test_nothing_left_under_it_takes_the_package_directory_too(self):
+        """Or a package with no build under it still reads as installed."""
+        self.install("pkg2", "release")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "release")
+
+        self.assertFalse((self.staging / "pkg2").exists())
+
+    def test_but_only_up_to_the_tree_it_was_given(self):
+        self.install("pkg2", "release")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "release")
+
+        self.assertTrue(self.staging.exists())
+
+    def test_a_package_directory_still_holding_a_build_stays(self):
+        self.install("pkg2", "release")
+        self.install("pkg2", "debug")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "debug")
+
+        self.assertTrue((self.staging / "pkg2").exists())
 
 
 class TestARefusedCredentialIsNotSilence(unittest.TestCase):
