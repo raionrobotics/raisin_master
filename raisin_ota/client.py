@@ -68,20 +68,49 @@ _TOKEN_CACHE_FILE = ".ota_token_cache.json"
 # Per-install metadata file written after OTA extraction
 _INSTALL_METADATA_FILE = "ota-install.json"
 
-# Correlation id for one install, persisted so a crashed run resumes the same
-# session rather than inventing a new one.
-_INSTALL_SESSION_FILE = ".ota-session.json"
-_INSTALL_SESSION_TTL_SECONDS = 24 * 60 * 60
+# Everything this client remembers between runs, in one place that belongs to
+# it. It used to live beside the install tree, which survived a build by being
+# the tree's own directory rather than by anyone deciding robot state should —
+# and before that inside `install/`, which a build deletes, so a robot that was
+# offline when an install failed lost what it was going to say.
+#
+# The layout is the concurrency design, not decoration. The agent flushes on
+# every poll while an engineer on the robot runs `raisin install` in a shell, so
+# two processes write here at once, and **every write below is a create that
+# fails if the name exists, a rename over one name, or an unlink**. Nothing is
+# ever read, changed and written back, which is the only shape that loses one
+# writer's work to the other's.
+#
+#   .ota/
+#     session/
+#       current -> <session-id>   which attempt is open
+#       <session-id>/
+#         opened-at               when, for the resume window below
+#         archive.json            which archive; created once, so first wins
+#         said-started            this attempt has reported its start
+#         said-terminal           ... and its outcome
+#     events/
+#       <event-id>.json           one event still owed to the server
+_STATE_DIR = ".ota"
+_SESSIONS_DIR = "session"
+_EVENTS_DIR = "events"
+_CURRENT_SESSION = "current"
+_SESSION_OPENED_AT = "opened-at"
+_SESSION_ARCHIVE_FILE = "archive.json"
+_SESSION_SAID = {"started": "said-started", "terminal": "said-terminal"}
 
-# Install events are buffered on disk so an offline robot still reports what
-# happened once it can reach the server again.
-_INSTALL_EVENT_QUEUE_FILE = ".ota-install-events.jsonl"
-_INSTALL_EVENT_STATE_FILE = ".ota-install-events.state.json"
+# Half-written files, skipped by every reader. A create is a write to one of
+# these followed by a link or a rename onto the real name, so no reader ever
+# sees a partial one under a name it looks for.
+_TEMP_PREFIX = ".tmp-"
+
+_INSTALL_SESSION_TTL_SECONDS = 24 * 60 * 60
 _INSTALL_EVENT_BATCH_LIMIT = 100
 
 # An offline robot buffers indefinitely, so the queue needs a ceiling. Newest
 # events are kept: they describe the state the fleet still needs to know about.
 _MAX_BUFFERED_INSTALL_EVENTS = 1000
+_said_the_buffer_is_full = False
 _TERMINAL_EVENT_TYPES = frozenset({"succeeded", "failed", "rolled_back"})
 
 # First failure of the current attempt. A terminal event means the attempt
@@ -273,68 +302,191 @@ def get_ssh_key_path() -> Path:
     return ssh_dir / "id_ed25519"
 
 
-def _robot_state_path(filename: str) -> Path:
-    """Robot state that has to outlive a build.
+def _state_dir() -> Path:
+    return _ctx().workspace / _STATE_DIR
 
-    `<workspace>/install` is deleted and recreated by every full build
-    (`setup.py`), so anything kept there is gone by the next run. That is fatal
-    for the event queue in particular: buffering exists so a robot that was
-    offline when an install failed still reports on a later run, and a build in
-    between must not erase what it was going to say. `release/` already holds
-    the install tree's own state and no build removes it.
 
-    A file left at the old location is carried over rather than abandoned: an
-    upgrade must not throw away reports the previous client had buffered.
+def _sessions_dir() -> Path:
+    return _state_dir() / _SESSIONS_DIR
+
+
+def _events_dir() -> Path:
+    return _state_dir() / _EVENTS_DIR
+
+
+def _current_session_link() -> Path:
+    return _sessions_dir() / _CURRENT_SESSION
+
+
+def _session_dir(session_id: str) -> Path:
+    # A session id reaches here from a caller as well as from `uuid4`, and it
+    # becomes a directory name. `safe_component` is where that is refused.
+    return _sessions_dir() / safe_component(session_id, "install session id")
+
+
+def _create_once(path: Path, text: str = "") -> bool:
+    """Create `path` holding `text`, or leave what is there. True if we made it.
+
+    Written to a temporary name and linked into place, so the name either does
+    not exist or holds the whole content — a reader never catches it half
+    written, and a second caller never overwrites the first. Two facts in one
+    operation: whoever gets True is the one that claimed the name, which is how
+    "only the first archive counts" and "report `started` once" are decided
+    here without anyone reading first and writing after.
     """
-    current = _ctx().workspace / "release" / filename
-    legacy = _ctx().workspace / "install" / filename
-    if legacy.exists() and not current.exists():
+    temporary = path.parent / f"{_TEMP_PREFIX}{uuid.uuid4().hex}"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(text, encoding="utf-8")
+        os.link(temporary, path)
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        # Not every mount can link, and the claim is what decides whether this
+        # robot reports at all — a workspace on the wrong filesystem would
+        # otherwise be a robot that silently never says a word. Claiming the
+        # name is the part that has to survive; whole-or-nothing is what is
+        # given up, and what a reader can then catch is an empty file, which
+        # every reader here already treats as nothing.
+        return _create_once_unlinked(path, text)
+    finally:
         try:
-            current.parent.mkdir(parents=True, exist_ok=True)
-            legacy.replace(current)
+            temporary.unlink()
         except OSError:
-            # Keep reading the old copy rather than losing it.
-            return legacy
-    return current
+            pass
 
 
-def _install_session_path() -> Path:
-    return _robot_state_path(_INSTALL_SESSION_FILE)
+def _create_once_unlinked(path: Path, text: str) -> bool:
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return True
+    except OSError:
+        return False
+
+
+def _replace_with(path: Path, text: str) -> bool:
+    """Put `text` at `path`, whatever was there. Whole file or nothing."""
+    temporary = path.parent / f"{_TEMP_PREFIX}{uuid.uuid4().hex}"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, path)
+        return True
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def _read_install_session() -> Optional[str]:
-    """Recover the session an interrupted install was using, if still current."""
-    try:
-        data = json.loads(_install_session_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
+    """The session an interrupted install was using, if it can still be resumed.
 
-    session_id = data.get("installSessionId")
-    started_at = data.get("startedAt")
-    if not isinstance(session_id, str) or not session_id:
+    A retry after a crash has to keep the same id: the server pins download
+    authorization to what desired state resolved at session start, and the
+    partial files on disk belong to that session. Past the window it is not a
+    resume any more, and a stale id is worse than a new one — the server pins a
+    session to one archive and refuses the rest.
+    """
+    try:
+        session_id = os.readlink(_current_session_link())
+    except OSError:
         return None
-    if not isinstance(started_at, (int, float)):
+    if not session_id or "/" in session_id:
         return None
-    if time.time() - started_at > _INSTALL_SESSION_TTL_SECONDS:
+    opened_at = _session_opened_at(session_id)
+    if opened_at is None:
+        return None
+    if time.time() - opened_at > _INSTALL_SESSION_TTL_SECONDS:
         return None
     return session_id
 
 
-def _persist_install_session(
-    session_id: str, archive: Optional[dict] = None, started_at: Optional[float] = None
-) -> None:
-    path = _install_session_path()
-    record = {
-        "installSessionId": session_id,
-        "startedAt": time.time() if started_at is None else started_at,
-    }
-    if archive:
-        record["archive"] = archive
+def _session_opened_at(session_id: str) -> Optional[float]:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record), encoding="utf-8")
+        raw = (_session_dir(session_id) / _SESSION_OPENED_AT).read_text(
+            encoding="utf-8"
+        )
+        return float(raw.strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _open_install_session() -> str:
+    """Start a session and make it the current one."""
+    session_id = str(uuid.uuid4())
+    _create_once(_session_dir(session_id) / _SESSION_OPENED_AT, repr(time.time()))
+    _sweep_expired_sessions()
+    _point_current_session_at(session_id)
+    return session_id
+
+
+def _point_current_session_at(session_id: str) -> None:
+    link = _current_session_link()
+    temporary = link.parent / f"{_TEMP_PREFIX}{uuid.uuid4().hex}"
+    try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(session_id, temporary)
+        os.replace(temporary, link)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def _sweep_expired_sessions() -> None:
+    """Remove sessions too old to resume, and anything left half written.
+
+    A session retired properly is removed by `clear_install_session`. One that
+    dies by the window instead — a crash mid-install, then more than a day
+    before the next run — is retired by nothing, and its directory would sit
+    there for the life of the machine. A temporary is the same story a level
+    down: every create here writes one and renames it, so a crash between the
+    two leaves it, and nothing else would ever take it away.
+
+    Swept when a session is opened, which is once per install, rather than on
+    every event. A session directory whose `opened-at` cannot be read is left
+    alone: most likely another process is creating it right now, and not
+    knowing how old something is has never been grounds for deleting it. A
+    temporary is dated by the filesystem instead, so it has no such excuse —
+    but it is given the same window, because a young one may be in use.
+    """
+    now = time.time()
+    for directory in (_sessions_dir(), _events_dir()):
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith(_TEMP_PREFIX):
+                _remove_if_older_than(entry, now - _INSTALL_SESSION_TTL_SECONDS)
+            elif directory == _sessions_dir() and entry.name != _CURRENT_SESSION:
+                opened_at = _session_opened_at(entry.name)
+                if opened_at is not None and now - opened_at > (
+                    _INSTALL_SESSION_TTL_SECONDS
+                ):
+                    shutil.rmtree(entry, ignore_errors=True)
+
+
+def _remove_if_older_than(path: Path, cutoff: float) -> None:
+    try:
+        if path.stat().st_mtime < cutoff:
+            path.unlink()
     except OSError:
         pass
 
@@ -347,42 +499,22 @@ def _session_archive(session_id: str) -> Optional[dict]:
     install can be finished, and the attempt that resumes has to report against
     the same archive.
     """
-    try:
-        data = json.loads(_install_session_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict) or data.get("installSessionId") != session_id:
-        return None
-    archive = data.get("archive")
+    archive = _read_json(_session_dir(session_id) / _SESSION_ARCHIVE_FILE)
     return archive if isinstance(archive, dict) else None
 
 
 def _remember_session_archive(session_id: str, archive: dict) -> None:
-    """Note which archive this session is for, on the session's own record.
+    """Note which archive this session is for. The first one to say wins.
 
-    Only ever an update to the record already naming this session — never
-    written from nothing. A caller may pass a session id the file does not
-    name, and creating a record for it would evict a live session's resume
-    point, which is worth more than an archive label.
+    The server refuses a session used for a second archive, so a session has
+    exactly one — and a later, different answer is a mistake to keep the
+    evidence of rather than adopt. `_create_once` is that rule: the name is
+    claimed or it is not, with no window between asking and writing.
 
-    `startedAt` is carried over unchanged: it is the session's expiry, and
-    refreshing it here would let an install that keeps reporting outlive the
-    window that decides whether a crashed one may still be resumed.
+    Inside the session's own directory, so this cannot reach another session's
+    record however it is called.
     """
-    try:
-        data = json.loads(_install_session_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if not isinstance(data, dict) or data.get("installSessionId") != session_id:
-        return
-    if isinstance(data.get("archive"), dict):
-        return
-    started_at = data.get("startedAt")
-    _persist_install_session(
-        session_id,
-        archive=archive,
-        started_at=started_at if isinstance(started_at, (int, float)) else None,
-    )
+    _create_once(_session_dir(session_id) / _SESSION_ARCHIVE_FILE, json.dumps(archive))
 
 
 def get_install_session_id() -> str:
@@ -396,10 +528,7 @@ def get_install_session_id() -> str:
     if _install_session_id:
         return _install_session_id
 
-    resumed = _read_install_session()
-    _install_session_id = resumed or str(uuid.uuid4())
-    if not resumed:
-        _persist_install_session(_install_session_id)
+    _install_session_id = _read_install_session() or _open_install_session()
     return _install_session_id
 
 
@@ -519,112 +648,139 @@ def _utc_now_iso() -> str:
     return f"{stamp}.{int(now % 1 * 1000):03d}Z"
 
 
-def _install_event_queue_path() -> Path:
-    return _robot_state_path(_INSTALL_EVENT_QUEUE_FILE)
+def _install_event_path(event_id: str) -> Path:
+    """Where a new event goes.
+
+    The name carries the order and the identity, in that order, because a
+    directory has neither. `occurredAt` cannot be the key: it is milliseconds,
+    and the events of one attempt tie on it — sorting on a tie put a terminal
+    event before the `started` it followed, and made "discard the oldest" throw
+    away the newest. Nanoseconds do not tie within a process, and between two
+    processes on one robot the order was never anyone's to define.
+    """
+    return (
+        _events_dir()
+        / f"{time.time_ns():020d}-{safe_component(event_id, 'event id')}.json"
+    )
 
 
-def _install_event_state_path() -> Path:
-    return _robot_state_path(_INSTALL_EVENT_STATE_FILE)
+def _buffered_events() -> list:
+    """(path, event) for everything still owed to the server, oldest first."""
+    try:
+        paths = sorted(_events_dir().iterdir())
+    except OSError:
+        return []
+
+    found = []
+    for path in paths:
+        if path.name.startswith(_TEMP_PREFIX):
+            continue
+        event = _read_json(path)
+        # A file that cannot be read is skipped rather than removed: it is
+        # something this robot was going to say, and a parse failure is not
+        # proof it is worthless.
+        if isinstance(event, dict) and event.get("eventId"):
+            found.append((path, event))
+    return found
+
+
+def _count_buffered_events() -> int:
+    """How many events are owed, without reading any of them."""
+    try:
+        return sum(
+            1
+            for path in _events_dir().iterdir()
+            if not path.name.startswith(_TEMP_PREFIX)
+        )
+    except OSError:
+        return 0
 
 
 def _read_install_event_queue() -> list:
-    """Read the buffered events, skipping any line corruption."""
+    return [event for _, event in _buffered_events()]
+
+
+def _drop_install_event(path: Path) -> None:
+    """Forget one event, because the server has it now."""
     try:
-        raw = _install_event_queue_path().read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return []
-
-    events = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
+        path.unlink()
+    except OSError:
+        pass
 
 
-def _write_install_event_queue(events: list) -> None:
-    path = _install_event_queue_path()
+def _trim_install_events() -> None:
+    """Hold the buffer to its ceiling, keeping the newest.
+
+    An offline robot buffers until it can talk, so there has to be a ceiling,
+    and the newest events are the ones that describe where it actually ended
+    up. Counted before anything is read — the count is a directory listing and
+    the sweep is not, and on a robot that is under the ceiling, which is all of
+    them nearly all of the time, that is all this costs.
+
+    Two processes trimming at once can take one file more or fewer than either
+    intended. The ceiling is a bound on growth, not a number anything reads.
+    """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
-    except OSError as e:
-        print(f"⚠️ Failed to write OTA install-event queue: {e}")
+        names = [
+            path
+            for path in _events_dir().iterdir()
+            if not path.name.startswith(_TEMP_PREFIX)
+        ]
+    except OSError:
+        return
+    if len(names) <= _MAX_BUFFERED_INSTALL_EVENTS:
+        return
+
+    global _said_the_buffer_is_full
+    buffered = _buffered_events()
+    dropped = len(buffered) - _MAX_BUFFERED_INSTALL_EVENTS
+    if dropped <= 0:
+        return
+    for path, _ in buffered[:dropped]:
+        _drop_install_event(path)
+    # Once per run. A robot sitting at the ceiling drops one on every event it
+    # records, and a warning repeated a thousand times is not a louder warning.
+    if not _said_the_buffer_is_full:
+        _said_the_buffer_is_full = True
+        print(
+            "⚠️ OTA install-event buffer is full; discarding the oldest to "
+            "keep the newest."
+        )
 
 
-def _append_install_event(event: dict) -> None:
-    path = _install_event_queue_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
-    except OSError as e:
-        print(f"⚠️ Failed to buffer OTA install event: {e}")
+def _append_install_event(event: dict) -> bool:
+    """Owe the server one more event.
 
-
-def _read_install_event_state() -> dict:
-    try:
-        data = json.loads(_install_event_state_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    Its own file, named for the event, so recording one never reads or rewrites
+    what another writer put there — and so acknowledging one is an unlink of
+    that name and nothing else.
+    """
+    if not _replace_with(_install_event_path(event["eventId"]), json.dumps(event)):
+        print("⚠️ Failed to buffer OTA install event")
+        return False
+    _trim_install_events()
+    return True
 
 
 def _install_event_marker_seen(session_id: str, marker: str) -> bool:
-    return bool(_read_install_event_state().get(session_id, {}).get(marker))
+    return (_session_dir(session_id) / _SESSION_SAID[marker]).exists()
 
 
-_SEEN_AT = "seenAt"
+def _claim_install_event(session_id: str, marker: str) -> bool:
+    """Claim the right to report this once, and say whether we got it.
 
-
-def _prune_retired_sessions(state: dict, keep: str, now: float) -> dict:
-    """Drop guards for sessions that can no longer be resumed.
-
-    `clear_install_session` removes the session it retires, but a session that
-    dies by TTL instead — a crash mid-install, then more than a day before the
-    next run — is retired by nothing. Its guards stayed for the life of the
-    machine, in a file read on every event.
-
-    Pruned on write, not on read: the guard is read far more often than it is
-    written, and pruning on read would have a read that changes nothing rewrite
-    the file.
-
-    An entry from before this existed carries no time. It is stamped rather than
-    dropped: dropping it could re-emit `started` for a session still inside its
-    TTL, which is the duplicate this guard exists to prevent. It ages out on the
-    same clock as everything else, one TTL later.
+    Asking and marking used to be two steps with the event written between
+    them, which is a window even inside one process — a crash after the send
+    and before the mark re-reported on resume, which is the duplicate this
+    exists to prevent. Creating the name is both questions answered at once.
     """
-    pruned = {}
-    for session, markers in state.items():
-        if not isinstance(markers, dict):
-            continue
-        seen_at = markers.get(_SEEN_AT)
-        if not isinstance(seen_at, (int, float)):
-            markers = {**markers, _SEEN_AT: now}
-        elif session != keep and now - seen_at > _INSTALL_SESSION_TTL_SECONDS:
-            continue
-        pruned[session] = markers
-    return pruned
+    return _create_once(_session_dir(session_id) / _SESSION_SAID[marker])
 
 
-def _mark_install_event(session_id: str, marker: str) -> None:
-    """Persist the marker so a restarted process does not re-emit the event."""
-    # One reading of the clock, shared by the prune and the stamp, so an entry
-    # cannot be stamped later than the sweep that decided to keep it.
-    now = time.time()
-    state = _prune_retired_sessions(_read_install_event_state(), session_id, now)
-    entry = state.setdefault(session_id, {})
-    entry[marker] = True
-    entry.setdefault(_SEEN_AT, now)
-    path = _install_event_state_path()
+def _release_install_event(session_id: str, marker: str) -> None:
+    """Give the claim back, because the event it was for never got written."""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state), encoding="utf-8")
+        (_session_dir(session_id) / _SESSION_SAID[marker]).unlink()
     except OSError:
         pass
 
@@ -720,9 +876,8 @@ def record_install_event(
 
     session_id = install_session_id or get_install_session_id()
     marker = "terminal" if event_type in _TERMINAL_EVENT_TYPES else event_type
-    if marker in ("started", "terminal") and _install_event_marker_seen(
-        session_id, marker
-    ):
+    once = marker in ("started", "terminal")
+    if once and not _claim_install_event(session_id, marker):
         return None
 
     # An event that does not name its archive is invisible to anything that
@@ -767,9 +922,14 @@ def record_install_event(
         if value is not None:
             event[key] = value
 
-    _append_install_event(event)
-    if marker in ("started", "terminal"):
-        _mark_install_event(session_id, marker)
+    if not _append_install_event(event):
+        # The claim is taken before the event is written, so that a crash
+        # between the two cannot report twice. It has to be given back when the
+        # write is the thing that failed, or the attempt goes on to say nothing
+        # at all — a claim is a promise to report, not permission to.
+        if once:
+            _release_install_event(session_id, marker)
+        return None
     return event
 
 
@@ -828,7 +988,7 @@ def flush_install_events() -> FlushResult:
     and the reason it is not travels on the result: a caller that flushes on a
     schedule has to know whether to back off, stop, or simply try again.
     """
-    remaining = _read_install_event_queue()
+    remaining = _buffered_events()
     if not remaining:
         return FlushResult(drained=True)
 
@@ -847,7 +1007,7 @@ def flush_install_events() -> FlushResult:
 
     failure = {}
     while remaining:
-        batch = remaining[:_INSTALL_EVENT_BATCH_LIMIT]
+        batch = [event for _, event in remaining[:_INSTALL_EVENT_BATCH_LIMIT]]
         try:
             resp = requests.post(
                 url, headers=request_headers, json={"events": batch}, timeout=15
@@ -889,7 +1049,16 @@ def flush_install_events() -> FlushResult:
         # dropped — and testing the response instead reposts the same batch
         # forever.
         before = len(remaining)
-        remaining = [e for e in remaining if e.get("eventId") not in acked]
+        # Forgotten one at a time, as each is acknowledged. Not by writing back
+        # what is left: the list here was read before the request went out, and
+        # writing it back would erase whatever another process recorded while
+        # this one waited on the network — which is a terminal event, most of
+        # the time, and an attempt with no terminal event stays in progress on
+        # the server forever.
+        for path, event in remaining:
+            if event.get("eventId") in acked:
+                _drop_install_event(path)
+        remaining = [pair for pair in remaining if pair[1].get("eventId") not in acked]
         if len(remaining) == before:
             print(
                 "⚠️ OTA server acknowledged none of the install events in this "
@@ -897,43 +1066,29 @@ def flush_install_events() -> FlushResult:
             )
             break
 
-    dropped = len(remaining) - _MAX_BUFFERED_INSTALL_EVENTS
-    if dropped > 0:
-        # Keep the newest: they describe where the robot actually ended up.
-        remaining = remaining[-_MAX_BUFFERED_INSTALL_EVENTS:]
-        print(
-            f"⚠️ OTA install-event buffer is full; discarded {dropped} of the "
-            "oldest event(s)."
-        )
-
-    _write_install_event_queue(remaining)
-    if remaining:
-        print(f"ℹ️  {len(remaining)} OTA install event(s) buffered for a later run.")
-    return FlushResult(drained=not remaining, remaining=len(remaining), **failure)
+    # Asked again rather than counted from the list above, for the same reason:
+    # what is owed now includes anything recorded while this was running.
+    # Counted rather than read: this is a number, and reading a full buffer to
+    # produce it costs ten times the listing on every poll of an offline robot.
+    owed = _count_buffered_events()
+    if owed:
+        print(f"ℹ️  {owed} OTA install event(s) buffered for a later run.")
+    return FlushResult(drained=not owed, remaining=owed, **failure)
 
 
 def clear_install_session() -> None:
     """Retire the session so the next install starts a fresh one."""
     global _install_session_id
     clear_pending_install_failure()
-    retired = _install_session_id
+    retired = _install_session_id or _read_install_session()
     _install_session_id = None
+    # The pointer first: nothing may follow it into a directory being removed.
     try:
-        _install_session_path().unlink()
+        _current_session_link().unlink()
     except OSError:
         pass
-
-    # Drop the once-per-session guards too, or the state file grows for the
-    # life of the robot.
-    if not retired:
-        return
-    state = _read_install_event_state()
-    if state.pop(retired, None) is None:
-        return
-    try:
-        _install_event_state_path().write_text(json.dumps(state), encoding="utf-8")
-    except OSError:
-        pass
+    if retired:
+        shutil.rmtree(_session_dir(retired), ignore_errors=True)
 
 
 def archive_is_pinned(

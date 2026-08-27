@@ -1873,17 +1873,6 @@ class TestInstallEventQueue(unittest.TestCase):
 
         self.assertEqual(len(self._queued()), 1)
 
-    def test_a_buffer_left_at_the_old_location_is_carried_over(self):
-        """An upgrade must not throw away what the previous client buffered."""
-        legacy = Path(g.script_directory) / "install" / ota._INSTALL_EVENT_QUEUE_FILE
-        legacy.parent.mkdir(parents=True, exist_ok=True)
-        legacy.write_text(
-            json.dumps({"eventId": "old-1", "eventType": "started"}) + "\n",
-            encoding="utf-8",
-        )
-
-        self.assertEqual([e["eventId"] for e in self._queued()], ["old-1"])
-
     @patch("raisin_ota.client.requests.post")
     def test_acks_for_events_we_never_sent_do_not_spin(self, mock_post):
         """The guard must watch our queue, not whether the response was empty."""
@@ -2081,7 +2070,7 @@ class TestInstallEventQueue(unittest.TestCase):
             self.assertIsNone(ota.report_install_outcome(True))
 
         self.assertEqual(self._queued(), [])
-        self.assertFalse(ota._install_event_queue_path().exists())
+        self.assertEqual(self._queued(), [])
 
     def test_half_a_credential_yields_no_identity_so_nothing_is_recorded(self):
         """Resolution refuses it, and the core is then simply unconfigured."""
@@ -2123,9 +2112,35 @@ class TestInstallEventQueue(unittest.TestCase):
         self.assertEqual(len(remaining), cap)
         # The newest events are the ones worth keeping.
         self.assertEqual(remaining[-1]["eventId"], f"e{cap + 24}")
+
+    def test_discarding_them_is_said_out_loud(self):
+        """A cap that drops data silently reads as "everything was reported"."""
+        cap = ota._MAX_BUFFERED_INSTALL_EVENTS
+        for i in range(cap):
+            ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
+        ota._said_the_buffer_is_full = False
+        self.addCleanup(setattr, ota, "_said_the_buffer_is_full", False)
+
+        with patch("builtins.print") as mock_print:
+            ota._append_install_event({"eventId": "one-too-many"})
+
         self.assertTrue(
             any("discard" in str(c).lower() for c in mock_print.call_args_list)
         )
+
+    def test_but_only_once_however_long_the_outage_lasts(self):
+        cap = ota._MAX_BUFFERED_INSTALL_EVENTS
+        for i in range(cap):
+            ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
+        ota._said_the_buffer_is_full = False
+        self.addCleanup(setattr, ota, "_said_the_buffer_is_full", False)
+
+        with patch("builtins.print") as mock_print:
+            for i in range(5):
+                ota._append_install_event({"eventId": f"over-{i}"})
+
+        said = [c for c in mock_print.call_args_list if "discard" in str(c).lower()]
+        self.assertEqual(len(said), 1)
 
     def test_flush_without_robot_auth_is_a_noop_that_keeps_the_queue(self):
         ota.record_install_event("started")
@@ -2699,23 +2714,51 @@ class TestInstallSessionPersistence(unittest.TestCase):
 
         self.assertNotEqual(ota.get_install_session_id(), first)
 
+    def _age(self, session_id, seconds):
+        """Backdate when the session was opened."""
+        (ota._session_dir(session_id) / ota._SESSION_OPENED_AT).write_text(
+            repr(time.time() - seconds), encoding="utf-8"
+        )
+
     def test_stale_session_is_not_resumed(self):
-        """A session left behind by an install abandoned days ago is not ours."""
+        """A session left behind by an install abandoned days ago is not ours.
+
+        Worse than useless: the server pins a session to one archive, so
+        resuming a stale one is refused on every download.
+        """
         first = ota.get_install_session_id()
-        path = ota._install_session_path()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["startedAt"] = time.time() - (ota._INSTALL_SESSION_TTL_SECONDS + 60)
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        self._age(first, ota._INSTALL_SESSION_TTL_SECONDS + 60)
         self._new_process()
 
         self.assertNotEqual(ota.get_install_session_id(), first)
 
-    def test_corrupt_session_file_does_not_break_the_install(self):
-        ota._install_session_path().parent.mkdir(parents=True, exist_ok=True)
-        ota._install_session_path().write_text("{not json", encoding="utf-8")
+    def test_a_session_inside_the_window_still_is(self):
+        first = ota.get_install_session_id()
+        self._age(first, ota._INSTALL_SESSION_TTL_SECONDS - 60)
+        self._new_process()
+
+        self.assertEqual(ota.get_install_session_id(), first)
+
+    def test_a_session_that_cannot_say_when_it_opened_is_not_resumed(self):
+        first = ota.get_install_session_id()
+        (ota._session_dir(first) / ota._SESSION_OPENED_AT).write_text(
+            "not a time", encoding="utf-8"
+        )
+        self._new_process()
+
+        self.assertNotEqual(ota.get_install_session_id(), first)
+
+    def test_a_pointer_to_nothing_does_not_break_the_install(self):
+        ota.get_install_session_id()
+        shutil.rmtree(ota._session_dir(ota._install_session_id))
         self._new_process()
 
         self.assertTrue(ota.get_install_session_id())
+
+    def test_a_caller_cannot_name_a_session_that_escapes_the_directory(self):
+        """The id becomes a directory name, and one of them comes from a caller."""
+        with _robot_identity(), self.assertRaises(ValueError):
+            ota.record_install_event("started", install_session_id="../elsewhere")
 
 
 class TestDownloadBlobErrorPropagation(unittest.TestCase):
@@ -5653,99 +5696,86 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
         self.assertIn("403", printed)
 
 
-class TestTheEventGuardFileDoesNotGrowForever(unittest.TestCase):
-    """One entry per install session, and only the current one was ever removed.
+class TestRetiredSessionsDoNotAccumulate(unittest.TestCase):
+    """One directory per install session, and only the current one is retired.
 
-    `clear_install_session` pops the session it is retiring. A session that dies
-    by TTL instead — a crash mid-install, then more than a day before the next
-    run — is never retired by anything, so its guards stay in the file for the
-    life of the machine. On a robot that polls every minute and installs often,
-    the file that decides whether a `started` event has already been sent grows
-    without bound and is read on every event.
+    `clear_install_session` removes the session it retires. A session that dies
+    by the resume window instead — a crash mid-install, then more than a day
+    before the next run — is retired by nothing, and would sit there for the
+    life of a robot that installs often.
 
-    Entries carry the time they were first written now, and one past the same
-    TTL a session gets is dropped when the file is next written. Written rather
-    than read: pruning on read would make a read that touches nothing rewrite
-    the file, and the guard is read far more often than it is written.
-
-    An entry from before this change has no timestamp. It is stamped rather than
-    dropped — dropping it could re-emit `started` for a session still inside its
-    TTL, which is the exact duplicate this guard exists to prevent.
+    Swept when a session is opened, which is once per install, rather than on
+    every event. A directory whose `opened-at` cannot be read is left alone: it
+    is most likely one another process is creating right now, and not knowing
+    how old something is has never been grounds for deleting it.
     """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
         g.script_directory = self._tmp.name
         _sync_ota_context()
-        self._robot = _robot_identity()
-        self._robot.__enter__()
-        self.addCleanup(self._robot.__exit__, None, None, None)
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
 
-    def state(self):
-        return ota._read_install_event_state()
+    def a_session_opened(self, name, ago):
+        directory = ota._session_dir(name)
+        directory.mkdir(parents=True)
+        (directory / ota._SESSION_OPENED_AT).write_text(
+            repr(time.time() - ago), encoding="utf-8"
+        )
+        return directory
 
-    def write_state(self, raw):
-        path = ota._install_event_state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(raw), encoding="utf-8")
+    def sessions(self):
+        return sorted(
+            entry.name
+            for entry in ota._sessions_dir().iterdir()
+            if entry.is_dir() and not entry.is_symlink()
+        )
 
-    def test_a_session_older_than_the_ttl_is_dropped(self):
-        stale = time.time() - ota._INSTALL_SESSION_TTL_SECONDS - 1
-        self.write_state({"old-session": {"started": True, "seenAt": stale}})
+    def test_one_past_the_window_is_removed(self):
+        self.a_session_opened("old", ota._INSTALL_SESSION_TTL_SECONDS + 1)
 
-        ota._mark_install_event("new-session", "started")
+        ota.get_install_session_id()
 
-        self.assertNotIn("old-session", self.state())
+        self.assertNotIn("old", self.sessions())
 
-    def test_a_recent_session_survives(self):
+    def test_one_still_inside_it_is_kept(self):
         """Otherwise a resumed install re-reports `started`."""
-        recent = time.time() - 60
-        self.write_state({"other-session": {"started": True, "seenAt": recent}})
+        self.a_session_opened("recent", 60)
 
-        ota._mark_install_event("new-session", "started")
+        ota.get_install_session_id()
 
-        self.assertIn("other-session", self.state())
+        self.assertIn("recent", self.sessions())
 
-    def test_an_entry_written_before_this_change_is_stamped_not_dropped(self):
-        self.write_state({"legacy-session": {"started": True}})
+    def test_one_that_cannot_say_when_it_opened_is_left_alone(self):
+        directory = ota._session_dir("half-made")
+        directory.mkdir(parents=True)
 
-        ota._mark_install_event("new-session", "started")
+        ota.get_install_session_id()
 
-        self.assertIn("legacy-session", self.state())
-        self.assertIn("seenAt", self.state()["legacy-session"])
+        self.assertIn("half-made", self.sessions())
 
-    def test_a_stamped_legacy_entry_ages_out_like_any_other(self):
-        self.write_state({"legacy-session": {"started": True}})
-        ota._mark_install_event("new-session", "started")
+    def test_the_session_being_opened_is_never_swept(self):
+        opened = ota.get_install_session_id()
 
-        with patch(
-            "raisin_ota.client.time.time",
-            return_value=time.time() + ota._INSTALL_SESSION_TTL_SECONDS + 1,
-        ):
-            ota._mark_install_event("newer-session", "started")
+        self.assertIn(opened, self.sessions())
 
-        self.assertNotIn("legacy-session", self.state())
+    def test_retiring_one_takes_its_whole_directory(self):
+        opened = ota.get_install_session_id()
 
-    def test_the_session_being_written_is_never_pruned_out_from_under_itself(self):
-        """A long install, or a process that has been up longer than the TTL.
+        ota.clear_install_session()
 
-        Rare, and the consequence is the one thing this guard exists to stop: an
-        install still in progress loses its `started` marker and reports a
-        second one. The exemption is cheap; the duplicate is not.
-        """
-        stale = time.time() - ota._INSTALL_SESSION_TTL_SECONDS - 1
-        self.write_state({"long-running": {"started": True, "seenAt": stale}})
+        self.assertNotIn(opened, self.sessions())
 
-        ota._mark_install_event("long-running", "terminal")
+    def test_and_leaves_nothing_pointing_at_it(self):
+        ota.get_install_session_id()
 
-        self.assertTrue(ota._install_event_marker_seen("long-running", "started"))
+        ota.clear_install_session()
 
-    def test_the_guard_it_was_asked_to_write_is_readable_afterwards(self):
-        """Pruning must not eat the thing being written."""
-        ota._mark_install_event("new-session", "started")
-
-        self.assertTrue(ota._install_event_marker_seen("new-session", "started"))
+        self.assertIsNone(ota._read_install_session())
 
 
 class TestTheTokenCacheIsNotWorldReadable(unittest.TestCase):
@@ -5968,33 +5998,38 @@ class TestATerminalEventNamesItsArchive(unittest.TestCase):
 
         self.assertNotIn("archiveId", self.queued()[-1])
 
-    def session_record(self):
-        return json.loads(ota._install_session_path().read_text(encoding="utf-8"))
+    def session_archive(self, session_id=None):
+        return ota._session_archive(session_id or self.session)
 
-    def test_it_does_not_evict_the_session_that_can_still_be_resumed(self):
-        """A caller may name a session the record does not.
+    def opened_at(self, session_id=None):
+        return ota._session_opened_at(session_id or self.session)
 
-        Writing a record for it would take away the resume point of the session
-        that is actually running, and a resume point is worth more than a label.
+    def test_it_cannot_reach_the_session_that_is_actually_running(self):
+        """A caller may name a session other than the open one.
+
+        Each session's archive lives in that session's own directory, so this
+        stopped being a rule to remember: there is no name here that reaches
+        another session's record.
         """
         ota.record_install_event(
             "started", archive_id="arch-1", install_session_id="a-foreign-session"
         )
 
-        self.assertEqual(self.session_record()["installSessionId"], self.session)
-        self.assertNotIn("archive", self.session_record())
+        self.assertIsNone(self.session_archive())
+        self.assertEqual(
+            self.session_archive("a-foreign-session")["archiveId"], "arch-1"
+        )
 
     def test_noting_the_archive_does_not_restart_the_session_clock(self):
-        """`startedAt` is the session's expiry, not a last-touched stamp.
+        """When a session opened decides whether a crashed one may be resumed.
 
-        Refresh it here and an install that keeps reporting keeps its session
-        resumable past the window that decides whether a crashed one may be.
+        Written once, in its own file, and nothing here rewrites it.
         """
-        before = self.session_record()["startedAt"]
+        before = self.opened_at()
 
         self.start_tagged()
 
-        self.assertEqual(self.session_record()["startedAt"], before)
+        self.assertEqual(self.opened_at(), before)
 
     def test_the_first_archive_a_session_names_stands(self):
         # The server refuses a session used for a second archive, so a later,
@@ -6003,7 +6038,7 @@ class TestATerminalEventNamesItsArchive(unittest.TestCase):
 
         ota.record_install_event("progress", archive_id="arch-2")
 
-        self.assertEqual(self.session_record()["archive"]["archiveId"], "arch-1")
+        self.assertEqual(self.session_archive()["archiveId"], "arch-1")
 
     def test_a_start_with_no_archive_does_not_claim_the_session(self):
         """A refusal opens an attempt with no target, and may still say which
@@ -6021,7 +6056,7 @@ class TestATerminalEventNamesItsArchive(unittest.TestCase):
             archive_version="1.0.0",
         )
 
-        self.assertEqual(self.session_record()["archive"]["archiveId"], "arch-1")
+        self.assertEqual(self.session_archive()["archiveId"], "arch-1")
 
     def test_a_session_that_never_named_one_reports_without_it(self):
         # Not a crash and not a guess: a refusal opens an attempt with no target.
@@ -6030,6 +6065,279 @@ class TestATerminalEventNamesItsArchive(unittest.TestCase):
         ota.record_install_event("failed", error_code=ota.ERROR_UNKNOWN)
 
         self.assertNotIn("archiveId", self.queued()[-1])
+
+
+class TestHalfWrittenFilesAreNotTakenForData(unittest.TestCase):
+    """Every create here is a write to a temporary name and then a rename.
+
+    So a crash between the two leaves the temporary behind, and a reader that
+    did not know to skip it would send whatever was in it to the server as an
+    event — or, worse, count it as one and keep a real one out.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-half-written"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        _as_robot(self)
+
+    def a_leftover_temporary(self, text):
+        directory = ota._events_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{ota._TEMP_PREFIX}abandoned"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_leftover_is_not_read_as_an_event(self):
+        self.a_leftover_temporary(json.dumps({"eventId": "x", "eventType": "started"}))
+
+        self.assertEqual(ota._read_install_event_queue(), [])
+
+    def test_and_does_not_take_a_place_in_the_buffer(self):
+        self.a_leftover_temporary("{ half writ")
+
+        ota.record_install_event("started")
+
+        self.assertEqual(len(ota._read_install_event_queue()), 1)
+
+    def test_one_left_from_an_old_crash_is_cleaned_up(self):
+        """Nothing else would ever remove it, and nothing bounds how many there are."""
+        leftover = self.a_leftover_temporary("{ half writ")
+        os.utime(
+            leftover,
+            (0, time.time() - ota._INSTALL_SESSION_TTL_SECONDS - 60),
+        )
+        ota._install_session_id = None
+
+        ota.get_install_session_id()
+
+        self.assertFalse(leftover.exists())
+
+    def test_and_is_not_counted_as_something_still_owed(self):
+        """`drained` decides whether a caller keeps flushing or stands down."""
+        ota.record_install_event("started")
+        self.a_leftover_temporary("{ half writ")
+
+        def send(*args, **kwargs):
+            return _mock_response(
+                json_data={
+                    "success": True,
+                    "data": {
+                        "acks": [
+                            {"eventId": e["eventId"]} for e in kwargs["json"]["events"]
+                        ]
+                    },
+                }
+            )
+
+        with patch("raisin_ota.client.requests.post", side_effect=send):
+            self.assertTrue(ota.flush_install_events().drained)
+
+    def test_but_one_that_may_still_be_being_written_is_not(self):
+        leftover = self.a_leftover_temporary("{ half writ")
+        ota._install_session_id = None
+
+        ota.get_install_session_id()
+
+        self.assertTrue(leftover.exists())
+
+
+class TestACorruptStateDirectoryFailsOpen(unittest.TestCase):
+    """Everything else here treats unreadable state as nothing. So must this.
+
+    The session id became a directory name, and it is checked as one — but the
+    check raises, and it is reached through `get_install_session_id`, which
+    every install goes through. A pointer somebody edited by hand would then
+    stop the robot installing rather than start it a new session.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+
+    def point_current_at(self, target):
+        link = ota._current_session_link()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(target, link)
+
+    def test_a_pointer_out_of_the_directory_starts_a_new_session(self):
+        self.point_current_at("..")
+
+        self.assertTrue(ota.get_install_session_id())
+
+    def test_an_empty_pointer_does_too(self):
+        self.point_current_at(".")
+
+        self.assertTrue(ota.get_install_session_id())
+
+
+class TestClaimingWorksWithoutHardLinks(unittest.TestCase):
+    """A create here links a temporary into place, and not every mount can.
+
+    The claim is what decides whether anything is reported at all, so a
+    filesystem without hard links would have turned into a robot that silently
+    never says a word — an environment answering a question about correctness.
+    Linking is still the first choice, because it puts the whole content there
+    or nothing; failing that, the name is still claimed exclusively and the
+    only thing lost is that a reader can catch it empty.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-no-links"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        _as_robot(self)
+
+    def no_links(self):
+        return patch(
+            "raisin_ota.client.os.link",
+            side_effect=OSError(errno.EPERM, "no hard links here"),
+        )
+
+    def test_an_event_is_still_recorded(self):
+        with self.no_links():
+            self.assertIsNotNone(ota.record_install_event("started"))
+
+    def test_the_claim_is_still_exclusive(self):
+        with self.no_links():
+            ota.record_install_event("started")
+
+            self.assertIsNone(ota.record_install_event("started"))
+
+    def test_and_the_content_still_arrives(self):
+        with self.no_links():
+            ota.record_install_event("started", archive_id="arch-1")
+
+        self.assertEqual(
+            ota._session_archive("session-no-links")["archiveId"], "arch-1"
+        )
+
+
+class TestAnAttemptThatCouldNotBufferMaySpeakLater(unittest.TestCase):
+    """Reporting once is a claim taken before the event is written.
+
+    That order is deliberate: a crash between the two would otherwise report
+    twice on resume. But it means a write that fails has spent the attempt's
+    only chance to say anything, and a robot that could not buffer its `started`
+    would then be barred from reporting the outcome as well.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-unwritable"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        _as_robot(self)
+
+    def test_a_failed_write_gives_the_claim_back(self):
+        with patch("raisin_ota.client._replace_with", return_value=False):
+            self.assertIsNone(ota.record_install_event("started"))
+
+        self.assertIsNotNone(ota.record_install_event("started"))
+
+    def test_one_that_was_written_still_holds_it(self):
+        ota.record_install_event("started")
+
+        self.assertIsNone(ota.record_install_event("started"))
+
+
+class TestTwoWritersDoNotLoseEachOthersEvents(unittest.TestCase):
+    """The queue is written by more than one process, and was not built for it.
+
+    The agent flushes on every poll whether or not it is installing, and an
+    engineer on the robot runs `raisin install` in a shell. Both talk to one
+    file, and the flush was read-all → POST → write-what-is-left: anything
+    appended while the POST was in flight was overwritten by a snapshot taken
+    before it existed.
+
+    Measured across two real processes before this was fixed — a `succeeded`
+    recorded during a flush was gone afterwards, and the flush reported
+    `drained: True`. A fully successful flush is the destructive case, not a
+    partial one: it truncates the file to empty.
+
+    A lost terminal event is not a lost line in a log. The server keeps the
+    `started` that did arrive, and the attempt stays in progress there forever.
+
+    The interleaving is produced here rather than waited for: the send itself
+    records the second event, which is exactly where another process would have
+    landed, and needs no threads or sleeps to be certain about.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-two-writers"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        ota.clear_pending_install_failure()
+        _as_robot(self)
+
+    def flush_while(self, meanwhile):
+        """Flush, running `meanwhile` at the moment the request is in flight."""
+
+        def send(*args, **kwargs):
+            sent = kwargs["json"]["events"]
+            meanwhile()
+            # Only what was actually sent is acknowledged, which is the point:
+            # the server never saw the event that arrived mid-flight.
+            return _mock_response(
+                json_data={
+                    "success": True,
+                    "data": {"acks": [{"eventId": e["eventId"]} for e in sent]},
+                }
+            )
+
+        with patch("raisin_ota.client.requests.post", side_effect=send):
+            return ota.flush_install_events()
+
+    def queued(self):
+        return [e["eventType"] for e in ota._read_install_event_queue()]
+
+    def test_an_event_recorded_mid_flush_survives(self):
+        ota.record_install_event("started", archive_id="arch-A")
+
+        self.flush_while(lambda: ota.record_install_event("succeeded"))
+
+        self.assertEqual(self.queued(), ["succeeded"])
+
+    def test_the_flush_does_not_claim_to_have_drained_it(self):
+        """A caller that believes `drained` stops flushing until something else happens."""
+        ota.record_install_event("started", archive_id="arch-A")
+
+        result = self.flush_while(lambda: ota.record_install_event("succeeded"))
+
+        self.assertFalse(result.drained)
+
+    def test_what_was_sent_is_still_removed(self):
+        """The other half: nothing here may turn into resending acked events."""
+        ota.record_install_event("started", archive_id="arch-A")
+
+        self.flush_while(lambda: None)
+
+        self.assertEqual(self.queued(), [])
 
 
 # ============================================================================
