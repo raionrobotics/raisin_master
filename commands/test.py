@@ -566,8 +566,9 @@ def run_unittests(
             click.echo(f"❌ Failed with exit code {e.returncode}: {exe}", err=True)
         results.append({"label": label, "status": status, "xml": xml_file})
         # Keep only sanitizer logs with reportable (PROJECT/CRASH) findings;
-        # clean or SYSTEM-only logs are dropped.
-        if san_log is not None and san_log.is_file() \
+        # clean or SYSTEM-only logs are dropped. A log from a failed binary is
+        # always kept: deleting it leaves a failure with no evidence.
+        if san_log is not None and status == "pass" and san_log.is_file() \
                 and not san.log_has_reportable_findings(san_log, Path(g.script_directory)):
             san_log.unlink()
 

@@ -1,0 +1,6 @@
+# ThreadSanitizer suppressions for known third-party bugs (not project code).
+#
+# libOpenNI2's static initializer (run via dl-init at load time) unlocks a
+# mutex it never locked. Every test binary that links OpenNI2 (via PCL)
+# aborts at startup under halt_on_error=1 without this suppression.
+called_from_lib:libOpenNI2.so
