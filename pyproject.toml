@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "raisin-ota"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Resolve, fetch, verify and atomically install raisin packages"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -25,3 +25,26 @@ ssh = ["cryptography>=41.0"]
 # This distribution is the mechanism only — what an agent, a commissioning
 # tool or the CLI all call. See raisin-package-manager#70, #71.
 packages = ["raisin_ota"]
+
+# The version is the tag, derived rather than typed.
+#
+# It was typed, and both `raisin-ota-v0.1.0` and `raisin-ota-v0.1.1` declared
+# `0.1.0`, because cutting the second tag did not touch this file. pip decides
+# whether a requirement is already satisfied from the declared version and not
+# from the URL it was asked for, so a robot pinned to the new tag kept the old
+# code and reported success. Measured 2026-08-27: `--upgrade` and
+# `--upgrade-strategy eager` both skipped it, and only `--force-reinstall`
+# replaced it.
+#
+# `tag_regex` is needed because the tags are prefixed - this repository holds
+# more than this distribution - and setuptools-scm would otherwise try to read
+# `raisin-ota-v0.1.1` as a version.
+#
+# A commit that is not a tag gets a development version (`0.1.2.dev3+g1a2b3c4`)
+# rather than silently claiming to be the last release, which is the same defect
+# one size smaller.
+[tool.setuptools_scm]
+tag_regex = "^raisin-ota-v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)$"
+# Only these tags describe this distribution; without the match, `git describe`
+# would pick up whatever else the repository comes to tag.
+git_describe_command = "git describe --dirty --tags --long --match raisin-ota-v*"
