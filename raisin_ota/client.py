@@ -343,12 +343,31 @@ def _create_once(path: Path, text: str = "") -> bool:
     except FileExistsError:
         return False
     except OSError:
-        return False
+        # Not every mount can link, and the claim is what decides whether this
+        # robot reports at all — a workspace on the wrong filesystem would
+        # otherwise be a robot that silently never says a word. Claiming the
+        # name is the part that has to survive; whole-or-nothing is what is
+        # given up, and what a reader can then catch is an empty file, which
+        # every reader here already treats as nothing.
+        return _create_once_unlinked(path, text)
     finally:
         try:
             temporary.unlink()
         except OSError:
             pass
+
+
+def _create_once_unlinked(path: Path, text: str) -> bool:
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return True
+    except OSError:
+        return False
 
 
 def _replace_with(path: Path, text: str) -> bool:
@@ -663,6 +682,18 @@ def _buffered_events() -> list:
         if isinstance(event, dict) and event.get("eventId"):
             found.append((path, event))
     return found
+
+
+def _count_buffered_events() -> int:
+    """How many events are owed, without reading any of them."""
+    try:
+        return sum(
+            1
+            for path in _events_dir().iterdir()
+            if not path.name.startswith(_TEMP_PREFIX)
+        )
+    except OSError:
+        return 0
 
 
 def _read_install_event_queue() -> list:
@@ -1037,7 +1068,9 @@ def flush_install_events() -> FlushResult:
 
     # Asked again rather than counted from the list above, for the same reason:
     # what is owed now includes anything recorded while this was running.
-    owed = len(_read_install_event_queue())
+    # Counted rather than read: this is a number, and reading a full buffer to
+    # produce it costs ten times the listing on every poll of an offline robot.
+    owed = _count_buffered_events()
     if owed:
         print(f"ℹ️  {owed} OTA install event(s) buffered for a later run.")
     return FlushResult(drained=not owed, remaining=owed, **failure)

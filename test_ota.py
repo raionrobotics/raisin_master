@@ -6118,6 +6118,26 @@ class TestHalfWrittenFilesAreNotTakenForData(unittest.TestCase):
 
         self.assertFalse(leftover.exists())
 
+    def test_and_is_not_counted_as_something_still_owed(self):
+        """`drained` decides whether a caller keeps flushing or stands down."""
+        ota.record_install_event("started")
+        self.a_leftover_temporary("{ half writ")
+
+        def send(*args, **kwargs):
+            return _mock_response(
+                json_data={
+                    "success": True,
+                    "data": {
+                        "acks": [
+                            {"eventId": e["eventId"]} for e in kwargs["json"]["events"]
+                        ]
+                    },
+                }
+            )
+
+        with patch("raisin_ota.client.requests.post", side_effect=send):
+            self.assertTrue(ota.flush_install_events().drained)
+
     def test_but_one_that_may_still_be_being_written_is_not(self):
         leftover = self.a_leftover_temporary("{ half writ")
         ota._install_session_id = None
@@ -6125,6 +6145,88 @@ class TestHalfWrittenFilesAreNotTakenForData(unittest.TestCase):
         ota.get_install_session_id()
 
         self.assertTrue(leftover.exists())
+
+
+class TestACorruptStateDirectoryFailsOpen(unittest.TestCase):
+    """Everything else here treats unreadable state as nothing. So must this.
+
+    The session id became a directory name, and it is checked as one — but the
+    check raises, and it is reached through `get_install_session_id`, which
+    every install goes through. A pointer somebody edited by hand would then
+    stop the robot installing rather than start it a new session.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+
+    def point_current_at(self, target):
+        link = ota._current_session_link()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(target, link)
+
+    def test_a_pointer_out_of_the_directory_starts_a_new_session(self):
+        self.point_current_at("..")
+
+        self.assertTrue(ota.get_install_session_id())
+
+    def test_an_empty_pointer_does_too(self):
+        self.point_current_at(".")
+
+        self.assertTrue(ota.get_install_session_id())
+
+
+class TestClaimingWorksWithoutHardLinks(unittest.TestCase):
+    """A create here links a temporary into place, and not every mount can.
+
+    The claim is what decides whether anything is reported at all, so a
+    filesystem without hard links would have turned into a robot that silently
+    never says a word — an environment answering a question about correctness.
+    Linking is still the first choice, because it puts the whole content there
+    or nothing; failing that, the name is still claimed exclusively and the
+    only thing lost is that a reader can catch it empty.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-no-links"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        _as_robot(self)
+
+    def no_links(self):
+        return patch(
+            "raisin_ota.client.os.link",
+            side_effect=OSError(errno.EPERM, "no hard links here"),
+        )
+
+    def test_an_event_is_still_recorded(self):
+        with self.no_links():
+            self.assertIsNotNone(ota.record_install_event("started"))
+
+    def test_the_claim_is_still_exclusive(self):
+        with self.no_links():
+            ota.record_install_event("started")
+
+            self.assertIsNone(ota.record_install_event("started"))
+
+    def test_and_the_content_still_arrives(self):
+        with self.no_links():
+            ota.record_install_event("started", archive_id="arch-1")
+
+        self.assertEqual(
+            ota._session_archive("session-no-links")["archiveId"], "arch-1"
+        )
 
 
 class TestAnAttemptThatCouldNotBufferMaySpeakLater(unittest.TestCase):
