@@ -48,11 +48,12 @@ class TestOtaContext(unittest.TestCase):
         )
 
     def test_workspace_paths_come_from_the_context(self):
-        # `release/`, not `install/`: a full build deletes the latter.
-        self.assertEqual(ota._install_session_path().parent, self.workspace / "release")
-        self.assertEqual(
-            ota._install_event_queue_path().parent, self.workspace / "release"
-        )
+        # Its own directory, not a corner of the install tree's: what a build
+        # deletes and what this has to keep are two different decisions, and
+        # the state used to survive by being where the tree happened to live.
+        self.assertEqual(ota._state_dir(), self.workspace / ".ota")
+        self.assertEqual(ota._sessions_dir().parent, ota._state_dir())
+        self.assertEqual(ota._events_dir().parent, ota._state_dir())
 
     def test_an_unconfigured_core_fails_loudly(self):
         """Silently defaulting would reintroduce the coupling this removes."""
@@ -75,7 +76,7 @@ class TestOtaContext(unittest.TestCase):
         )
 
         self.assertEqual(ota._ctx().platform, "ubuntu-22.04-x86_64")
-        self.assertEqual(ota._install_session_path().parent, other / "release")
+        self.assertEqual(ota._state_dir(), other / ".ota")
 
 
 class TestRobotIdentityIsInjected(unittest.TestCase):
