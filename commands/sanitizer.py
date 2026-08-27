@@ -39,6 +39,14 @@ _SAN_SONAME_TOKENS = {
 }
 
 
+_SAN_SHORT = {"address": "asan", "thread": "tsan", "undefined": "ubsan"}
+_SAN_ENV_KEY = {
+    "address": "ASAN_OPTIONS",
+    "thread": "TSAN_OPTIONS",
+    "undefined": "UBSAN_OPTIONS",
+}
+
+
 def apply_env(sanitizer: str) -> None:
     """Set sanitizer runtime options (without overriding ones the user set)."""
     defaults = {
@@ -46,6 +54,13 @@ def apply_env(sanitizer: str) -> None:
         "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1",
         "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1",
     }
+    # Known third-party bugs live in config/<asan|tsan|ubsan>.supp (e.g.
+    # libOpenNI2's init unlocks a never-locked mutex). Without a suppression
+    # the binary aborts (halt_on_error) on findings that aren't project bugs.
+    env_key = _SAN_ENV_KEY.get(sanitizer)
+    supp = Path(__file__).resolve().parent.parent / "config" / f"{_SAN_SHORT.get(sanitizer, sanitizer)}.supp"
+    if env_key and supp.is_file():
+        defaults[env_key] += f":suppressions={supp}"
     for key, value in defaults.items():
         os.environ.setdefault(key, value)
 
@@ -155,20 +170,23 @@ def log_has_reportable_findings(log_path: Path, root: Path) -> bool:
     return bool(_parse_sanitizer_findings(text, root))
 
 
-# Lines that mark a genuine sanitizer diagnostic in a log file.
+# Lines that mark a genuine sanitizer diagnostic in a log file. TSan reports
+# data races and mutex errors as WARNING (only fatal internal errors as ERROR).
 _SAN_FINDING_MARKERS = (
     "runtime error:",
     "ERROR: AddressSanitizer",
     "ERROR: LeakSanitizer",
     "ERROR: ThreadSanitizer",
+    "WARNING: ThreadSanitizer",
     "ERROR: MemorySanitizer",
 )
 
 # A source file:line inside a stack frame or error line (excludes binary+offset
 # frames, which end in "+0x...)" and have no ":<line>").
 _SAN_LOC_RE = re.compile(r"(/[^\s():]+\.(?:cpp|cxx|cc|c|hpp|hxx|hh|h|tcc|ipp)):(\d+)")
-# A backtrace frame:  "    #4 0x... in <func> <location-or-binary+offset>"
-_SAN_FRAME_RE = re.compile(r"^\s*#(\d+)\s+0x[0-9a-fA-F]+\s+in\s+(.*)$")
+# A backtrace frame. ASan: "#4 0x... in <func> <loc>"; TSan has no address:
+# "#4 <func> <loc> (module+0x...)" — hence the optional middle group.
+_SAN_FRAME_RE = re.compile(r"^\s*#(\d+)\s+(?:0x[0-9a-fA-F]+\s+in\s+)?(.*)$")
 
 
 def _san_kind(marker_line: str) -> str:
@@ -177,7 +195,7 @@ def _san_kind(marker_line: str) -> str:
         reason = marker_line.split("runtime error:", 1)[1].strip()
         # keep it short
         return "UBSan: " + (reason[:60] + "…" if len(reason) > 60 else reason)
-    m = re.search(r"ERROR:\s*(\w*Sanitizer):\s*(.*)", marker_line)
+    m = re.search(r"(?:ERROR|WARNING):\s*(\w*Sanitizer):\s*(.*)", marker_line)
     if m:
         tool = m.group(1).replace("Sanitizer", "San")
         detail = m.group(2).split(" on ", 1)[0].split("(", 1)[0].strip()
