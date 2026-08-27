@@ -48,11 +48,12 @@ class TestOtaContext(unittest.TestCase):
         )
 
     def test_workspace_paths_come_from_the_context(self):
-        # `release/`, not `install/`: a full build deletes the latter.
-        self.assertEqual(ota._install_session_path().parent, self.workspace / "release")
-        self.assertEqual(
-            ota._install_event_queue_path().parent, self.workspace / "release"
-        )
+        # Its own directory, not a corner of the install tree's: what a build
+        # deletes and what this has to keep are two different decisions, and
+        # the state used to survive by being where the tree happened to live.
+        self.assertEqual(ota._state_dir(), self.workspace / ".ota")
+        self.assertEqual(ota._sessions_dir().parent, ota._state_dir())
+        self.assertEqual(ota._events_dir().parent, ota._state_dir())
 
     def test_an_unconfigured_core_fails_loudly(self):
         """Silently defaulting would reintroduce the coupling this removes."""
@@ -75,7 +76,7 @@ class TestOtaContext(unittest.TestCase):
         )
 
         self.assertEqual(ota._ctx().platform, "ubuntu-22.04-x86_64")
-        self.assertEqual(ota._install_session_path().parent, other / "release")
+        self.assertEqual(ota._state_dir(), other / ".ota")
 
 
 class TestRobotIdentityIsInjected(unittest.TestCase):
@@ -211,6 +212,66 @@ class TestCoreDoesNotImportTheCli(unittest.TestCase):
             ]
 
         self.assertEqual(caught, ["from commands import globals as g"])
+
+
+class TestAPackageNameCannotLeaveTheTree(unittest.TestCase):
+    """Package names arrive in the server's manifest and become directories.
+
+    Worse than the version case, because there is no generation prefix to
+    accidentally defeat a bare `..`. Measured before this was guarded:
+
+        'raisin_robot'            -> release/install/raisin_robot/...   inside
+        '../ESCAPED'              -> release/ESCAPED/...                OUTSIDE
+        'a/../../../../OUTSIDE'   -> OUTSIDE/...                        OUTSIDE
+
+    `package_dir` is the single place the layout is built, and every caller that
+    writes a package goes through it, so the check belongs here rather than at
+    each of them.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name) / "release" / "install"
+        self.context = ota.OtaContext(
+            workspace=Path(self._tmp.name),
+            os_type="ubuntu",
+            os_version="24.04",
+            architecture="x86_64",
+        )
+
+    def test_an_ordinary_package_still_resolves(self):
+        resolved = self.context.package_dir(self.base, "raisin_robot", "release")
+
+        self.assertEqual(
+            resolved,
+            self.base / "raisin_robot" / "ubuntu" / "24.04" / "x86_64" / "release",
+        )
+
+    def test_a_glob_is_still_allowed(self):
+        """Load-bearing: the live-tree reader asks for `*` as the package."""
+        resolved = self.context.package_dir(self.base, "*", "release")
+
+        self.assertEqual(resolved.parts[-5], "*")
+
+    def test_a_parent_reference_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.context.package_dir(self.base, "..", "release")
+
+    def test_a_separator_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.context.package_dir(self.base, "a/../../../../OUTSIDE", "release")
+
+    def test_the_refusal_names_the_package(self):
+        with self.assertRaises(ValueError) as caught:
+            self.context.package_dir(self.base, "../ESCAPED", "release")
+
+        self.assertIn("../ESCAPED", str(caught.exception))
+
+    def test_the_build_type_is_checked_too(self):
+        """It is a path component from the same request, and nothing else checks it."""
+        with self.assertRaises(ValueError):
+            self.context.package_dir(self.base, "raisin_robot", "../../etc")
 
 
 if __name__ == "__main__":

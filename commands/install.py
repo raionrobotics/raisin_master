@@ -29,6 +29,7 @@ from raisin_ota import InstallTreeUnusable
 from raisin_ota.client import (
     download_package_at_timestamp,
     download_all_from_archive,
+    OtaDesiredStateUnusable,
     OtaInstallHalted,
     archive_is_pinned,
     flush_pending_snapshot_reports,
@@ -225,6 +226,19 @@ def _install(
             print("⛔ Installs are halted for this node — nothing was installed.")
             print(f"   {halted}")
             print("   No fallback is performed while a halt is in effect.")
+            print("=" * 72)
+            return False
+        except OtaDesiredStateUnusable as unusable:
+            # Caught for the same reason and reported the same way. Left
+            # uncaught it left `install_cli_command` before the attempt was
+            # closed, so the one failure the fleet most needs told — this
+            # machine cannot run what it was assigned — was the one it never
+            # heard, and an operator got a traceback in place of the reason.
+            print("")
+            print("=" * 72)
+            print("⛔ This node cannot install what it was assigned.")
+            print(f"   {unusable}")
+            print("   Nothing else is installed in its place.")
             print("=" * 72)
             return False
 

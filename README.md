@@ -112,7 +112,9 @@ A robot registered on the OTA server can be issued an API key (`rk_<uuid>_<secre
 
 An archive name or version passed explicitly (`--archive-version`, `RAISIN_ARCHIVE_NAME`) is treated as a deliberate pin and takes precedence over the server's desired state.
 
-> **Limitation:** enumerating an archive's packages still requires SSH authentication — the robot-authenticated API exposes no manifest listing for manifest-only archives. A robot provisioned with *only* an API key cannot yet resolve an archive, and will fall back to GitHub releases. Register an SSH key alongside the API key until the server adds a robot-facing manifest endpoint.
+A machine holding **only** an API key can install what it was assigned: the desired-state response carries the package list, so nothing on that path needs a manifest route and none of them are open to a robot credential anyway.
+
+> **Limitation:** that list is the only one such a machine can read. An archive it was *not* assigned cannot be enumerated — every manifest route needs a user token — so an explicit `--archive-name`/`--archive-version` pin still requires one. An assignment that cannot be used (another platform, no target, a credential the server refuses) is reported as a failure naming what was assigned and why, rather than resolved to something else.
 
 The key is read in this order: `RAISIN_ROBOT_API_KEY`, `RAISIN_ROBOT_API_KEY_FILE`, `configuration_setting.yaml`/`secrets.yaml`, then `~/.config/raisin/robot-api-key`. File-backed keys are ignored on POSIX systems unless they are `chmod 600`.
 

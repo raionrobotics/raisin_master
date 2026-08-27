@@ -15,6 +15,7 @@ import base64
 import contextlib
 import errno
 import hashlib
+import itertools
 import json
 import os
 import shutil
@@ -1328,6 +1329,269 @@ class TestHaltStopsTheInstall(unittest.TestCase):
         mock_download.assert_not_called()
 
 
+class TestASessionDoesNotOutliveTheArchiveItWasFor(unittest.TestCase):
+    """A resumed session is worthless for a different archive, and worse than that.
+
+    The server pins a session to the first archive it downloads under and
+    refuses the rest — measured against a running server:
+
+        GET .../download?version=1.0.0  (the pinned one)   200
+        GET .../download?version=1.0.2  (a different one)  403
+            Install session '...' is downloading a different archive
+
+    The CLI keeps its session when an install fails, deliberately, so a retry
+    resumes the partial download. But the session survives a *reassignment*
+    too, and `_read_install_session` resumes it for twenty-four hours. So a
+    robot whose install failed and was then given a different archive was
+    refused every download until the session aged out — a day, on an
+    unhelpful 403 that classifies as `unknown` and so is not even retried.
+
+    The agent never had this: it retires a stale session at the top of a run.
+    This is the bare CLI, which is what a robot without the agent runs.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        ota.clear_pending_install_failure()
+        self.addCleanup(ota.clear_pending_install_failure)
+        _as_robot(self)
+
+    def a_session_that_installed(self, archive_id):
+        """One left behind by a failed run, with its `started` already sent."""
+        session = ota.get_install_session_id()
+        ota.record_install_event("started", archive_id=archive_id)
+        ota._install_session_id = None
+        return session
+
+    def run_against(self, archive_id):
+        packages = [
+            {
+                "packageId": "p-1",
+                "packageName": "pkg1",
+                "manifestHash": "a" * 64,
+                "tagName": "0.2.0",
+            }
+        ]
+
+        def extract(download_file, install_dir, package_name, version, **kw):
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "release.yaml").write_text("version: 0.2.0\n")
+            return {"version": version, "dependencies": []}
+
+        with (
+            patch("raisin_ota.client._resolve_desired_state") as mock_desired,
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch("raisin_ota.client._extract_and_read_deps", side_effect=extract),
+            patch("raisin_ota.client.report_software_snapshot"),
+            patch("builtins.print"),
+        ):
+            mock_desired.return_value = (
+                False,
+                "raisin-robot",
+                "2.0.0",
+                (packages, archive_id, "2.0.0"),
+            )
+            ota.download_all_from_archive(
+                "release", Path(self._tmp.name) / "release" / "install"
+            )
+        return ota.get_install_session_id()
+
+    def queued(self):
+        return ota._read_install_event_queue()
+
+    def test_a_reassigned_node_starts_a_new_session(self):
+        left_behind = self.a_session_that_installed("arch-A")
+
+        self.assertNotEqual(self.run_against("arch-B"), left_behind)
+
+    def test_the_abandoned_one_is_closed_rather_than_dropped(self):
+        """Its `started` is already on the server; without this it stays open forever."""
+        left_behind = self.a_session_that_installed("arch-A")
+
+        self.run_against("arch-B")
+
+        closed = [
+            event
+            for event in self.queued()
+            if event["installSessionId"] == left_behind
+            and event["eventType"] == "failed"
+        ]
+        self.assertEqual(len(closed), 1)
+
+    def test_and_it_says_it_was_abandoned_rather_than_failing(self):
+        """Otherwise it reads `install did not complete`, which is a fault report.
+
+        Nothing went wrong with that attempt — it was overtaken. Sent as a
+        plain failure it joins the archive's failure count and argues against a
+        release that was never tried.
+        """
+        self.a_session_that_installed("arch-A")
+
+        self.run_against("arch-B")
+
+        failed = [e for e in self.queued() if e["eventType"] == "failed"]
+        self.assertIn("assigned a different archive", failed[0]["errorMessage"])
+
+    def test_the_same_archive_still_resumes(self):
+        """The reason sessions are kept at all: finishing a partial download."""
+        left_behind = self.a_session_that_installed("arch-A")
+
+        self.assertEqual(self.run_against("arch-A"), left_behind)
+
+    def test_a_session_that_never_said_which_archive_is_left_alone(self):
+        """An older client wrote no archive. Not knowing is not grounds for retiring."""
+        session = ota.get_install_session_id()
+        ota._install_session_id = None
+
+        self.assertEqual(self.run_against("arch-B"), session)
+
+
+class TestAnUnusableAssignmentReachesTheOperator(unittest.TestCase):
+    """Raising it was half the job; nothing caught it.
+
+    Review finding on this branch. `install_command` catches `OtaInstallHalted`
+    and `InstallTreeUnusable`; the new one went straight through it and out of
+    `install_cli_command`, which is where the attempt is closed. So instead of
+    the banner a halt gets, an unusable assignment produced a traceback — and
+    `report_install_outcome`, `flush_install_events` and
+    `flush_pending_snapshot_reports` all sit after the call that raised.
+
+    The failure the fleet most needs told is the one that told nobody.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+
+    def run_install(self, mock_config):
+        mock_config.return_value = (
+            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
+            {"org": "ghtoken"},
+            "devel",
+            None,
+            [],
+        )
+        from commands.install import install_command
+
+        with (
+            patch(
+                "commands.install.download_all_from_archive",
+                side_effect=ota.OtaDesiredStateUnusable(
+                    "the OTA server assigned an archive for 'ubuntu-22.04-x86_64' "
+                    "but this node is 'ubuntu-24.04-arm64'"
+                ),
+            ),
+            patch("raisin_ota.client.download_package") as self.download,
+            patch("commands.install.requests.Session"),
+            patch("builtins.print") as self.printed,
+        ):
+            return install_command([], "release")
+
+    @patch("commands.install.load_configuration")
+    def test_it_is_a_failed_install_rather_than_a_traceback(self, mock_config):
+        self.assertFalse(self.run_install(mock_config))
+
+    @patch("commands.install.load_configuration")
+    def test_it_does_not_send_the_robot_somewhere_else(self, mock_config):
+        # The whole argument for raising: what it was assigned is unusable, so
+        # installing something else is not a recovery.
+        self.run_install(mock_config)
+
+        self.download.assert_not_called()
+
+    @patch("commands.install.load_configuration")
+    def test_the_reason_is_on_screen(self, mock_config):
+        """It is the only place the operator learns which assignment, and why."""
+        self.run_install(mock_config)
+
+        said = " ".join(str(call) for call in self.printed.call_args_list)
+        self.assertIn("ubuntu-22.04-x86_64", said)
+
+
+class TestTheFleetIsToldWhyTheAssignmentWasUnusable(unittest.TestCase):
+    """A terminal event that says `unknown` is a failure nobody can act on.
+
+    Giving up on the assignment is the moment the reason is known and the last
+    moment it exists — the exception is caught one frame up and turned into a
+    return value. Noted here, it reaches the terminal event the CLI closes with.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota.clear_pending_install_failure()
+        self.addCleanup(ota.clear_pending_install_failure)
+
+    def give_up(self, **kwargs):
+        with tempfile.TemporaryDirectory() as tmpdir, _robot_identity():
+            with contextlib.suppress(ota.OtaDesiredStateUnusable):
+                ota.download_all_from_archive("release", Path(tmpdir), **kwargs)
+
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_the_route_that_pinned_nothing_notes_it(self, mock_desired, _mock_manifest):
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+
+        self.give_up(tag=None)
+
+        stage, code, message = ota._pending_install_failure
+        self.assertEqual(stage, "desired_state")
+        self.assertIn("assigned elsewhere", message)
+
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_it_is_not_labelled_as_worth_retrying(self, mock_desired, _mock_manifest):
+        """`server_error` is in the retryable set, and this is not transient.
+
+        An archive assigned for another platform answers the same way forever.
+        The taxonomy's own comment says a retryable code means backoff is worth
+        spending an attempt on, so labelling this one that way is a claim the
+        code cannot support — and `server_error` blames a server that answered
+        correctly besides.
+        """
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+
+        self.give_up(tag=None)
+
+        self.assertFalse(ota.is_retryable_error_code(ota._pending_install_failure[1]))
+
+    @patch("raisin_ota.client._fetch_archive_with_stable_fallback", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_and_so_does_the_tag_route(self, mock_desired, _mock_tag):
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+
+        self.give_up()
+
+        self.assertIn("assigned elsewhere", ota._pending_install_failure[2])
+
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_an_earlier_cause_still_outranks_it(self, mock_desired):
+        """`note_install_failure` keeps the first, and this is the last thing to run."""
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+        ota.note_install_failure("download", ota.ERROR_NETWORK, "the download failed")
+
+        self.give_up()
+
+        self.assertEqual(ota._pending_install_failure[0], "download")
+
+
 class TestUnusableTreeStopsTheInstall(unittest.TestCase):
     """A tree that cannot be prepared is not "OTA unavailable".
 
@@ -1609,17 +1873,6 @@ class TestInstallEventQueue(unittest.TestCase):
 
         self.assertEqual(len(self._queued()), 1)
 
-    def test_a_buffer_left_at_the_old_location_is_carried_over(self):
-        """An upgrade must not throw away what the previous client buffered."""
-        legacy = Path(g.script_directory) / "install" / ota._INSTALL_EVENT_QUEUE_FILE
-        legacy.parent.mkdir(parents=True, exist_ok=True)
-        legacy.write_text(
-            json.dumps({"eventId": "old-1", "eventType": "started"}) + "\n",
-            encoding="utf-8",
-        )
-
-        self.assertEqual([e["eventId"] for e in self._queued()], ["old-1"])
-
     @patch("raisin_ota.client.requests.post")
     def test_acks_for_events_we_never_sent_do_not_spin(self, mock_post):
         """The guard must watch our queue, not whether the response was empty."""
@@ -1756,7 +2009,14 @@ class TestInstallEventQueue(unittest.TestCase):
 
     def test_delayed_flush_preserves_occurred_at_ordering(self):
         with (
-            patch("raisin_ota.client.time.time", side_effect=[100.5, 300.25]),
+            # A clock that keeps running, not two readings. The subject here is
+            # that the stamps come out ordered and distinct; budgeting an exact
+            # number of `time.time()` calls made it break the first time
+            # anything else in the path read the clock.
+            patch(
+                "raisin_ota.client.time.time",
+                side_effect=itertools.count(100.5, 199.75),
+            ),
             patch("raisin_ota.client.time.gmtime", side_effect=time.gmtime),
         ):
             ota.record_install_event("started")
@@ -1810,7 +2070,7 @@ class TestInstallEventQueue(unittest.TestCase):
             self.assertIsNone(ota.report_install_outcome(True))
 
         self.assertEqual(self._queued(), [])
-        self.assertFalse(ota._install_event_queue_path().exists())
+        self.assertEqual(self._queued(), [])
 
     def test_half_a_credential_yields_no_identity_so_nothing_is_recorded(self):
         """Resolution refuses it, and the core is then simply unconfigured."""
@@ -1852,9 +2112,35 @@ class TestInstallEventQueue(unittest.TestCase):
         self.assertEqual(len(remaining), cap)
         # The newest events are the ones worth keeping.
         self.assertEqual(remaining[-1]["eventId"], f"e{cap + 24}")
+
+    def test_discarding_them_is_said_out_loud(self):
+        """A cap that drops data silently reads as "everything was reported"."""
+        cap = ota._MAX_BUFFERED_INSTALL_EVENTS
+        for i in range(cap):
+            ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
+        ota._said_the_buffer_is_full = False
+        self.addCleanup(setattr, ota, "_said_the_buffer_is_full", False)
+
+        with patch("builtins.print") as mock_print:
+            ota._append_install_event({"eventId": "one-too-many"})
+
         self.assertTrue(
             any("discard" in str(c).lower() for c in mock_print.call_args_list)
         )
+
+    def test_but_only_once_however_long_the_outage_lasts(self):
+        cap = ota._MAX_BUFFERED_INSTALL_EVENTS
+        for i in range(cap):
+            ota._append_install_event({"eventId": f"e{i}", "eventType": "started"})
+        ota._said_the_buffer_is_full = False
+        self.addCleanup(setattr, ota, "_said_the_buffer_is_full", False)
+
+        with patch("builtins.print") as mock_print:
+            for i in range(5):
+                ota._append_install_event({"eventId": f"over-{i}"})
+
+        said = [c for c in mock_print.call_args_list if "discard" in str(c).lower()]
+        self.assertEqual(len(said), 1)
 
     def test_flush_without_robot_auth_is_a_noop_that_keeps_the_queue(self):
         ota.record_install_event("started")
@@ -2428,23 +2714,51 @@ class TestInstallSessionPersistence(unittest.TestCase):
 
         self.assertNotEqual(ota.get_install_session_id(), first)
 
+    def _age(self, session_id, seconds):
+        """Backdate when the session was opened."""
+        (ota._session_dir(session_id) / ota._SESSION_OPENED_AT).write_text(
+            repr(time.time() - seconds), encoding="utf-8"
+        )
+
     def test_stale_session_is_not_resumed(self):
-        """A session left behind by an install abandoned days ago is not ours."""
+        """A session left behind by an install abandoned days ago is not ours.
+
+        Worse than useless: the server pins a session to one archive, so
+        resuming a stale one is refused on every download.
+        """
         first = ota.get_install_session_id()
-        path = ota._install_session_path()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["startedAt"] = time.time() - (ota._INSTALL_SESSION_TTL_SECONDS + 60)
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        self._age(first, ota._INSTALL_SESSION_TTL_SECONDS + 60)
         self._new_process()
 
         self.assertNotEqual(ota.get_install_session_id(), first)
 
-    def test_corrupt_session_file_does_not_break_the_install(self):
-        ota._install_session_path().parent.mkdir(parents=True, exist_ok=True)
-        ota._install_session_path().write_text("{not json", encoding="utf-8")
+    def test_a_session_inside_the_window_still_is(self):
+        first = ota.get_install_session_id()
+        self._age(first, ota._INSTALL_SESSION_TTL_SECONDS - 60)
+        self._new_process()
+
+        self.assertEqual(ota.get_install_session_id(), first)
+
+    def test_a_session_that_cannot_say_when_it_opened_is_not_resumed(self):
+        first = ota.get_install_session_id()
+        (ota._session_dir(first) / ota._SESSION_OPENED_AT).write_text(
+            "not a time", encoding="utf-8"
+        )
+        self._new_process()
+
+        self.assertNotEqual(ota.get_install_session_id(), first)
+
+    def test_a_pointer_to_nothing_does_not_break_the_install(self):
+        ota.get_install_session_id()
+        shutil.rmtree(ota._session_dir(ota._install_session_id))
         self._new_process()
 
         self.assertTrue(ota.get_install_session_id())
+
+    def test_a_caller_cannot_name_a_session_that_escapes_the_directory(self):
+        """The id becomes a directory name, and one of them comes from a caller."""
+        with _robot_identity(), self.assertRaises(ValueError):
+            ota.record_install_event("started", install_session_id="../elsewhere")
 
 
 class TestDownloadBlobErrorPropagation(unittest.TestCase):
@@ -3844,7 +4158,20 @@ class TestDownload(unittest.TestCase):
             ),
             patch("builtins.print") as printed,
         ):
-            result = ota._resolve_desired_state(platform)
+            try:
+                result = ota._resolve_desired_state(platform)
+            except ota.OtaDesiredStateUnusable as unusable:
+                # Absorbed here because these tests are about what the operator
+                # was *told*. An answer that cannot be used now raises, and
+                # `download_all_from_archive` catches it and carries on if a
+                # user credential can still resolve an archive — so the message
+                # below is still printed, and still worth pinning. Whether the
+                # refusal itself happens is the subject of
+                # TestARobotRefusesRatherThanSubstituting.
+                self.unusable = unusable
+                result = (False, None, None, None)
+            else:
+                self.unusable = None
             # Kept so a test can assert on what the operator was told; the
             # patch is inside this helper, so an outer one would be shadowed.
             self.printed = " ".join(str(c) for c in printed.call_args_list)
@@ -4010,7 +4337,11 @@ class TestDownload(unittest.TestCase):
             ),
             patch("builtins.print") as mock_print,
         ):
-            ota._resolve_desired_state(platform)
+            # Absorbed for the same reason as in `_desired_state`: this helper
+            # exists to read what the operator was told, and the message is
+            # printed before the refusal is raised.
+            with contextlib.suppress(ota.OtaDesiredStateUnusable):
+                ota._resolve_desired_state(platform)
         return " ".join(str(c) for c in mock_print.call_args_list)
 
     def test_no_target_says_the_node_is_unassigned(self):
@@ -4712,6 +5043,1301 @@ class TestPublishIntegration(unittest.TestCase):
 
             output = buf.getvalue()
             self.assertIn("OTA", output)
+
+
+class TestArchiveIdentityIsThisMachines(unittest.TestCase):
+    """`_archive_identity_from_tree` must answer about *this* machine.
+
+    The pattern was `*/*/*/*/<build>/ota-install.json`, and those four wildcards
+    are `<package>/<os_type>/<os_version>/<architecture>` -- so the OS, the
+    version and the architecture were all accepted as anything, and whichever
+    path sorted first won.
+
+    Where it bites: `archiveId` is per-platform, so a robot that
+    installed its own software never sees this. A tree that did not come from
+    this machine does -- a golden image cloned across hardware, a disk swap, a
+    workspace restored from another robot's backup. Two callers then act on the
+    answer: `_report_restored_snapshot` tells the fleet the wrong archive is
+    running, and the OTA agent compares it against what it was assigned and can
+    conclude it is already converged. It then installs nothing, reports nothing,
+    and reads as a quiet healthy node forever.
+
+    Its sibling `_collect_archive_snapshot_packages` globs just as widely but
+    rejects a foreign entry on `metadata["platform"]`. This one checked neither
+    the path nor the field.
+    """
+
+    ARM = ("ubuntu", "24.04", "arm64")
+    X86 = ("ubuntu", "24.04", "x86_64")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name) / "release" / "install"
+
+    def as_machine(self, platform):
+        os_type, os_version, architecture = platform
+        ota.configure(
+            ota.OtaContext(
+                workspace=Path(self.tmp.name),
+                os_type=os_type,
+                os_version=os_version,
+                architecture=architecture,
+                robot=TEST_ROBOT_IDENTITY,
+            )
+        )
+
+    def tree_holding(self, platform, package, archive_id, name, version):
+        os_type, os_version, architecture = platform
+        path = (
+            self.base
+            / package
+            / os_type
+            / os_version
+            / architecture
+            / "release"
+            / ota._INSTALL_METADATA_FILE
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "source": "archive",
+                    "archiveId": archive_id,
+                    "archiveName": name,
+                    "archiveVersion": version,
+                    "platform": f"{os_type}-{os_version}-{architecture}",
+                    "buildType": "release",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_its_own_tree_still_reads(self):
+        """The regression guard: scoping must not make every tree unreadable."""
+        self.as_machine(self.X86)
+        self.tree_holding(self.X86, "raisin", "x86-id", "raisin-robot", "1.0.0")
+
+        self.assertEqual(
+            ota._archive_identity_from_tree(self.base, "release"),
+            ("x86-id", "raisin-robot", "1.0.0"),
+        )
+
+    def test_another_machines_tree_reads_as_nothing_installed(self):
+        """Not as a confident wrong answer. `None` is a state to install from."""
+        self.as_machine(self.X86)
+        self.tree_holding(self.ARM, "raisin", "arm-id", "foreign-archive", "9.9.9")
+
+        self.assertIsNone(ota._archive_identity_from_tree(self.base, "release"))
+
+    def test_a_tree_holding_both_answers_with_this_machines(self):
+        """The sharp case: `arm64` sorts before `x86_64`, so the foreign one won.
+
+        A count or a first-match is not enough here -- the answer has to be
+        selected by platform, not merely be present.
+        """
+        self.as_machine(self.X86)
+        self.tree_holding(self.ARM, "raisin", "arm-id", "foreign-archive", "9.9.9")
+        self.tree_holding(self.X86, "raisin", "x86-id", "raisin-robot", "1.0.0")
+
+        self.assertEqual(
+            ota._archive_identity_from_tree(self.base, "release"),
+            ("x86-id", "raisin-robot", "1.0.0"),
+        )
+
+    def test_the_same_architecture_on_another_os_version_is_still_foreign(self):
+        """`archiveId` is per-platform, and the version is part of the platform."""
+        self.as_machine(self.X86)
+        self.tree_holding(
+            ("ubuntu", "22.04", "x86_64"), "raisin", "old-id", "raisin-robot", "1.0.0"
+        )
+
+        self.assertIsNone(ota._archive_identity_from_tree(self.base, "release"))
+
+    def test_a_build_type_this_machine_did_not_ask_for_is_still_ignored(self):
+        """Scoping the platform must not lose the check that was already there."""
+        self.as_machine(self.X86)
+        self.tree_holding(self.X86, "raisin", "dbg-id", "raisin-robot", "1.0.0")
+        moved = self.base / "raisin" / "ubuntu" / "24.04" / "x86_64"
+        (moved / "release").rename(moved / "debug")
+
+        self.assertIsNone(ota._archive_identity_from_tree(self.base, "release"))
+
+
+class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
+    """An answer the robot cannot use must not become a different install.
+
+    `_resolve_desired_state` returned `(False, None, None, None)` for every
+    answer it could not act on — platform mismatch, `no_target`, `unconfigured`,
+    a reason this client does not recognise — and the caller reads that as "the
+    server expressed no preference" and continues down its own priority order:
+    `desired state > archive_version > tag > legacy latest`.
+
+    For a person at a terminal that is right. They ran a command, they want
+    software, and the fleet's opinion is advisory.
+
+    For a machine converging on an assignment it inverts the contract. Its only
+    job is to run what it was assigned; installing something else and reporting
+    success means the fleet shows a version nobody chose, and shows it as
+    healthy. On a machine with no user credential the fall-through fails
+    instead, with `No archive found for 'raisin-robot'` — which names neither
+    the assignment nor why it could not be used.
+
+    `OtaInstallHalted` already argues this case for the neighbouring one:
+
+        A halt is an instruction; an empty result is an absence, and the two
+        must not share a representation.
+
+    "The thing you were told to install is unusable" is also an instruction.
+    """
+
+    PAYLOADS = {
+        "another platform": {
+            "halt": False,
+            "reason": "node_pin",
+            "target": {
+                "name": "raisin-robot",
+                "version": "2026.1.0",
+                "platform": "ubuntu-22.04-x86_64",
+            },
+        },
+        "a target with no version": {
+            "halt": False,
+            "reason": "node_pin",
+            "target": {"name": "raisin-robot", "platform": "ubuntu-24.04-arm64"},
+        },
+        "a reason this client does not know": {"halt": False, "reason": "quarantined"},
+    }
+
+    #: Answers that are not instructions at all. Review finding on this branch:
+    #: these two print "continuing on the legacy route" and then refused, so the
+    #: output said one thing and the code did the other — and an unassigned
+    #: robot, which the code below calls a normal state in so many words, ended
+    #: an install as a reported failure.
+    ABSENCES = {
+        "no target": {"halt": False, "reason": "no_target"},
+        "unconfigured": {"halt": False, "reason": "unconfigured"},
+        # No reason at all is not an unreadable reason. The agent already reads
+        # it this way, and two components disagreeing about one field is worse
+        # than either answer: a server that omits it would refuse the CLI on a
+        # robot while the agent beside it called the same answer normal.
+        "no reason given": {"halt": False},
+        "an empty reason": {"halt": False, "reason": ""},
+    }
+
+    def resolve(self, payload, as_robot=True, platform="ubuntu-24.04-arm64"):
+        identity = _robot_identity() if as_robot else _no_robot_identity()
+        with (
+            identity,
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.get",
+                return_value=_mock_response(
+                    json_data={"success": True, "data": payload}
+                ),
+            ),
+            patch("builtins.print"),
+        ):
+            return ota._resolve_desired_state(platform)
+
+    def test_a_robot_refuses_every_answer_it_cannot_use(self):
+        for description, payload in self.PAYLOADS.items():
+            with self.subTest(description):
+                with self.assertRaises(ota.OtaDesiredStateUnusable):
+                    self.resolve(payload)
+
+    def test_but_nothing_assigned_is_not_one_of_them(self):
+        """Nobody was told anything, so nothing was misunderstood.
+
+        The exception says "told what to run and cannot use the answer". These
+        two are the other case, and treating them as instructions turned a node
+        the fleet has no plan for into a failed install.
+        """
+        for description, payload in self.ABSENCES.items():
+            with self.subTest(description):
+                self.assertEqual(self.resolve(payload), (False, None, None, None))
+
+    @patch("raisin_ota.client._fetch_archive_with_stable_fallback", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_an_unassigned_node_can_still_reach_the_fallback(
+        self, mock_desired, _mock_tag
+    ):
+        """Which is what the line it prints promises, and what it did before.
+
+        `{}` is how this tells `install.py` to try GitHub releases per package.
+        A refusal here is raised ahead of that return, so refusing for an
+        absence did not just mislabel the state — it removed the route.
+        """
+        mock_desired.return_value = (False, None, None, None)
+
+        with tempfile.TemporaryDirectory() as tmpdir, _robot_identity():
+            self.assertEqual(ota.download_all_from_archive("release", Path(tmpdir)), {})
+
+    def test_the_refusal_carries_why(self):
+        """It becomes the failure reason the fleet is told, so it has to say something."""
+        with self.assertRaises(ota.OtaDesiredStateUnusable) as caught:
+            self.resolve(self.PAYLOADS["another platform"])
+
+        message = str(caught.exception)
+        self.assertIn("ubuntu-22.04-x86_64", message)
+        self.assertIn("ubuntu-24.04-arm64", message)
+
+    def test_an_unrecognised_reason_reaches_the_message(self):
+        with self.assertRaises(ota.OtaDesiredStateUnusable) as caught:
+            self.resolve(self.PAYLOADS["a reason this client does not know"])
+
+        self.assertIn("quarantined", str(caught.exception))
+
+    # The caller decides whether anything can follow. These two are the whole
+    # of it, and they are asserted where the decision is made rather than where
+    # the refusal is raised -- an earlier version of this class tested the
+    # no-robot-identity case at `_resolve_desired_state` and passed without the
+    # code, because without a credential the function returns before it reaches
+    # any of these branches at all.
+
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_nothing_can_follow_so_the_assignment_is_the_answer(
+        self, mock_desired, _mock_manifest
+    ):
+        """A machine with no user credential: every route past this needs a JWT.
+
+        Before this, the failure read `No archive found for 'raisin-robot'` --
+        an archive nobody assigned to this machine, named in the error for a
+        machine that was assigned something else entirely.
+        """
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable(
+            "the OTA server assigned an archive for 'ubuntu-22.04-x86_64' but "
+            "this node is 'ubuntu-24.04-arm64'"
+        )
+
+        # `tag=None` is how an unattended caller asks: it wants what it was
+        # assigned and nothing else, so it does not offer a tag to fall back to.
+        # That path gives up at `manifest is None`; the default `tag="stable"`
+        # gives up one branch earlier, and both have to carry the reason.
+        with tempfile.TemporaryDirectory() as tmpdir, _robot_identity():
+            with self.assertRaises(ota.OtaDesiredStateUnusable) as caught:
+                ota.download_all_from_archive("release", Path(tmpdir), tag=None)
+
+        self.assertIn("ubuntu-22.04-x86_64", str(caught.exception))
+
+    @patch("raisin_ota.client._fetch_archive_with_stable_fallback", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_the_tag_route_giving_up_carries_the_reason_too(
+        self, mock_desired, _mock_tag
+    ):
+        """Otherwise it announces a fall back to GitHub releases per repo.
+
+        Two stacked substitutions, and neither visible as a failure — which is
+        the shape this whole change is about.
+        """
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+
+        with tempfile.TemporaryDirectory() as tmpdir, _robot_identity():
+            with self.assertRaises(ota.OtaDesiredStateUnusable):
+                ota.download_all_from_archive("release", Path(tmpdir))
+
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_a_caller_that_can_still_resolve_one_carries_on(self, mock_desired):
+        """The person at a terminal, unchanged. They ran a command; they want software."""
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("unusable")
+
+        # `_fetch_archive_with_stable_fallback`, not `_fetch_archive_manifest`:
+        # `tag` defaults to "stable", so that is the route a caller who pinned
+        # nothing actually takes. Patching the other one left the tag route
+        # unpatched, it resolved nothing, and the refusal was re-raised — which
+        # is correct behaviour and a wrong test.
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            _robot_identity(),
+            patch(
+                "raisin_ota.client._fetch_archive_with_stable_fallback",
+                return_value=([], "arch-1", "1.0.0"),
+            ),
+        ):
+            # No packages in the manifest, so nothing is downloaded and the call
+            # returns without reaching the network. What matters is that it got
+            # past the refusal.
+            ota.download_all_from_archive("release", Path(tmpdir))
+
+    def test_a_usable_target_is_unaffected(self):
+        halted, name, version, _manifest = self.resolve(
+            {
+                "halt": False,
+                "reason": "node_pin",
+                "target": {
+                    "name": "raisin-robot",
+                    "version": "2026.1.0",
+                    "platform": "ubuntu-24.04-arm64",
+                },
+            }
+        )
+
+        self.assertFalse(halted)
+        self.assertEqual((name, version), ("raisin-robot", "2026.1.0"))
+
+    def test_a_halt_is_still_a_halt(self):
+        """Two instructions; neither may become the other.
+
+        A halt comes back as a flag and `download_all_from_archive` turns it
+        into `OtaInstallHalted` — an asymmetry with the refusal below, which is
+        raised where it is found. Kept rather than tidied: the halt flag is part
+        of this function's published tuple and several callers read it, while
+        the refusal has no caller that could do anything but re-raise. Pinned so
+        the halt path cannot quietly start raising the other one.
+        """
+        self.assertEqual(
+            self.resolve({"halt": True, "haltSources": ["tenant"]}),
+            (True, None, None, None),
+        )
+
+
+class TestAPackageDroppedFromAnArchiveGoesAway(unittest.TestCase):
+    """Switching archives must not leave the one you switched away from behind.
+
+    Staging clones the live tree so a version can be built without touching what
+    is running, and the download loop only writes the packages the new archive
+    names. A package that archive A had and archive B does not was therefore
+    still installed after switching to B — still on `LD_LIBRARY_PATH`, still
+    visible to `index` and to `deploy_install_packages`, and still reported in
+    the snapshot as part of B.
+
+    `stage_version`'s docstring says "one complete package tree", which was then
+    not quite true: it was the union of every archive the machine had ever run.
+
+    Locally-installed packages are left alone. They have no archive metadata,
+    nobody said they were part of B, and removing what a person put there by
+    hand is not this function's business.
+    """
+
+    def archive_metadata(self, name, archive_id):
+        return json.dumps(
+            {
+                "source": "archive",
+                "archiveId": archive_id,
+                "archiveName": "raisin-robot",
+                "archiveVersion": "1.0.0",
+                "packageName": name,
+                "platform": "ubuntu-24.04-arm64",
+                "buildType": "release",
+            }
+        )
+
+    def seed_live_tree(self, tmpdir, packages, local=()):
+        """A committed generation holding `packages` from an archive.
+
+        Paths built by `package_dir`, not spelled out. Spelling them out put the
+        fixture on `ubuntu/24.04/arm64` while the context under test was
+        somewhere else, so the metadata was never found and the code under test
+        did nothing — a red that pointed at the wrong file.
+        """
+        g.script_directory = tmpdir
+        _sync_ota_context()
+        release = Path(tmpdir) / "release"
+        release.mkdir(parents=True, exist_ok=True)
+        staging = install_tree.stage_version(release, "1.0.0")
+        for name in packages:
+            d = ota._ctx().package_dir(staging, name, "release")
+            d.mkdir(parents=True)
+            (d / ota._INSTALL_METADATA_FILE).write_text(
+                self.archive_metadata(name, "arch-A"), encoding="utf-8"
+            )
+        for name in local:
+            d = ota._ctx().package_dir(staging, name, "release")
+            d.mkdir(parents=True)
+            (d / "release.yaml").write_text("version: 0.1.0\n", encoding="utf-8")
+        install_tree.commit_version(release, "1.0.0")
+        return release
+
+    def install_archive_holding(self, tmpdir, package_names):
+        packages = [
+            {
+                "packageId": f"p-{n}",
+                "packageName": n,
+                "manifestHash": "a" * 64,
+                "tagName": "0.2.0",
+            }
+            for n in package_names
+        ]
+
+        def extract(download_file, install_dir, package_name, version, **kw):
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "release.yaml").write_text("version: 0.2.0\n")
+            return {"version": version, "dependencies": []}
+
+        with (
+            _robot_identity(),
+            patch("raisin_ota.client._resolve_desired_state") as mock_desired,
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch("raisin_ota.client._extract_and_read_deps", side_effect=extract),
+            patch("raisin_ota.client.record_install_event"),
+            patch("raisin_ota.client.report_software_snapshot"),
+        ):
+            mock_desired.return_value = (
+                False,
+                "raisin-robot",
+                "2.0.0",
+                (packages, "arch-B", "2.0.0"),
+            )
+            g.script_directory = tmpdir
+            _sync_ota_context()
+            return ota.download_all_from_archive(
+                "release", Path(tmpdir) / "release" / "install"
+            )
+
+    def live_packages(self, release):
+        live = release / "install"
+        return sorted(p.name for p in live.iterdir() if p.is_dir())
+
+    def test_a_package_the_new_archive_does_not_have_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = self.seed_live_tree(tmpdir, ["pkg1", "pkg2"])
+
+            self.install_archive_holding(tmpdir, ["pkg1"])
+
+            self.assertEqual(self.live_packages(release), ["pkg1"])
+
+    def test_the_packages_it_does_have_survive(self):
+        """The other half: pruning must not empty the tree it is tidying."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = self.seed_live_tree(tmpdir, ["pkg1", "pkg2"])
+
+            self.install_archive_holding(tmpdir, ["pkg1", "pkg2"])
+
+            self.assertEqual(self.live_packages(release), ["pkg1", "pkg2"])
+
+    def test_a_package_installed_by_the_timestamp_route_is_left_alone(self):
+        """It records `source: timestamp`, and no archive claimed it.
+
+        The case the `source` check exists for. Without it, `installed by some
+        other route` and `installed by the archive we are replacing` are the
+        same thing, and switching archives quietly deletes the first.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = self.seed_live_tree(tmpdir, ["pkg1"])
+            other = ota._ctx().package_dir(
+                release / "install", "by-timestamp", "release"
+            )
+            other.mkdir(parents=True)
+            (other / ota._INSTALL_METADATA_FILE).write_text(
+                json.dumps({"source": "timestamp", "packageName": "by-timestamp"}),
+                encoding="utf-8",
+            )
+
+            self.install_archive_holding(tmpdir, ["pkg1"])
+
+            self.assertIn("by-timestamp", self.live_packages(release))
+
+    def test_a_locally_installed_package_is_left_alone(self):
+        """No archive said it was there, so no archive gets to say it is not."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = self.seed_live_tree(tmpdir, ["pkg1"], local=["mine"])
+
+            self.install_archive_holding(tmpdir, ["pkg1"])
+
+            self.assertEqual(self.live_packages(release), ["mine", "pkg1"])
+
+
+class TestPruningStaysInsideTheBuildItIsPruning(unittest.TestCase):
+    """A package directory is shared; only the leaf under it belongs to a build.
+
+    `package_dir` puts the build type last — `<pkg>/<os>/<ver>/<arch>/<type>` —
+    and `install.py` hands debug and release the same install base. So one
+    package directory holds both builds, and removing the directory removes the
+    build nobody said anything about.
+
+    Review finding on this branch. The same shape covers the platform
+    components: a tree carried over from another machine sits under the same
+    package name and is not this archive's to delete either.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        self.staging = Path(self._tmp.name) / "staging"
+        self.staging.mkdir(parents=True)
+
+    def install(self, package, build_type="release", where=None):
+        directory = where or ota._ctx().package_dir(self.staging, package, build_type)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / ota._INSTALL_METADATA_FILE).write_text(
+            json.dumps({"source": "archive", "packageName": package}),
+            encoding="utf-8",
+        )
+        return directory
+
+    def test_the_other_build_of_a_dropped_package_stays(self):
+        self.install("pkg2", "release")
+        debug = self.install("pkg2", "debug")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "debug")
+
+        self.assertFalse(debug.exists())
+        self.assertTrue(
+            ota._ctx().package_dir(self.staging, "pkg2", "release").exists()
+        )
+
+    def test_a_tree_from_another_platform_stays(self):
+        foreign = self.staging / "pkg2" / "ubuntu" / "22.04" / "arm64" / "release"
+        self.install("pkg2", "release", where=foreign)
+        self.install("pkg2", "release")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "release")
+
+        self.assertTrue(foreign.exists())
+
+    def test_the_build_that_dropped_it_still_loses_it(self):
+        """The point of the function, unchanged."""
+        self.install("pkg2", "release")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "release")
+
+        self.assertFalse(
+            ota._ctx().package_dir(self.staging, "pkg2", "release").exists()
+        )
+
+    def test_nothing_left_under_it_takes_the_package_directory_too(self):
+        """Or a package with no build under it still reads as installed."""
+        self.install("pkg2", "release")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "release")
+
+        self.assertFalse((self.staging / "pkg2").exists())
+
+    def test_but_only_up_to_the_tree_it_was_given(self):
+        self.install("pkg2", "release")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "release")
+
+        self.assertTrue(self.staging.exists())
+
+    def test_a_package_directory_still_holding_a_build_stays(self):
+        self.install("pkg2", "release")
+        self.install("pkg2", "debug")
+
+        ota._prune_packages_the_archive_dropped(self.staging, {"pkg1"}, "debug")
+
+        self.assertTrue((self.staging / "pkg2").exists())
+
+
+class TestARefusedCredentialIsNotSilence(unittest.TestCase):
+    """A credential the server rejects must not read as "no opinion".
+
+    Both answers came back as `unauthorized` with one message —
+    `the OTA server refused this robot credential` — and the run then continued
+    down the same path it takes when nothing is assigned. On a machine that can
+    authenticate as a user that is a silent downgrade: the install succeeds,
+    attributed to a person, and the credential stays broken because nothing ever
+    failed. On one that cannot, it ends at `No archive found`.
+
+    They are different problems and want different sentences:
+
+        401  the credential is not valid — mistyped, expired or revoked
+        403  the credential is valid and not permitted here — a missing scope,
+             or pinned to another node
+
+    The second is a configuration error a person can fix from the message. The
+    first is not fixable by editing anything.
+    """
+
+    def resolve(self, status):
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.get",
+                return_value=_mock_response(status_code=status, json_data={}),
+            ),
+            patch("builtins.print") as printed,
+        ):
+            try:
+                ota._resolve_desired_state("ubuntu-24.04-arm64")
+                return None, " ".join(str(c) for c in printed.call_args_list)
+            except ota.OtaDesiredStateUnusable as unusable:
+                return unusable, " ".join(str(c) for c in printed.call_args_list)
+
+    def test_a_rejected_credential_is_not_a_shrug(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                unusable, _printed = self.resolve(status)
+
+                self.assertIsNotNone(
+                    unusable, f"{status} continued as though nothing was wrong"
+                )
+
+    def test_an_invalid_credential_says_so(self):
+        unusable, _printed = self.resolve(401)
+
+        self.assertIn("not valid", str(unusable))
+
+    def test_a_credential_that_is_not_permitted_says_that_instead(self):
+        """Not the same sentence: one is fixable by configuration, one is not."""
+        unusable, _printed = self.resolve(403)
+
+        message = str(unusable)
+        self.assertNotIn("not valid", message)
+        self.assertIn("not permitted", message)
+
+    def test_the_operator_is_told_before_the_refusal(self):
+        _unusable, printed = self.resolve(403)
+
+        self.assertIn("403", printed)
+
+
+class TestRetiredSessionsDoNotAccumulate(unittest.TestCase):
+    """One directory per install session, and only the current one is retired.
+
+    `clear_install_session` removes the session it retires. A session that dies
+    by the resume window instead — a crash mid-install, then more than a day
+    before the next run — is retired by nothing, and would sit there for the
+    life of a robot that installs often.
+
+    Swept when a session is opened, which is once per install, rather than on
+    every event. A directory whose `opened-at` cannot be read is left alone: it
+    is most likely one another process is creating right now, and not knowing
+    how old something is has never been grounds for deleting it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+
+    def a_session_opened(self, name, ago):
+        directory = ota._session_dir(name)
+        directory.mkdir(parents=True)
+        (directory / ota._SESSION_OPENED_AT).write_text(
+            repr(time.time() - ago), encoding="utf-8"
+        )
+        return directory
+
+    def sessions(self):
+        return sorted(
+            entry.name
+            for entry in ota._sessions_dir().iterdir()
+            if entry.is_dir() and not entry.is_symlink()
+        )
+
+    def test_one_past_the_window_is_removed(self):
+        self.a_session_opened("old", ota._INSTALL_SESSION_TTL_SECONDS + 1)
+
+        ota.get_install_session_id()
+
+        self.assertNotIn("old", self.sessions())
+
+    def test_one_still_inside_it_is_kept(self):
+        """Otherwise a resumed install re-reports `started`."""
+        self.a_session_opened("recent", 60)
+
+        ota.get_install_session_id()
+
+        self.assertIn("recent", self.sessions())
+
+    def test_one_that_cannot_say_when_it_opened_is_left_alone(self):
+        directory = ota._session_dir("half-made")
+        directory.mkdir(parents=True)
+
+        ota.get_install_session_id()
+
+        self.assertIn("half-made", self.sessions())
+
+    def test_the_session_being_opened_is_never_swept(self):
+        opened = ota.get_install_session_id()
+
+        self.assertIn(opened, self.sessions())
+
+    def test_retiring_one_takes_its_whole_directory(self):
+        opened = ota.get_install_session_id()
+
+        ota.clear_install_session()
+
+        self.assertNotIn(opened, self.sessions())
+
+    def test_and_leaves_nothing_pointing_at_it(self):
+        ota.get_install_session_id()
+
+        ota.clear_install_session()
+
+        self.assertIsNone(ota._read_install_session())
+
+
+class TestTheTokenCacheIsNotWorldReadable(unittest.TestCase):
+    """It is a bearer token, and the key file next to it is held to 0600.
+
+    `robot_credentials` refuses a robot key file that is group- or
+    world-readable, and writes its own with `os.open(..., 0o600)`. The token
+    cache was written with `open(path, "w")` — whatever the umask allows, 0644
+    on a normal machine. On a shared box, copying it grants that account the
+    same access until the token expires, which is the threat the key file check
+    exists for.
+
+    Same secret class, same handling. Refusing to *read* a loose one is a
+    separate question: this file is written by the tool for itself, so the tool
+    can simply not create the problem.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+
+    def mode_after_saving(self, existing_mode=None):
+        path = ota._get_token_cache_path()
+        if existing_mode is not None:
+            path.write_text("{}", encoding="utf-8")
+            os.chmod(path, existing_mode)
+        with patch(
+            "raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com"
+        ):
+            ota._save_token("a.b.c")
+        return os.stat(path).st_mode & 0o777
+
+    def test_a_new_cache_is_owner_only(self):
+        self.assertEqual(self.mode_after_saving(), 0o600)
+
+    def test_a_loose_one_left_by_an_older_version_is_tightened(self):
+        """Upgrading must fix the file, not walk past it."""
+        self.assertEqual(self.mode_after_saving(existing_mode=0o644), 0o600)
+
+    def test_it_is_never_briefly_readable_on_the_way_there(self):
+        """The mode is set at creation, not fixed afterwards.
+
+        `chmod` after the write leaves a window where the token is on disk and
+        readable. Asserting on that race from in-process is not possible, so
+        this asserts the property that makes it impossible instead: with `chmod`
+        unavailable the file is still 0600, which can only be true if creation
+        set it.
+        """
+        with patch("raisin_ota.client.os.chmod", side_effect=OSError("nope")):
+            mode = self.mode_after_saving()
+
+        self.assertEqual(mode, 0o600)
+
+    def test_the_token_is_still_readable_afterwards(self):
+        """Tightening the mode must not make the tool unable to read its own file."""
+        self.mode_after_saving()
+
+        with patch(
+            "raisin_ota.client.get_ota_endpoint",
+            return_value="https://ota.example.com",
+        ):
+            self.assertEqual(ota._load_cached_token(), "a.b.c")
+
+
+class TestDownloadsAskForNoEncoding(unittest.TestCase):
+    """A proxy that compresses would break both checks the download depends on.
+
+    Nothing in front of this server compresses today, so this is hardening
+    rather than a live bug — but the two things it protects are the two things
+    that make a download trustworthy, and both count *decoded* bytes: the
+    Content-Length comparison and the sha256 of the body. A transparently
+    compressed response satisfies neither, and a resumed `Range` on a
+    re-compressed body splices garbage.
+    """
+
+    def request_headers_for(self, existing=0):
+        captured = {}
+
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def raise_for_status(self_inner):
+                return None
+
+            def iter_content(self_inner, chunk_size=None):
+                return iter([b""])
+
+        def fake_get(url, headers=None, **kw):
+            captured.update(headers or {})
+            raise AssertionError("stop after the request is built")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            part = Path(tmpdir) / "blob.part"
+            if existing:
+                part.write_bytes(b"x" * existing)
+                ota._write_part_state(part, "a" * 64)
+            with patch("raisin_ota.client.requests.get", side_effect=fake_get):
+                with contextlib.suppress(AssertionError):
+                    ota._attempt_download(
+                        "https://ota.example.com/blob",
+                        part,
+                        Path(tmpdir) / "blob",
+                        {"Authorization": "Bearer x"},
+                        None,
+                        30,
+                    )
+        return captured
+
+    def test_identity_encoding_is_requested(self):
+        self.assertEqual(self.request_headers_for().get("Accept-Encoding"), "identity")
+
+    def test_the_callers_own_headers_survive(self):
+        self.assertEqual(self.request_headers_for().get("Authorization"), "Bearer x")
+
+
+class TestATerminalEventNamesItsArchive(unittest.TestCase):
+    """An event that does not say which archive it is about is a lost event.
+
+    `archiveId` is optional per event and the rollout aggregate copes — it picks
+    sessions by archive and takes each one whole. Nothing else does: listing an
+    archive's install events filters on the field, so the list shows starts and
+    no outcomes. Measured against a running server, every terminal event on it
+    carried no archive at all.
+
+    ## Why not fill it in at flush time
+
+    That was the first plan and it does not survive the case that matters most.
+    `started` is emitted once per session, and a session *resumes* after a crash
+    — deliberately, so a partial install can be finished. So:
+
+        cycle N    started emitted, flushed, acked, dropped from the queue
+        crash
+        cycle N+1  same session resumes; `started` is suppressed by the guard
+                   the install fails, the rollback reports alone
+
+    At that flush the queue holds one event and nothing to borrow from. A robot
+    that crashed and reverted is exactly the robot this has to describe.
+
+    ## So the session remembers it
+
+    Which is a thing the session already is: the server refuses a session used
+    for a second archive, so "this session's archive" is not a new concept, only
+    one the client had not written down. It goes in the session file, which
+    outlives the process for the same reason the session id does.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        ota.clear_pending_install_failure()
+        _as_robot(self)
+        # Through the real allocation, which is what writes the session record.
+        self.session = ota.get_install_session_id()
+
+    def queued(self):
+        return ota._read_install_event_queue()
+
+    def start_tagged(self):
+        ota.record_install_event(
+            "started",
+            archive_id="arch-1",
+            archive_name="raisin-robot",
+            archive_version="1.0.0",
+            platform="ubuntu-24.04-arm64",
+        )
+
+    def test_a_terminal_event_inherits_the_session_archive(self):
+        self.start_tagged()
+
+        ota.record_install_event("succeeded")
+
+        self.assertEqual(self.queued()[-1]["archiveId"], "arch-1")
+
+    def test_it_inherits_the_name_and_version_too(self):
+        # The listing shows these; an id alone still reads as blank on the sheet.
+        self.start_tagged()
+
+        ota.record_install_event("failed", error_code=ota.ERROR_UNKNOWN)
+
+        event = self.queued()[-1]
+        self.assertEqual(event["archiveName"], "raisin-robot")
+        self.assertEqual(event["archiveVersion"], "1.0.0")
+
+    def test_an_event_that_names_its_own_archive_keeps_it(self):
+        self.start_tagged()
+
+        ota.record_install_event("rolled_back", archive_id="arch-2")
+
+        self.assertEqual(self.queued()[-1]["archiveId"], "arch-2")
+
+    def test_it_survives_the_process_that_learned_it(self):
+        """The crash case. A resumed session must still know its archive."""
+        self.start_tagged()
+        # What a restart leaves: nothing in memory, the session file on disk.
+        ota._install_session_id = None
+
+        ota.record_install_event("rolled_back")
+
+        self.assertEqual(self.queued()[-1]["archiveId"], "arch-1")
+
+    def test_a_different_session_inherits_nothing(self):
+        self.start_tagged()
+
+        ota.record_install_event("succeeded", install_session_id="a-second-session")
+
+        self.assertNotIn("archiveId", self.queued()[-1])
+
+    def session_archive(self, session_id=None):
+        return ota._session_archive(session_id or self.session)
+
+    def opened_at(self, session_id=None):
+        return ota._session_opened_at(session_id or self.session)
+
+    def test_it_cannot_reach_the_session_that_is_actually_running(self):
+        """A caller may name a session other than the open one.
+
+        Each session's archive lives in that session's own directory, so this
+        stopped being a rule to remember: there is no name here that reaches
+        another session's record.
+        """
+        ota.record_install_event(
+            "started", archive_id="arch-1", install_session_id="a-foreign-session"
+        )
+
+        self.assertIsNone(self.session_archive())
+        self.assertEqual(
+            self.session_archive("a-foreign-session")["archiveId"], "arch-1"
+        )
+
+    def test_noting_the_archive_does_not_restart_the_session_clock(self):
+        """When a session opened decides whether a crashed one may be resumed.
+
+        Written once, in its own file, and nothing here rewrites it.
+        """
+        before = self.opened_at()
+
+        self.start_tagged()
+
+        self.assertEqual(self.opened_at(), before)
+
+    def test_the_first_archive_a_session_names_stands(self):
+        # The server refuses a session used for a second archive, so a later,
+        # different one is a mistake to preserve the evidence of, not adopt.
+        self.start_tagged()
+
+        ota.record_install_event("progress", archive_id="arch-2")
+
+        self.assertEqual(self.session_archive()["archiveId"], "arch-1")
+
+    def test_a_start_with_no_archive_does_not_claim_the_session(self):
+        """A refusal opens an attempt with no target, and may still say which
+        platform asked. Letting that partial record stand would lock the real
+        archive out, because the first one a session names is the one that
+        stands.
+        """
+        ota.record_install_event("started", platform="ubuntu-24.04-arm64")
+
+        ota.record_install_event(
+            "failed",
+            error_code=ota.ERROR_UNKNOWN,
+            archive_id="arch-1",
+            archive_name="raisin-robot",
+            archive_version="1.0.0",
+        )
+
+        self.assertEqual(self.session_archive()["archiveId"], "arch-1")
+
+    def test_a_session_that_never_named_one_reports_without_it(self):
+        # Not a crash and not a guess: a refusal opens an attempt with no target.
+        ota.record_install_event("started")
+
+        ota.record_install_event("failed", error_code=ota.ERROR_UNKNOWN)
+
+        self.assertNotIn("archiveId", self.queued()[-1])
+
+
+class TestHalfWrittenFilesAreNotTakenForData(unittest.TestCase):
+    """Every create here is a write to a temporary name and then a rename.
+
+    So a crash between the two leaves the temporary behind, and a reader that
+    did not know to skip it would send whatever was in it to the server as an
+    event — or, worse, count it as one and keep a real one out.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-half-written"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        _as_robot(self)
+
+    def a_leftover_temporary(self, text):
+        directory = ota._events_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{ota._TEMP_PREFIX}abandoned"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_leftover_is_not_read_as_an_event(self):
+        self.a_leftover_temporary(json.dumps({"eventId": "x", "eventType": "started"}))
+
+        self.assertEqual(ota._read_install_event_queue(), [])
+
+    def test_and_does_not_take_a_place_in_the_buffer(self):
+        self.a_leftover_temporary("{ half writ")
+
+        ota.record_install_event("started")
+
+        self.assertEqual(len(ota._read_install_event_queue()), 1)
+
+    def test_one_left_from_an_old_crash_is_cleaned_up(self):
+        """Nothing else would ever remove it, and nothing bounds how many there are."""
+        leftover = self.a_leftover_temporary("{ half writ")
+        os.utime(
+            leftover,
+            (0, time.time() - ota._INSTALL_SESSION_TTL_SECONDS - 60),
+        )
+        ota._install_session_id = None
+
+        ota.get_install_session_id()
+
+        self.assertFalse(leftover.exists())
+
+    def test_and_is_not_counted_as_something_still_owed(self):
+        """`drained` decides whether a caller keeps flushing or stands down."""
+        ota.record_install_event("started")
+        self.a_leftover_temporary("{ half writ")
+
+        def send(*args, **kwargs):
+            return _mock_response(
+                json_data={
+                    "success": True,
+                    "data": {
+                        "acks": [
+                            {"eventId": e["eventId"]} for e in kwargs["json"]["events"]
+                        ]
+                    },
+                }
+            )
+
+        with patch("raisin_ota.client.requests.post", side_effect=send):
+            self.assertTrue(ota.flush_install_events().drained)
+
+    def test_but_one_that_may_still_be_being_written_is_not(self):
+        leftover = self.a_leftover_temporary("{ half writ")
+        ota._install_session_id = None
+
+        ota.get_install_session_id()
+
+        self.assertTrue(leftover.exists())
+
+
+class TestACorruptStateDirectoryFailsOpen(unittest.TestCase):
+    """Everything else here treats unreadable state as nothing. So must this.
+
+    The session id became a directory name, and it is checked as one — but the
+    check raises, and it is reached through `get_install_session_id`, which
+    every install goes through. A pointer somebody edited by hand would then
+    stop the robot installing rather than start it a new session.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+
+    def point_current_at(self, target):
+        link = ota._current_session_link()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(target, link)
+
+    def test_a_pointer_out_of_the_directory_starts_a_new_session(self):
+        self.point_current_at("..")
+
+        self.assertTrue(ota.get_install_session_id())
+
+    def test_an_empty_pointer_does_too(self):
+        self.point_current_at(".")
+
+        self.assertTrue(ota.get_install_session_id())
+
+
+class TestClaimingWorksWithoutHardLinks(unittest.TestCase):
+    """A create here links a temporary into place, and not every mount can.
+
+    The claim is what decides whether anything is reported at all, so a
+    filesystem without hard links would have turned into a robot that silently
+    never says a word — an environment answering a question about correctness.
+    Linking is still the first choice, because it puts the whole content there
+    or nothing; failing that, the name is still claimed exclusively and the
+    only thing lost is that a reader can catch it empty.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-no-links"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        _as_robot(self)
+
+    def no_links(self):
+        return patch(
+            "raisin_ota.client.os.link",
+            side_effect=OSError(errno.EPERM, "no hard links here"),
+        )
+
+    def test_an_event_is_still_recorded(self):
+        with self.no_links():
+            self.assertIsNotNone(ota.record_install_event("started"))
+
+    def test_the_claim_is_still_exclusive(self):
+        with self.no_links():
+            ota.record_install_event("started")
+
+            self.assertIsNone(ota.record_install_event("started"))
+
+    def test_and_the_content_still_arrives(self):
+        with self.no_links():
+            ota.record_install_event("started", archive_id="arch-1")
+
+        self.assertEqual(
+            ota._session_archive("session-no-links")["archiveId"], "arch-1"
+        )
+
+
+class TestAnAttemptThatCouldNotBufferMaySpeakLater(unittest.TestCase):
+    """Reporting once is a claim taken before the event is written.
+
+    That order is deliberate: a crash between the two would otherwise report
+    twice on resume. But it means a write that fails has spent the attempt's
+    only chance to say anything, and a robot that could not buffer its `started`
+    would then be barred from reporting the outcome as well.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-unwritable"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        _as_robot(self)
+
+    def test_a_failed_write_gives_the_claim_back(self):
+        with patch("raisin_ota.client._replace_with", return_value=False):
+            self.assertIsNone(ota.record_install_event("started"))
+
+        self.assertIsNotNone(ota.record_install_event("started"))
+
+    def test_one_that_was_written_still_holds_it(self):
+        ota.record_install_event("started")
+
+        self.assertIsNone(ota.record_install_event("started"))
+
+
+class TestTwoWritersDoNotLoseEachOthersEvents(unittest.TestCase):
+    """The queue is written by more than one process, and was not built for it.
+
+    The agent flushes on every poll whether or not it is installing, and an
+    engineer on the robot runs `raisin install` in a shell. Both talk to one
+    file, and the flush was read-all → POST → write-what-is-left: anything
+    appended while the POST was in flight was overwritten by a snapshot taken
+    before it existed.
+
+    Measured across two real processes before this was fixed — a `succeeded`
+    recorded during a flush was gone afterwards, and the flush reported
+    `drained: True`. A fully successful flush is the destructive case, not a
+    partial one: it truncates the file to empty.
+
+    A lost terminal event is not a lost line in a log. The server keeps the
+    `started` that did arrive, and the attempt stays in progress there forever.
+
+    The interleaving is produced here rather than waited for: the send itself
+    records the second event, which is exactly where another process would have
+    landed, and needs no threads or sleeps to be certain about.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = "session-two-writers"
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        ota.clear_pending_install_failure()
+        _as_robot(self)
+
+    def flush_while(self, meanwhile):
+        """Flush, running `meanwhile` at the moment the request is in flight."""
+
+        def send(*args, **kwargs):
+            sent = kwargs["json"]["events"]
+            meanwhile()
+            # Only what was actually sent is acknowledged, which is the point:
+            # the server never saw the event that arrived mid-flight.
+            return _mock_response(
+                json_data={
+                    "success": True,
+                    "data": {"acks": [{"eventId": e["eventId"]} for e in sent]},
+                }
+            )
+
+        with patch("raisin_ota.client.requests.post", side_effect=send):
+            return ota.flush_install_events()
+
+    def queued(self):
+        return [e["eventType"] for e in ota._read_install_event_queue()]
+
+    def test_an_event_recorded_mid_flush_survives(self):
+        ota.record_install_event("started", archive_id="arch-A")
+
+        self.flush_while(lambda: ota.record_install_event("succeeded"))
+
+        self.assertEqual(self.queued(), ["succeeded"])
+
+    def test_the_flush_does_not_claim_to_have_drained_it(self):
+        """A caller that believes `drained` stops flushing until something else happens."""
+        ota.record_install_event("started", archive_id="arch-A")
+
+        result = self.flush_while(lambda: ota.record_install_event("succeeded"))
+
+        self.assertFalse(result.drained)
+
+    def test_what_was_sent_is_still_removed(self):
+        """The other half: nothing here may turn into resending acked events."""
+        ota.record_install_event("started", archive_id="arch-A")
+
+        self.flush_while(lambda: None)
+
+        self.assertEqual(self.queued(), [])
 
 
 # ============================================================================

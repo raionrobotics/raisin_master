@@ -523,5 +523,92 @@ class TestRetention(InstallTreeTestCase):
         self.assertIn("1.0.0", kept)  # rollback target
 
 
+class TestAVersionCannotLeaveTheTree(InstallTreeTestCase):
+    """The version naming a directory comes from the server.
+
+    `stage_version` built `versions/<gen>-<version>` straight from it. Measured
+    before writing this, on a throwaway tree:
+
+        '1.0.0'                        -> release/versions/0001-1.0.0        inside
+        '../ESCAPED'                   -> release/versions/0002-../ESCAPED   inside
+        '1.0/../../../OUTSIDE/pwned'   -> OUTSIDE/pwned                      OUTSIDE
+
+    The generation prefix quietly defeats a bare `..` — `0002-..` is a literal
+    directory name, not the parent — which is why this needs a separator to
+    work and why it is easy to look at and conclude it is safe. With one, the
+    path leaves `versions/` entirely, and the process writing it is root on a
+    robot.
+
+    Refused rather than sanitised. A version with a separator in it is not a
+    version this tool can install, and rewriting it into something acceptable
+    would put a tree on disk under a name the server does not know.
+    """
+
+    def staged_names(self):
+        base = it.versions_dir(self.release)
+        return sorted(p.name for p in base.iterdir()) if base.is_dir() else []
+
+    def test_an_ordinary_version_still_stages(self):
+        staged = it.stage_version(self.release, "1.0.0")
+
+        self.assertTrue(staged.is_dir())
+        self.assertEqual(self.staged_names(), ["0001-1.0.0"])
+
+    def test_a_version_with_a_separator_is_refused(self):
+        with self.assertRaises(ValueError):
+            it.stage_version(self.release, "1.0/../../../OUTSIDE/pwned")
+
+    def test_refusing_leaves_nothing_behind(self):
+        """Not even the parent. `mkdir(parents=True)` ran before the path was used."""
+        with self.assertRaises(ValueError):
+            it.stage_version(self.release, "1.0/../../../OUTSIDE/pwned")
+
+        self.assertEqual(self.staged_names(), [])
+        self.assertFalse((self.release.parent / "OUTSIDE").exists())
+
+    def test_a_backslash_is_refused_too(self):
+        """Not the separator here, but the metadata travels between machines."""
+        with self.assertRaises(ValueError):
+            it.stage_version(self.release, "1.0\\..\\..\\x")
+
+    def test_a_bare_parent_reference_is_refused_even_though_the_prefix_defeats_it(self):
+        """The prefix is not a guard — it is a coincidence of the naming scheme.
+
+        Left accepted, a later change to the prefix turns it into an escape
+        with no test failing.
+        """
+        with self.assertRaises(ValueError):
+            it.stage_version(self.release, "..")
+
+    def test_an_empty_version_is_refused(self):
+        with self.assertRaises(ValueError):
+            it.stage_version(self.release, "")
+
+    def test_a_null_byte_is_refused_with_something_an_operator_can_read(self):
+        """Python raises `ValueError: embedded null byte` here on its own.
+
+        So asserting only the exception type proved nothing — the check could be
+        deleted and the test would still pass, which is what a mutation run
+        showed. What this guard adds is the *message*: which field, and what was
+        in it. `embedded null byte` names neither, and arrives from somewhere
+        under `pathlib` rather than from the value the server sent.
+        """
+        # No separator in it, deliberately. `"1.0\\x00/etc"` was caught by the
+        # separator clause instead, so the null check could still be deleted
+        # with everything green — the second time this one test passed for a
+        # reason that was not the thing it names.
+        with self.assertRaises(ValueError) as caught:
+            it.stage_version(self.release, "1.0\x00etc")
+
+        self.assertIn("version", str(caught.exception))
+
+    def test_the_refusal_names_the_value(self):
+        """An operator reading `systemctl status` has to see what was rejected."""
+        with self.assertRaises(ValueError) as caught:
+            it.stage_version(self.release, "1.0/../x")
+
+        self.assertIn("1.0/../x", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
