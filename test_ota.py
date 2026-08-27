@@ -1329,6 +1329,132 @@ class TestHaltStopsTheInstall(unittest.TestCase):
         mock_download.assert_not_called()
 
 
+class TestASessionDoesNotOutliveTheArchiveItWasFor(unittest.TestCase):
+    """A resumed session is worthless for a different archive, and worse than that.
+
+    The server pins a session to the first archive it downloads under and
+    refuses the rest — measured against a running server:
+
+        GET .../download?version=1.0.0  (the pinned one)   200
+        GET .../download?version=1.0.2  (a different one)  403
+            Install session '...' is downloading a different archive
+
+    The CLI keeps its session when an install fails, deliberately, so a retry
+    resumes the partial download. But the session survives a *reassignment*
+    too, and `_read_install_session` resumes it for twenty-four hours. So a
+    robot whose install failed and was then given a different archive was
+    refused every download until the session aged out — a day, on an
+    unhelpful 403 that classifies as `unknown` and so is not even retried.
+
+    The agent never had this: it retires a stale session at the top of a run.
+    This is the bare CLI, which is what a robot without the agent runs.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig = g.script_directory
+        self.addCleanup(setattr, g, "script_directory", self._orig)
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        ota._install_session_id = None
+        self.addCleanup(setattr, ota, "_install_session_id", None)
+        ota.clear_pending_install_failure()
+        self.addCleanup(ota.clear_pending_install_failure)
+        _as_robot(self)
+
+    def a_session_that_installed(self, archive_id):
+        """One left behind by a failed run, with its `started` already sent."""
+        session = ota.get_install_session_id()
+        ota.record_install_event("started", archive_id=archive_id)
+        ota._install_session_id = None
+        return session
+
+    def run_against(self, archive_id):
+        packages = [
+            {
+                "packageId": "p-1",
+                "packageName": "pkg1",
+                "manifestHash": "a" * 64,
+                "tagName": "0.2.0",
+            }
+        ]
+
+        def extract(download_file, install_dir, package_name, version, **kw):
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "release.yaml").write_text("version: 0.2.0\n")
+            return {"version": version, "dependencies": []}
+
+        with (
+            patch("raisin_ota.client._resolve_desired_state") as mock_desired,
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch("raisin_ota.client._extract_and_read_deps", side_effect=extract),
+            patch("raisin_ota.client.report_software_snapshot"),
+            patch("builtins.print"),
+        ):
+            mock_desired.return_value = (
+                False,
+                "raisin-robot",
+                "2.0.0",
+                (packages, archive_id, "2.0.0"),
+            )
+            ota.download_all_from_archive(
+                "release", Path(self._tmp.name) / "release" / "install"
+            )
+        return ota.get_install_session_id()
+
+    def queued(self):
+        return ota._read_install_event_queue()
+
+    def test_a_reassigned_node_starts_a_new_session(self):
+        left_behind = self.a_session_that_installed("arch-A")
+
+        self.assertNotEqual(self.run_against("arch-B"), left_behind)
+
+    def test_the_abandoned_one_is_closed_rather_than_dropped(self):
+        """Its `started` is already on the server; without this it stays open forever."""
+        left_behind = self.a_session_that_installed("arch-A")
+
+        self.run_against("arch-B")
+
+        closed = [
+            event
+            for event in self.queued()
+            if event["installSessionId"] == left_behind
+            and event["eventType"] == "failed"
+        ]
+        self.assertEqual(len(closed), 1)
+
+    def test_and_it_says_it_was_abandoned_rather_than_failing(self):
+        """Otherwise it reads `install did not complete`, which is a fault report.
+
+        Nothing went wrong with that attempt — it was overtaken. Sent as a
+        plain failure it joins the archive's failure count and argues against a
+        release that was never tried.
+        """
+        self.a_session_that_installed("arch-A")
+
+        self.run_against("arch-B")
+
+        failed = [e for e in self.queued() if e["eventType"] == "failed"]
+        self.assertIn("assigned a different archive", failed[0]["errorMessage"])
+
+    def test_the_same_archive_still_resumes(self):
+        """The reason sessions are kept at all: finishing a partial download."""
+        left_behind = self.a_session_that_installed("arch-A")
+
+        self.assertEqual(self.run_against("arch-A"), left_behind)
+
+    def test_a_session_that_never_said_which_archive_is_left_alone(self):
+        """An older client wrote no archive. Not knowing is not grounds for retiring."""
+        session = ota.get_install_session_id()
+        ota._install_session_id = None
+
+        self.assertEqual(self.run_against("arch-B"), session)
+
+
 class TestAnUnusableAssignmentReachesTheOperator(unittest.TestCase):
     """Raising it was half the job; nothing caught it.
 
@@ -1428,6 +1554,23 @@ class TestTheFleetIsToldWhyTheAssignmentWasUnusable(unittest.TestCase):
         stage, code, message = ota._pending_install_failure
         self.assertEqual(stage, "desired_state")
         self.assertIn("assigned elsewhere", message)
+
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._resolve_desired_state")
+    def test_it_is_not_labelled_as_worth_retrying(self, mock_desired, _mock_manifest):
+        """`server_error` is in the retryable set, and this is not transient.
+
+        An archive assigned for another platform answers the same way forever.
+        The taxonomy's own comment says a retryable code means backoff is worth
+        spending an attempt on, so labelling this one that way is a claim the
+        code cannot support — and `server_error` blames a server that answered
+        correctly besides.
+        """
+        mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
+
+        self.give_up(tag=None)
+
+        self.assertFalse(ota.is_retryable_error_code(ota._pending_install_failure[1]))
 
     @patch("raisin_ota.client._fetch_archive_with_stable_fallback", return_value=None)
     @patch("raisin_ota.client._resolve_desired_state")
@@ -5031,6 +5174,12 @@ class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
     ABSENCES = {
         "no target": {"halt": False, "reason": "no_target"},
         "unconfigured": {"halt": False, "reason": "unconfigured"},
+        # No reason at all is not an unreadable reason. The agent already reads
+        # it this way, and two components disagreeing about one field is worse
+        # than either answer: a server that omits it would refuse the CLI on a
+        # robot while the agent beside it called the same answer normal.
+        "no reason given": {"halt": False},
+        "an empty reason": {"halt": False, "reason": ""},
     }
 
     def resolve(self, payload, as_robot=True, platform="ubuntu-24.04-arm64"):

@@ -1746,7 +1746,14 @@ def fetch_robot_desired_state() -> RobotCallResult:
 #: Reasons that mean nothing was assigned, as opposed to something was and this
 #: machine cannot act on it. Only the second kind is an instruction, and only an
 #: instruction can be misunderstood — so only the second kind refuses.
-_MEANS_NOTHING_ASSIGNED = frozenset({"no_target", "unconfigured"})
+#:
+#: No reason at all belongs here, and an unrecognised one does not: a word this
+#: client has not learned is still the server saying something, while a missing
+#: field is a null target with nothing behind it. The agent draws the line in
+#: the same place, and it has to be the same line — a server that stopped
+#: sending the field would otherwise refuse the CLI on a robot whose agent was
+#: calling the identical answer normal.
+_MEANS_NOTHING_ASSIGNED = frozenset({"no_target", "unconfigured", None, ""})
 
 
 def _unusable(reason: str) -> None:
@@ -1770,7 +1777,10 @@ def _give_up_on_the_assignment(unusable: "OtaDesiredStateUnusable"):
     attempt reports `unknown` for the one failure whose cause was in hand all
     along.
     """
-    note_install_failure("desired_state", ERROR_SERVER_ERROR, str(unusable))
+    # `ERROR_UNKNOWN`, not `ERROR_SERVER_ERROR`: that one is in the retryable
+    # set, and an archive assigned for another platform answers the same way on
+    # every attempt. It would also blame a server that answered correctly.
+    note_install_failure("desired_state", ERROR_UNKNOWN, str(unusable))
     raise unusable
 
 
@@ -2876,6 +2886,42 @@ def _prune_packages_the_archive_dropped(
         )
 
 
+def _session_for(archive_id: str) -> str:
+    """The install session to report this archive under, retiring a stale one.
+
+    A session is kept across a failed run on purpose, so a retry finishes the
+    partial download instead of starting it again. What it must not survive is
+    the node being given something else: the server pins a session to the first
+    archive downloaded under it and refuses the rest, so a resumed session is
+    not merely useless for a different archive — it is refused, on every
+    package, until the session ages out a day later. Measured against a running
+    server, the second archive answers 403 `is downloading a different archive`,
+    which classifies as `unknown` and is therefore not even retried.
+
+    A session that never said which archive it was for is left alone: an older
+    client wrote none, and not knowing is not grounds for retiring one.
+    """
+    session_id = get_install_session_id()
+    was = (_session_archive(session_id) or {}).get("archiveId")
+    if not was or was == archive_id:
+        return session_id
+
+    print(
+        "ℹ️  This node was assigned a different archive since the last install "
+        "attempt; starting a new install session."
+    )
+    # Closed, not dropped. Its `started` already reached the server, and an
+    # attempt with no terminal event stays in progress there forever.
+    note_install_failure(
+        "desired_state",
+        ERROR_UNKNOWN,
+        "abandoned: this node was assigned a different archive",
+    )
+    report_install_outcome(False)
+    clear_install_session()
+    return get_install_session_id()
+
+
 def download_all_from_archive(
     build_type: str,
     install_base_path: Path,
@@ -2992,7 +3038,7 @@ def download_all_from_archive(
         return {}
 
     print(f"📦 Using archive: {archive_name} v{actual_version}")
-    install_session_id = get_install_session_id()
+    install_session_id = _session_for(archive_id)
     event_context = {
         "archive_id": archive_id,
         "archive_name": archive_name,
