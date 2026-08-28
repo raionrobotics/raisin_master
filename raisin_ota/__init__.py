@@ -27,13 +27,23 @@ from .client import (
     configure,
 )
 from .install_tree import InstallTreeUnusable
+from .state_lock import (
+    InstallStateBusy,
+    InstallStateLockUnavailable,
+    install_state_lock,
+    install_state_lock_path,
+)
 
 __all__ = [
     "ContentHashMismatch",
+    "InstallStateBusy",
+    "InstallStateLockUnavailable",
     "InstallTreeUnusable",
     "OtaContext",
     "OtaDesiredStateUnusable",
     "OtaInstallHalted",
     "RobotIdentity",
     "configure",
+    "install_state_lock",
+    "install_state_lock_path",
 ]

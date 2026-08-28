@@ -11,6 +11,7 @@ Install modes:
 
 import re
 import shutil
+from functools import wraps
 import click
 from pathlib import Path
 from typing import Optional
@@ -25,7 +26,12 @@ from packaging.specifiers import SpecifierSet
 from commands import globals as g
 from commands.utils import load_configuration, parse_version_specifier
 
-from raisin_ota import InstallTreeUnusable
+from raisin_ota import (
+    InstallStateBusy,
+    InstallStateLockUnavailable,
+    InstallTreeUnusable,
+    install_state_lock,
+)
 from raisin_ota.client import (
     download_package_at_timestamp,
     download_all_from_archive,
@@ -579,6 +585,22 @@ def _install(
 # ============================================================================
 
 
+def _with_install_state_lock(function):
+    """Fail fast before this CLI invocation changes any shared install state."""
+
+    @wraps(function)
+    def locked(*args, **kwargs):
+        try:
+            with install_state_lock(g.script_directory, "raisin install"):
+                return function(*args, **kwargs)
+        except (InstallStateBusy, InstallStateLockUnavailable) as busy:
+            # A Click error is concise, names the holder, and exits non-zero
+            # without a traceback. Nothing in the command body has run yet.
+            raise click.ClickException(str(busy)) from None
+
+    return locked
+
+
 @click.command()
 @click.argument("packages", nargs=-1, required=False)
 @click.option(
@@ -628,6 +650,7 @@ def _install(
         "latest-by-time selection on OTA."
     ),
 )
+@_with_install_state_lock
 def install_cli_command(
     packages,
     build_type,
