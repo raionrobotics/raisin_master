@@ -6,6 +6,7 @@ Manages multiple git repositories in src/ directory.
 
 import os
 import re
+import shlex
 import subprocess
 import click
 import concurrent.futures
@@ -18,6 +19,9 @@ from commands import globals as g
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+_LFS_ATTRIBUTE_RE = re.compile(r"(?:^|\s)filter\s*=\s*lfs(?:\s|$)")
+_LFS_POINTER_HEADER = b"version https://git-lfs.github.com/spec/v1"
 
 
 def get_display_width(text):
@@ -107,6 +111,13 @@ def _run_git_command(command, cwd):
                 )
 
         # Using a timeout is safer for network operations like fetch
+        timeout_seconds = (
+            300
+            if len(command) >= 3
+            and command[:2] == ["git", "lfs"]
+            and command[2] in {"fetch", "checkout"}
+            else 30
+        )
         result = subprocess.run(
             command,
             cwd=cwd,
@@ -115,7 +126,7 @@ def _run_git_command(command, cwd):
             text=True,
             encoding="utf-8",
             env=env,
-            timeout=30,
+            timeout=timeout_seconds,
         )
         return result.stdout.strip()
 
@@ -128,7 +139,7 @@ def _run_git_command(command, cwd):
         return None
     except subprocess.TimeoutExpired:
         print(
-            f"  ! Git command timed out in '{os.path.basename(cwd)}' after 30 seconds."
+            f"  ! Git command timed out in '{os.path.basename(cwd)}' after {timeout_seconds} seconds."
         )
         return None
     except FileNotFoundError:
@@ -265,6 +276,154 @@ def _find_src_git_repos(base_directory=None):
     ]
 
 
+def _repo_uses_lfs(repo_path):
+    """Return True when a tracked .gitattributes file enables the LFS filter."""
+    attribute_files = _run_git_command(
+        [
+            "git",
+            "ls-files",
+            "--cached",
+            "--",
+            ".gitattributes",
+            ":(glob)**/.gitattributes",
+        ],
+        repo_path,
+    )
+    if not attribute_files:
+        return False
+
+    repo_root = Path(repo_path).resolve()
+    for relative_path in attribute_files.splitlines():
+        try:
+            attribute_path = (repo_root / relative_path).resolve()
+            attribute_path.relative_to(repo_root)
+            contents = attribute_path.read_text(encoding="utf-8", errors="ignore")
+        except (OSError, ValueError):
+            continue
+
+        for line in contents.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and _LFS_ATTRIBUTE_RE.search(line):
+                return True
+    return False
+
+
+def _lfs_recovery_command(remote=None, ref=None):
+    """Build the manual recovery command shown when an LFS operation fails."""
+    fetch_command = ["git", "lfs", "fetch"]
+    if remote:
+        fetch_command.append(remote)
+    if remote and ref:
+        fetch_command.append(ref)
+    commands = [
+        ["git", "lfs", "install", "--local"],
+        fetch_command,
+        ["git", "lfs", "checkout"],
+    ]
+    return " && ".join(
+        " ".join(shlex.quote(part) for part in command) for command in commands
+    )
+
+
+def _remaining_lfs_pointers(repo_path):
+    """Return tracked LFS paths whose worktree content is still an LFS pointer."""
+    tracked_files = _run_git_command(
+        ["git", "lfs", "ls-files", "--name-only"], repo_path
+    )
+    if tracked_files is None:
+        return None
+
+    repo_root = Path(repo_path).resolve()
+    pointers = []
+    for relative_path in tracked_files.splitlines():
+        if not relative_path:
+            continue
+        try:
+            worktree_path = (repo_root / relative_path).resolve()
+            worktree_path.relative_to(repo_root)
+            if not worktree_path.is_file():
+                # Sparse checkouts may intentionally omit a tracked path.
+                continue
+            with worktree_path.open("rb") as file_handle:
+                header = file_handle.read(len(_LFS_POINTER_HEADER))
+        except (OSError, ValueError):
+            continue
+        if header == _LFS_POINTER_HEADER:
+            pointers.append(relative_path)
+    return pointers
+
+
+def _get_lfs_worktree_status(repo_path):
+    """Return a concise, read-only LFS health summary for git status."""
+    if not _repo_uses_lfs(repo_path):
+        return None
+    if _run_git_command(["git", "lfs", "version"], repo_path) is None:
+        return "Git LFS unavailable"
+    pointers = _remaining_lfs_pointers(repo_path)
+    if pointers is None:
+        return "Git LFS check failed"
+    if pointers:
+        return f"{len(pointers)} LFS pointer file(s) remain"
+    return "Git LFS OK"
+
+
+def _ensure_lfs_installed(repo_path, remote=None, ref=None):
+    """Install repository-local LFS filters/hooks when this repository uses LFS."""
+    if not _repo_uses_lfs(repo_path):
+        return None, False
+
+    recovery = _lfs_recovery_command(remote=remote, ref=ref)
+    if _run_git_command(["git", "lfs", "version"], repo_path) is None:
+        return (
+            "Git LFS is required but unavailable. Install git-lfs, then run: "
+            f"{recovery}",
+            True,
+        )
+    if _run_git_command(["git", "lfs", "install", "--local"], repo_path) is None:
+        return f"Git LFS local setup failed. Run: {recovery}", True
+    return None, True
+
+
+def _sync_lfs_for_ref(repo_path, remote=None, ref=None, checkout=True):
+    """Fetch LFS objects for a ref, optionally checkout and verify the worktree."""
+    error, uses_lfs = _ensure_lfs_installed(repo_path, remote=remote, ref=ref)
+    if error or not uses_lfs:
+        return error, uses_lfs
+
+    recovery = _lfs_recovery_command(remote=remote, ref=ref)
+    fetch_command = ["git", "lfs", "fetch"]
+    if remote:
+        fetch_command.append(remote)
+    if remote and ref:
+        fetch_command.append(ref)
+    if _run_git_command(fetch_command, repo_path) is None:
+        return (
+            "Git LFS object download failed. Check remote credentials, then run: "
+            f"{recovery}",
+            True,
+        )
+
+    if not checkout:
+        return None, True
+
+    if _run_git_command(["git", "lfs", "checkout"], repo_path) is None:
+        return f"Git LFS checkout failed. Run: {recovery}", True
+
+    pointers = _remaining_lfs_pointers(repo_path)
+    if pointers is None:
+        return f"Git LFS verification failed. Run: {recovery}", True
+    if pointers:
+        preview = ", ".join(pointers[:3])
+        if len(pointers) > 3:
+            preview += f", ... ({len(pointers)} files)"
+        return (
+            f"Git LFS checkout incomplete; pointer files remain: {preview}. "
+            f"Run: {recovery}",
+            True,
+        )
+    return None, True
+
+
 def process_repo(repo_path, pull_mode, origin="origin"):
     """
     Processes a single Git repository.
@@ -295,6 +454,12 @@ def process_repo(repo_path, pull_mode, origin="origin"):
             if pull_result is None:
                 raise Exception("Git pull command failed with no output.")
 
+            lfs_error, lfs_synced = _sync_lfs_for_ref(
+                repo_path, remote=origin, ref=current_branch
+            )
+            if lfs_error:
+                raise Exception(lfs_error)
+
             pull_result = pull_result.strip()
 
             if "Already up to date." in pull_result or pull_result == "":
@@ -303,6 +468,8 @@ def process_repo(repo_path, pull_mode, origin="origin"):
                 # Any other output implies changes were pulled
                 message = pull_result.split("\n")[-1].strip()
 
+            if lfs_synced:
+                message = f"{message} Git LFS synced."
             return {
                 "name": repo_name,
                 "owner": owner,
@@ -349,6 +516,9 @@ def process_repo(repo_path, pull_mode, origin="origin"):
 
     # Get local changes
     local_changes = _get_local_changes(repo_path)
+    lfs_status = _get_lfs_worktree_status(repo_path)
+    if lfs_status:
+        local_changes = f"{local_changes}; {lfs_status}"
 
     # Get all remotes and their owners
     remote_details = _get_remote_details(repo_path)
@@ -820,8 +990,14 @@ def git_checkout_command(branch):
             if result is None:
                 print(f"❌ {repo_name}: Checkout failed.")
             else:
+                lfs_error, lfs_synced = _sync_lfs_for_ref(repo_path, ref=branch)
+                if lfs_error:
+                    print(f"❌ {repo_name}: {lfs_error}")
+                    continue
                 default_message = f"Checked out branch '{branch}'."
                 message = result.splitlines()[-1] if result else default_message
+                if lfs_synced:
+                    message = f"{message} Git LFS synced."
                 print(f"✅ {repo_name}: {message}")
         except subprocess.CalledProcessError:
             # This means the branch does not exist
@@ -854,7 +1030,15 @@ def git_fetch_command(remote="origin", prune=False):
         if result is None:
             print(f"❌ {repo_name}: Fetch failed.")
         else:
+            lfs_error, lfs_fetched = _sync_lfs_for_ref(
+                repo_path, remote=remote, checkout=False
+            )
+            if lfs_error:
+                print(f"❌ {repo_name}: {lfs_error}")
+                continue
             message = result.splitlines()[-1] if result else "Fetch completed."
+            if lfs_fetched:
+                message = f"{message} Git LFS objects fetched."
             print(f"✅ {repo_name}: {message}")
 
 
@@ -990,6 +1174,12 @@ def git_push_current_command(remote="origin"):
         remote_check = _run_git_command(["git", "remote", "get-url", remote], repo_path)
         if remote_check is None:
             print(f"⚠️ {repo_name}: Remote '{remote}' not found. Skipping.")
+            continue
+        lfs_error, _ = _ensure_lfs_installed(
+            repo_path, remote=remote, ref=current_branch
+        )
+        if lfs_error:
+            print(f"❌ {repo_name}: {lfs_error}")
             continue
 
         result = _run_git_command(
