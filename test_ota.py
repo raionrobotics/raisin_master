@@ -4726,6 +4726,8 @@ class TestInstallCliEventReporting(unittest.TestCase):
         from commands import install as install_mod
 
         with (
+            tempfile.TemporaryDirectory() as workspace,
+            patch.object(g, "script_directory", workspace),
             patch.object(install_mod, "install_command", return_value=overall_success),
             patch.object(install_mod, "report_install_outcome") as mock_outcome,
             patch.object(install_mod, "flush_install_events") as mock_flush,
@@ -4753,6 +4755,60 @@ class TestInstallCliEventReporting(unittest.TestCase):
 
         mock_outcome.assert_called_once_with(False)
         mock_flush.assert_called_once()
+
+
+class TestInstallCliLock(unittest.TestCase):
+    def test_agent_holder_makes_cli_fail_before_any_shared_state_call(self):
+        from commands import install as install_mod
+        from raisin_ota import install_state_lock
+
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as workspace:
+            with install_state_lock(workspace, "raisin-ota-agent"):
+                with (
+                    patch.object(g, "script_directory", workspace),
+                    patch.object(install_mod, "install_command") as install,
+                    patch.object(install_mod, "report_install_outcome") as outcome,
+                    patch.object(install_mod, "flush_install_events") as flush,
+                    patch.object(install_mod, "flush_pending_snapshot_reports") as snapshot,
+                    patch.object(install_mod, "clear_install_session") as clear,
+                ):
+                    result = runner.invoke(
+                        install_mod.install_cli_command,
+                        ["mypkg"],
+                    )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("raisin-ota-agent", result.output)
+        self.assertIn("pid", result.output)
+        install.assert_not_called()
+        outcome.assert_not_called()
+        flush.assert_not_called()
+        snapshot.assert_not_called()
+        clear.assert_not_called()
+
+    def test_unsafe_lock_path_is_a_clean_failure_before_install(self):
+        from commands import install as install_mod
+
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as workspace:
+            victim = Path(workspace) / "victim"
+            victim.write_text("untouched", encoding="utf-8")
+            (Path(workspace) / ".raisin-install.lock").symlink_to(victim)
+            with (
+                patch.object(g, "script_directory", workspace),
+                patch.object(install_mod, "install_command") as install,
+            ):
+                result = runner.invoke(
+                    install_mod.install_cli_command,
+                    ["mypkg"],
+                )
+            victim_content = victim.read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("install-state lock", result.output)
+        install.assert_not_called()
+        self.assertEqual(victim_content, "untouched")
 
 
 class TestInstallOutcomeDecision(unittest.TestCase):
@@ -4815,6 +4871,17 @@ class TestInstallOutcomeDecision(unittest.TestCase):
 
 class TestInstallIntegration(unittest.TestCase):
     """Verify OTA is used correctly in install_command."""
+
+    def setUp(self):
+        self._cli_workspace = tempfile.TemporaryDirectory()
+        self._previous_script_directory = g.script_directory
+        g.script_directory = self._cli_workspace.name
+        _sync_ota_context()
+
+    def tearDown(self):
+        g.script_directory = self._previous_script_directory
+        _sync_ota_context()
+        self._cli_workspace.cleanup()
 
     @patch("commands.install.load_configuration")
     def test_ota_attempted_when_configured(self, mock_config):

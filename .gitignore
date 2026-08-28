@@ -65,6 +65,7 @@ release/*
 secrets.yaml
 *_repositories.yaml
 configuration_setting.yaml
+/.raisin-install.lock
 .ota_token_cache.json
 .ota/
 
