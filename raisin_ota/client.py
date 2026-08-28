@@ -1821,6 +1821,7 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
 
 _ROBOT_SCOPE_MISSING = "ROBOT_CREDENTIAL_SCOPE_MISSING"
 _ROBOT_NODE_MISMATCH = "ROBOT_CREDENTIAL_NODE_MISMATCH"
+_ROBOT_CREDENTIAL_EXPIRED = "ROBOT_CREDENTIAL_EXPIRED"
 
 
 def _api_error_code(response) -> Optional[str]:
@@ -1845,13 +1846,18 @@ def _robot_auth_refusal_detail(response) -> str:
     generic 403 message. New stable codes let the client distinguish two valid
     credentials without parsing human prose.
     """
+    code = _api_error_code(response)
     if response.status_code == 401:
+        if code == _ROBOT_CREDENTIAL_EXPIRED:
+            return (
+                "the OTA server says this robot credential has expired; "
+                "issue and deploy a replacement credential"
+            )
         return (
             "the OTA server says this robot credential is not valid "
             "(mistyped, expired or revoked)"
         )
 
-    code = _api_error_code(response)
     if code == _ROBOT_SCOPE_MISSING:
         return (
             "the OTA server says this robot credential is missing a required "

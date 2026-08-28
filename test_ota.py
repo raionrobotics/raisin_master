@@ -5768,6 +5768,14 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
 
         self.assertIn("not valid", str(unusable))
 
+    def test_an_expired_credential_names_the_replacement_action(self):
+        unusable, _printed = self.resolve(401, "ROBOT_CREDENTIAL_EXPIRED")
+
+        message = str(unusable)
+        self.assertIn("expired", message)
+        self.assertIn("replacement credential", message)
+        self.assertNotIn("mistyped", message)
+
     def test_a_credential_that_is_not_permitted_says_that_instead(self):
         """Not the same sentence: one is fixable by configuration, one is not."""
         unusable, _printed = self.resolve(403)
