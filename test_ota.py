@@ -1251,6 +1251,21 @@ class TestFlushSaysWhyItDidNotDrain(unittest.TestCase):
         self.assertTrue(result.unauthorized)
         self.assertFalse(result.throttled)
 
+    def test_a_flush_uses_the_same_machine_denial_vocabulary(self):
+        refused = _mock_response(
+            status_code=403,
+            json_data={
+                "error": {"code": "ROBOT_CREDENTIAL_NODE_MISMATCH"}
+            },
+        )
+        refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
+
+        result = self._flush(return_value=refused)
+
+        self.assertTrue(result.unauthorized)
+        self.assertIn("pinned to a different node", result.detail)
+        self.assertIn("X-Robot-Node", result.detail)
+
     def test_being_offline_is_distinguishable(self):
         result = self._flush(side_effect=requests.ConnectionError("no route"))
 
@@ -5716,7 +5731,8 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
     first is not fixable by editing anything.
     """
 
-    def resolve(self, status):
+    def resolve(self, status, code=None):
+        body = {"error": {"code": code}} if code else {}
         with (
             _robot_identity(),
             patch(
@@ -5725,7 +5741,10 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
             ),
             patch(
                 "raisin_ota.client.requests.get",
-                return_value=_mock_response(status_code=status, json_data={}),
+                return_value=_mock_response(
+                    status_code=status,
+                    json_data=body,
+                ),
             ),
             patch("builtins.print") as printed,
         ):
@@ -5756,6 +5775,31 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
         message = str(unusable)
         self.assertNotIn("not valid", message)
         self.assertIn("not permitted", message)
+
+    def test_a_scope_denial_names_the_scope_correction(self):
+        unusable, _printed = self.resolve(
+            403, "ROBOT_CREDENTIAL_SCOPE_MISSING"
+        )
+
+        message = str(unusable)
+        self.assertIn("scope", message)
+        self.assertIn("issue one", message)
+        self.assertNotIn("X-Robot-Node", message)
+
+    def test_a_node_mismatch_names_the_node_correction(self):
+        unusable, _printed = self.resolve(
+            403, "ROBOT_CREDENTIAL_NODE_MISMATCH"
+        )
+
+        message = str(unusable)
+        self.assertIn("pinned to a different node", message)
+        self.assertIn("X-Robot-Node", message)
+        self.assertNotIn("missing a required scope", message)
+
+    def test_an_unknown_403_code_does_not_guess_a_denial_reason(self):
+        unusable, _printed = self.resolve(403, "A_NEW_SERVER_REASON")
+
+        self.assertIn("did not identify", str(unusable))
 
     def test_the_operator_is_told_before_the_refusal(self):
         _unusable, printed = self.resolve(403)

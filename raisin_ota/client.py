@@ -1024,7 +1024,7 @@ def flush_install_events() -> FlushResult:
                 failure = {
                     "status": resp.status_code,
                     "unauthorized": True,
-                    "detail": "the OTA server refused this robot credential",
+                    "detail": _robot_auth_refusal_detail(resp),
                 }
                 break
             resp.raise_for_status()
@@ -1819,6 +1819,56 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
     }
 
 
+_ROBOT_SCOPE_MISSING = "ROBOT_CREDENTIAL_SCOPE_MISSING"
+_ROBOT_NODE_MISMATCH = "ROBOT_CREDENTIAL_NODE_MISMATCH"
+
+
+def _api_error_code(response) -> Optional[str]:
+    """Read the stable API error code without trusting an error body shape."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
+def _robot_auth_refusal_detail(response) -> str:
+    """Turn a machine-auth refusal into the corrective action it names.
+
+    Old servers only expose the HTTP class, so unknown codes retain the existing
+    generic 403 message. New stable codes let the client distinguish two valid
+    credentials without parsing human prose.
+    """
+    if response.status_code == 401:
+        return (
+            "the OTA server says this robot credential is not valid "
+            "(mistyped, expired or revoked)"
+        )
+
+    code = _api_error_code(response)
+    if code == _ROBOT_SCOPE_MISSING:
+        return (
+            "the OTA server says this robot credential is missing a required "
+            "scope; issue one with the required OTA scope"
+        )
+    if code == _ROBOT_NODE_MISMATCH:
+        return (
+            "the OTA server says this robot credential is pinned to a different "
+            "node; use the credential issued for this node or correct "
+            "X-Robot-Node"
+        )
+    return (
+        "the OTA server says this robot credential is not permitted for this "
+        "node (the server did not identify whether a scope or node pin denied it)"
+    )
+
+
 @dataclass(frozen=True)
 class RobotCallResult(RobotCallOutcome):
     """What a robot-facing call produced, and why it did not.
@@ -1869,22 +1919,10 @@ def fetch_robot_desired_state() -> RobotCallResult:
                 detail="throttled by the OTA server",
             )
         if resp.status_code in (401, 403):
-            # Two different problems, and one message for both told an operator
-            # to check the wrong thing. A 403 is fixable by configuration — the
-            # credential is real and either lacks a scope or is pinned to
-            # another node. A 401 is not: it is mistyped, expired or revoked,
-            # and no amount of editing a unit file changes that.
             return RobotCallResult(
                 status=resp.status_code,
                 unauthorized=True,
-                detail=(
-                    "the OTA server says this robot credential is not valid "
-                    "(mistyped, expired or revoked)"
-                    if resp.status_code == 401
-                    else "the OTA server says this robot credential is not "
-                    "permitted for this node (a missing scope, or pinned to "
-                    "another node)"
-                ),
+                detail=_robot_auth_refusal_detail(resp),
             )
         resp.raise_for_status()
         state = _unwrap_response(resp.json())
