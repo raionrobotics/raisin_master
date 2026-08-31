@@ -1251,6 +1251,21 @@ class TestFlushSaysWhyItDidNotDrain(unittest.TestCase):
         self.assertTrue(result.unauthorized)
         self.assertFalse(result.throttled)
 
+    def test_a_flush_uses_the_same_machine_denial_vocabulary(self):
+        refused = _mock_response(
+            status_code=403,
+            json_data={
+                "error": {"code": "ROBOT_CREDENTIAL_NODE_MISMATCH"}
+            },
+        )
+        refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
+
+        result = self._flush(return_value=refused)
+
+        self.assertTrue(result.unauthorized)
+        self.assertIn("pinned to a different node", result.detail)
+        self.assertIn("X-Robot-Node", result.detail)
+
     def test_being_offline_is_distinguishable(self):
         result = self._flush(side_effect=requests.ConnectionError("no route"))
 
@@ -5716,7 +5731,13 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
     first is not fixable by editing anything.
     """
 
-    def resolve(self, status):
+    def resolve(self, status, code=None, message=None):
+        error = {}
+        if code:
+            error["code"] = code
+        if message:
+            error["message"] = message
+        body = {"error": error} if error else {}
         with (
             _robot_identity(),
             patch(
@@ -5725,7 +5746,10 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
             ),
             patch(
                 "raisin_ota.client.requests.get",
-                return_value=_mock_response(status_code=status, json_data={}),
+                return_value=_mock_response(
+                    status_code=status,
+                    json_data=body,
+                ),
             ),
             patch("builtins.print") as printed,
         ):
@@ -5749,6 +5773,14 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
 
         self.assertIn("not valid", str(unusable))
 
+    def test_an_expired_credential_names_the_replacement_action(self):
+        unusable, _printed = self.resolve(401, "ROBOT_CREDENTIAL_EXPIRED")
+
+        message = str(unusable)
+        self.assertIn("expired", message)
+        self.assertIn("replacement credential", message)
+        self.assertNotIn("mistyped", message)
+
     def test_a_credential_that_is_not_permitted_says_that_instead(self):
         """Not the same sentence: one is fixable by configuration, one is not."""
         unusable, _printed = self.resolve(403)
@@ -5757,10 +5789,178 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
         self.assertNotIn("not valid", message)
         self.assertIn("not permitted", message)
 
+    def test_a_scope_denial_names_the_scope_correction(self):
+        unusable, _printed = self.resolve(
+            403, "ROBOT_CREDENTIAL_SCOPE_MISSING"
+        )
+
+        message = str(unusable)
+        self.assertIn("scope", message)
+        self.assertIn("issue one", message)
+        self.assertNotIn("X-Robot-Node", message)
+
+    def test_a_node_mismatch_names_the_node_correction(self):
+        unusable, _printed = self.resolve(
+            403, "ROBOT_CREDENTIAL_NODE_MISMATCH"
+        )
+
+        message = str(unusable)
+        self.assertIn("pinned to a different node", message)
+        self.assertIn("X-Robot-Node", message)
+        self.assertNotIn("missing a required scope", message)
+
+    def test_an_unknown_403_code_does_not_guess_a_denial_reason(self):
+        unusable, _printed = self.resolve(403, "A_NEW_SERVER_REASON")
+
+        self.assertIn("did not identify", str(unusable))
+
     def test_the_operator_is_told_before_the_refusal(self):
         _unusable, printed = self.resolve(403)
 
         self.assertIn("403", printed)
+
+    def test_a_scope_denial_carries_the_scope_the_server_named(self):
+        """The client owns the action; the server owns the specifics.
+
+        The server answers `This credential does not hold the
+        'inventory:report' scope` and the code alone cannot say which one. Told
+        only to "issue one with the required OTA scope", an operator has to
+        guess between four -- and `inventory:report` is the one most likely to
+        be missing, because it is the odd name out.
+        """
+        unusable, _printed = self.resolve(
+            403,
+            "ROBOT_CREDENTIAL_SCOPE_MISSING",
+            "This credential does not hold the 'inventory:report' scope",
+        )
+
+        self.assertIn("inventory:report", str(unusable))
+
+    def test_a_node_mismatch_carries_the_node_the_server_named(self):
+        unusable, _printed = self.resolve(
+            403,
+            "ROBOT_CREDENTIAL_NODE_MISMATCH",
+            "This credential is pinned to a different node than 'vision'",
+        )
+
+        self.assertIn("vision", str(unusable))
+
+    def test_a_missing_server_message_still_gives_the_action(self):
+        """An older server sends the code and no message, or none at all."""
+        unusable, _printed = self.resolve(403, "ROBOT_CREDENTIAL_SCOPE_MISSING")
+
+        message = str(unusable)
+        self.assertIn("scope", message)
+        self.assertNotIn("()", message)
+
+    def test_a_server_message_without_a_known_code_is_not_quoted(self):
+        """Prose is not a contract; the code is what earns the guidance.
+
+        Quoting a message the client did not recognise would present an
+        unreviewed server string as if it were an instruction.
+        """
+        unusable, _printed = self.resolve(
+            403, "A_NEW_SERVER_REASON", "Something the client has never seen"
+        )
+
+        message = str(unusable)
+        self.assertIn("did not identify", message)
+        self.assertNotIn("never seen", message)
+
+
+class TestASnapshotRefusalIsNotSilent(unittest.TestCase):
+    """The one refusal that leaves no trace anywhere.
+
+    `report_software_snapshot` sits behind `inventory:report`, a different scope
+    from the poll (`ota:pull`) and the event flush (`ota:report`). So a
+    credential missing only that one **polls fine and installs fine**, and then
+    the snapshot 403s, is caught as a generic `RequestException`, prints the raw
+    error and returns False.
+
+    Nothing about that failure reaches the server, so it keeps showing the node
+    on its previous version -- the fleet reads it as permanently behind while it
+    is actually converged. An operator chasing a node that will not converge has
+    no reason to suspect a scope.
+
+    The download path is not in this shape: its failures are classified into the
+    install-event taxonomy and reported, so they are visible on the server.
+    """
+
+    def report(self, status, code=None, message=None):
+        error = {}
+        if code:
+            error["code"] = code
+        if message:
+            error["message"] = message
+        # `_mock_response` leaves `raise_for_status` inert unless it is given
+        # one, so without this a 500 would return True here and the test would
+        # be asserting against a server that cannot fail.
+        response = _mock_response(
+            status_code=status,
+            json_data={"error": error} if error else {},
+            raise_for_status=(
+                requests.HTTPError(f"{status} Server Error")
+                if status >= 400
+                else None
+            ),
+        )
+        response.raise_for_status.side_effect = (
+            requests.HTTPError(f"{status} Error", response=response)
+            if status >= 400
+            else None
+        )
+        with (
+            _robot_identity(),
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.post", return_value=response),
+            patch("builtins.print") as printed,
+        ):
+            ok = ota.report_software_snapshot(
+                "archive-1",
+                "raisin-robot",
+                "1.0.188",
+                "ubuntu-24.04-arm64",
+                [{"packageId": "p1", "name": "pkg", "version": "1.0.0"}],
+                install_session_id="session-1",
+            )
+            return ok, " ".join(str(c) for c in printed.call_args_list)
+
+    def test_a_refused_snapshot_names_the_scope_the_server_named(self):
+        ok, printed = self.report(
+            403,
+            "ROBOT_CREDENTIAL_SCOPE_MISSING",
+            "This credential does not hold the 'inventory:report' scope",
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("inventory:report", printed)
+
+    def test_a_refused_snapshot_says_it_was_the_credential(self):
+        """Not a raw HTTPError, which reads as a server fault."""
+        ok, printed = self.report(403, "ROBOT_CREDENTIAL_SCOPE_MISSING")
+
+        self.assertFalse(ok)
+        self.assertIn("scope", printed)
+
+    def test_an_expired_credential_is_named_on_the_snapshot_path_too(self):
+        ok, printed = self.report(401)
+
+        self.assertFalse(ok)
+        self.assertIn("not valid", printed)
+
+    def test_a_snapshot_that_succeeds_is_still_reported(self):
+        ok, _printed = self.report(200)
+
+        self.assertTrue(ok)
+
+    def test_a_server_error_is_not_dressed_up_as_a_credential_problem(self):
+        ok, printed = self.report(500)
+
+        self.assertFalse(ok)
+        self.assertNotIn("credential", printed)
 
 
 class TestRetiredSessionsDoNotAccumulate(unittest.TestCase):

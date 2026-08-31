@@ -1024,7 +1024,7 @@ def flush_install_events() -> FlushResult:
                 failure = {
                     "status": resp.status_code,
                     "unauthorized": True,
-                    "detail": "the OTA server refused this robot credential",
+                    "detail": _robot_auth_refusal_detail(resp),
                 }
                 break
             resp.raise_for_status()
@@ -1819,6 +1819,88 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
     }
 
 
+_ROBOT_SCOPE_MISSING = "ROBOT_CREDENTIAL_SCOPE_MISSING"
+_ROBOT_NODE_MISMATCH = "ROBOT_CREDENTIAL_NODE_MISMATCH"
+_ROBOT_CREDENTIAL_EXPIRED = "ROBOT_CREDENTIAL_EXPIRED"
+
+
+def _api_error_field(response, field: str) -> Optional[str]:
+    """Read one field of the API error envelope without trusting its shape."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None
+    value = error.get(field)
+    return value if isinstance(value, str) else None
+
+
+def _api_error_code(response) -> Optional[str]:
+    """Read the stable API error code, which is the part that is a contract."""
+    return _api_error_field(response, "code")
+
+
+def _with_server_detail(guidance: str, detail: Optional[str]) -> str:
+    """Client-owned action, plus whatever specifics the server named.
+
+    The split matters. The **code** is the contract and is what earns a
+    particular sentence; the **message** is prose that may change, and is quoted
+    only once a recognised code has already decided what the sentence says. So
+    an unrecognised code never gets its message shown -- otherwise an unreviewed
+    server string would reach an operator as though it were an instruction.
+
+    Worth carrying because the server names the thing the code cannot: which
+    scope is missing out of four, or which node the credential is pinned to.
+    "Issue one with the required OTA scope" leaves an operator guessing between
+    `ota:pull`, `ota:report`, `inventory:report` and `node:register`.
+    """
+    if not detail:
+        return guidance
+    return f"{guidance} ({detail})"
+
+
+def _robot_auth_refusal_detail(response) -> str:
+    """Turn a machine-auth refusal into the corrective action it names.
+
+    Old servers only expose the HTTP class, so unknown codes retain the existing
+    generic 403 message. New stable codes let the client distinguish two valid
+    credentials without parsing human prose.
+    """
+    code = _api_error_code(response)
+    if response.status_code == 401:
+        if code == _ROBOT_CREDENTIAL_EXPIRED:
+            return (
+                "the OTA server says this robot credential has expired; "
+                "issue and deploy a replacement credential"
+            )
+        return (
+            "the OTA server says this robot credential is not valid "
+            "(mistyped, expired or revoked)"
+        )
+
+    if code == _ROBOT_SCOPE_MISSING:
+        return _with_server_detail(
+            "the OTA server says this robot credential is missing a required "
+            "scope; issue one that holds it",
+            _api_error_field(response, "message"),
+        )
+    if code == _ROBOT_NODE_MISMATCH:
+        return _with_server_detail(
+            "the OTA server says this robot credential is pinned to a different "
+            "node; use the credential issued for this node or correct "
+            "X-Robot-Node",
+            _api_error_field(response, "message"),
+        )
+    return (
+        "the OTA server says this robot credential is not permitted for this "
+        "node (the server did not identify whether a scope or node pin denied it)"
+    )
+
+
 @dataclass(frozen=True)
 class RobotCallResult(RobotCallOutcome):
     """What a robot-facing call produced, and why it did not.
@@ -1869,22 +1951,10 @@ def fetch_robot_desired_state() -> RobotCallResult:
                 detail="throttled by the OTA server",
             )
         if resp.status_code in (401, 403):
-            # Two different problems, and one message for both told an operator
-            # to check the wrong thing. A 403 is fixable by configuration — the
-            # credential is real and either lacks a scope or is pinned to
-            # another node. A 401 is not: it is mistyped, expired or revoked,
-            # and no amount of editing a unit file changes that.
             return RobotCallResult(
                 status=resp.status_code,
                 unauthorized=True,
-                detail=(
-                    "the OTA server says this robot credential is not valid "
-                    "(mistyped, expired or revoked)"
-                    if resp.status_code == 401
-                    else "the OTA server says this robot credential is not "
-                    "permitted for this node (a missing scope, or pinned to "
-                    "another node)"
-                ),
+                detail=_robot_auth_refusal_detail(resp),
             )
         resp.raise_for_status()
         state = _unwrap_response(resp.json())
@@ -2720,6 +2790,19 @@ def report_software_snapshot(
             json=payload,
             timeout=10,
         )
+        if resp.status_code in (401, 403):
+            # This endpoint sits behind `inventory:report`, a different scope
+            # from the poll (`ota:pull`) and the event flush (`ota:report`). A
+            # credential missing only that one polls fine and installs fine, and
+            # fails here -- and nothing about this failure reaches the server,
+            # so it keeps showing the node on its previous version. The fleet
+            # then reads a converged node as permanently behind, and this line
+            # is the only clue anyone gets. `403 Client Error` is not a clue.
+            print(
+                "⚠️ Failed to report OTA software snapshot: "
+                f"{_robot_auth_refusal_detail(resp)}"
+            )
+            return False
         resp.raise_for_status()
         return True
     except requests.RequestException as e:
