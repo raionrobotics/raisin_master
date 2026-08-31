@@ -201,16 +201,16 @@ def is_qemu_emulated():
 def get_build_jobs():
     """Determine number of parallel build jobs.
 
-    Priority:
-    1. RAISIN_MAX_JOBS env var (user override)
-    2. Auto-detect: 4 under QEMU, cpu_count/2 otherwise (min 1)
+    Auto-detect 4 jobs under QEMU and half the available CPUs otherwise.
+    RAISIN_MAX_JOBS is an upper bound on that value, not a forced job count.
     """
     env_jobs = os.environ.get("RAISIN_MAX_JOBS")
-    if env_jobs:
-        return int(env_jobs)
-    if is_qemu_emulated():
-        return 4
-    return max(1, (os.cpu_count() or 2) // 2)
+    auto_jobs = 4 if is_qemu_emulated() else max(1, (os.cpu_count() or 2) // 2)
+    if not env_jobs:
+        return auto_jobs
+
+    configured_cap = max(1, int(env_jobs))
+    return min(auto_jobs, configured_cap)
 
 
 def get_default_portable_march() -> str:

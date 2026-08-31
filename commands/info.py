@@ -58,7 +58,7 @@ def info_command():
         ("qemu_retry", retry_override or "(auto)"),
         (
             "build_jobs",
-            f"{get_build_jobs()}{f' (RAISIN_MAX_JOBS={jobs_override})' if jobs_override else ''}",
+            f"{get_build_jobs()}{f' (cap: RAISIN_MAX_JOBS={jobs_override})' if jobs_override else ''}",
         ),
         ("portable_march", get_default_portable_march()),
         ("march_override", march_override or "(none)"),
