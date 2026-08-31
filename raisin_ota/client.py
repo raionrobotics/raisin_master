@@ -1823,8 +1823,8 @@ _ROBOT_SCOPE_MISSING = "ROBOT_CREDENTIAL_SCOPE_MISSING"
 _ROBOT_NODE_MISMATCH = "ROBOT_CREDENTIAL_NODE_MISMATCH"
 
 
-def _api_error_code(response) -> Optional[str]:
-    """Read the stable API error code without trusting an error body shape."""
+def _api_error_field(response, field: str) -> Optional[str]:
+    """Read one field of the API error envelope without trusting its shape."""
     try:
         body = response.json()
     except (TypeError, ValueError):
@@ -1834,8 +1834,32 @@ def _api_error_code(response) -> Optional[str]:
     error = body.get("error")
     if not isinstance(error, dict):
         return None
-    code = error.get("code")
-    return code if isinstance(code, str) else None
+    value = error.get(field)
+    return value if isinstance(value, str) else None
+
+
+def _api_error_code(response) -> Optional[str]:
+    """Read the stable API error code, which is the part that is a contract."""
+    return _api_error_field(response, "code")
+
+
+def _with_server_detail(guidance: str, detail: Optional[str]) -> str:
+    """Client-owned action, plus whatever specifics the server named.
+
+    The split matters. The **code** is the contract and is what earns a
+    particular sentence; the **message** is prose that may change, and is quoted
+    only once a recognised code has already decided what the sentence says. So
+    an unrecognised code never gets its message shown -- otherwise an unreviewed
+    server string would reach an operator as though it were an instruction.
+
+    Worth carrying because the server names the thing the code cannot: which
+    scope is missing out of four, or which node the credential is pinned to.
+    "Issue one with the required OTA scope" leaves an operator guessing between
+    `ota:pull`, `ota:report`, `inventory:report` and `node:register`.
+    """
+    if not detail:
+        return guidance
+    return f"{guidance} ({detail})"
 
 
 def _robot_auth_refusal_detail(response) -> str:
@@ -1853,15 +1877,17 @@ def _robot_auth_refusal_detail(response) -> str:
 
     code = _api_error_code(response)
     if code == _ROBOT_SCOPE_MISSING:
-        return (
+        return _with_server_detail(
             "the OTA server says this robot credential is missing a required "
-            "scope; issue one with the required OTA scope"
+            "scope; issue one that holds it",
+            _api_error_field(response, "message"),
         )
     if code == _ROBOT_NODE_MISMATCH:
-        return (
+        return _with_server_detail(
             "the OTA server says this robot credential is pinned to a different "
             "node; use the credential issued for this node or correct "
-            "X-Robot-Node"
+            "X-Robot-Node",
+            _api_error_field(response, "message"),
         )
     return (
         "the OTA server says this robot credential is not permitted for this "
@@ -2758,6 +2784,19 @@ def report_software_snapshot(
             json=payload,
             timeout=10,
         )
+        if resp.status_code in (401, 403):
+            # This endpoint sits behind `inventory:report`, a different scope
+            # from the poll (`ota:pull`) and the event flush (`ota:report`). A
+            # credential missing only that one polls fine and installs fine, and
+            # fails here -- and nothing about this failure reaches the server,
+            # so it keeps showing the node on its previous version. The fleet
+            # then reads a converged node as permanently behind, and this line
+            # is the only clue anyone gets. `403 Client Error` is not a clue.
+            print(
+                "⚠️ Failed to report OTA software snapshot: "
+                f"{_robot_auth_refusal_detail(resp)}"
+            )
+            return False
         resp.raise_for_status()
         return True
     except requests.RequestException as e:
