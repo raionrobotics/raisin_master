@@ -5781,6 +5781,22 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
         self.assertIn("replacement credential", message)
         self.assertNotIn("mistyped", message)
 
+    def test_a_revoked_credential_is_not_left_as_a_guess(self):
+        """The last of the three the 401 sentence lists without choosing.
+
+        The server named expiry and this client learned it (#135). It now names
+        revocation too (`raisin-package-manager#342`), and the difference is
+        what an operator does next: an expired credential is replaced on a
+        schedule somebody controls, a revoked one means this robot was taken out
+        of the fleet or its key was rotated by hand. Sent to the file on disk
+        first, they find nothing wrong with it.
+        """
+        unusable, _printed = self.resolve(401, "ROBOT_CREDENTIAL_REVOKED")
+
+        message = str(unusable)
+        self.assertIn("revoked", message)
+        self.assertNotIn("mistyped", message)
+
     def test_a_credential_that_is_not_permitted_says_that_instead(self):
         """Not the same sentence: one is fixable by configuration, one is not."""
         unusable, _printed = self.resolve(403)
@@ -6614,3 +6630,219 @@ class TestTwoWritersDoNotLoseEachOthersEvents(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestTheServerSaysWhenTheCredentialExpires(unittest.TestCase):
+    """`X-Credential-Expires`, carried across the boundary rather than dropped.
+
+    The header rides every machine response so an agent always has a current
+    answer without spending a call on it (`raisin-package-manager#323`). This
+    module received it and threw it away, which left `raisin-ota-agent#10` with
+    no way to know when to rotate short of inventing its own request.
+
+    Passed through verbatim. The three states -- a timestamp, `never`, and the
+    header being absent -- are three different facts, and normalising any of
+    them here would collapse "this credential does not expire" into "this
+    server did not say", which is the one confusion that skips a rotation.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        _as_robot(self)
+
+    def tearDown(self):
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _fetch(self, **kwargs):
+        with (
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.get", **kwargs),
+        ):
+            return ota.fetch_robot_desired_state()
+
+    def test_a_timestamp_reaches_the_caller(self):
+        result = self._fetch(
+            return_value=_mock_response(
+                json_data={"data": {"halt": False}},
+                headers={"X-Credential-Expires": "2027-01-15T08:30:00.000Z"},
+            )
+        )
+
+        self.assertEqual(result.credential_expires, "2027-01-15T08:30:00.000Z")
+
+    def test_never_is_not_rewritten_into_a_date_or_a_blank(self):
+        result = self._fetch(
+            return_value=_mock_response(
+                json_data={"data": {}}, headers={"X-Credential-Expires": "never"}
+            )
+        )
+
+        self.assertEqual(result.credential_expires, "never")
+
+    def test_an_absent_header_stays_absent(self):
+        # A server that predates the header. `None` and `"never"` must not be
+        # the same value: an agent reading absence as "no expiry" would skip
+        # rotation on a credential that does expire.
+        result = self._fetch(return_value=_mock_response(json_data={"data": {}}))
+
+        self.assertIsNone(result.credential_expires)
+
+
+class TestRotatingTheRobotCredential(unittest.TestCase):
+    """The two calls a robot makes to replace its own credential.
+
+    Here rather than in the agent because this module is the one that knows the
+    endpoint and how a robot authenticates. Putting them in the agent would
+    give the wire format a second home, and the two would drift.
+
+    The *policy* -- when to rotate, where the replacement may be stored, and the
+    order the two calls go in -- stays in `raisin_ota_agent.rotation`. This
+    module only makes the calls.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        _as_robot(self)
+
+    def tearDown(self):
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _post(self, call, **kwargs):
+        with (
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.post", **kwargs) as posted,
+        ):
+            return call(), posted
+
+    def test_a_rotation_returns_the_credential_it_minted(self):
+        result, posted = self._post(
+            ota.rotate_robot_credential,
+            return_value=_mock_response(
+                status_code=201,
+                json_data={
+                    "data": {
+                        "keyId": "new-key",
+                        "plainKey": "rk_new_secret",  # pragma: allowlist secret
+                        "nodeId": "node-1",
+                        "scopes": ["ota:pull", "credential:rotate"],
+                        "expiresAt": "2027-09-02T00:00:00.000Z",
+                    }
+                },
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.plain_key, "rk_new_secret")  # pragma: allowlist secret
+        self.assertEqual(result.key_id, "new-key")
+        self.assertEqual(result.expires_at, "2027-09-02T00:00:00.000Z")
+        self.assertEqual(
+            posted.call_args[0][0],
+            "https://ota.example.com/robots/me/credentials/rotate",
+        )
+
+    def test_a_rotation_authenticates_as_this_robot(self):
+        _, posted = self._post(
+            ota.rotate_robot_credential,
+            return_value=_mock_response(status_code=201, json_data={"data": {}}),
+        )
+
+        headers = posted.call_args[1]["headers"]
+        self.assertIn("Robot ", headers["Authorization"])
+
+    def test_a_success_that_carries_no_key_is_not_a_rotation(self):
+        # Judged by the secret, not the status. A 201 with no `plainKey` is a
+        # server that answered and gave the robot nothing to write, and reading
+        # it as success would have the agent store `None` over a working
+        # credential -- the one failure with no remote repair.
+        result, _ = self._post(
+            ota.rotate_robot_credential,
+            return_value=_mock_response(status_code=201, json_data={"data": {}}),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertFalse(bool(result))
+
+    def test_a_success_that_carries_no_key_is_not_a_rotation(self):
+        # Judged by the secret, not the status. A 201 with no `plainKey` is a
+        # server that answered and gave the robot nothing to write, and reading
+        # it as success would have the agent store `None` over a working
+        # credential -- the one failure with no remote repair.
+        result, _ = self._post(
+            ota.rotate_robot_credential,
+            return_value=_mock_response(status_code=201, json_data={"data": {}}),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertFalse(bool(result))
+
+    def test_a_refused_rotation_is_not_mistaken_for_a_minted_one(self):
+        refused = _mock_response(status_code=401)
+        refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
+
+        result, _ = self._post(ota.rotate_robot_credential, return_value=refused)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.unauthorized)
+        self.assertIsNone(result.plain_key)
+
+    def test_a_missing_scope_is_told_apart_from_a_dead_credential(self):
+        # 403 is fixable by issuing a credential that carries `credential:rotate`;
+        # 401 is not fixable at all. An agent that conflated them would tell an
+        # operator to do the wrong thing, which is what #10 exists to stop.
+        forbidden = _mock_response(status_code=403)
+        forbidden.raise_for_status.side_effect = requests.HTTPError(response=forbidden)
+
+        result, _ = self._post(ota.rotate_robot_credential, return_value=forbidden)
+
+        self.assertTrue(result.unauthorized)
+        self.assertEqual(result.status, 403)
+
+    def test_being_offline_is_not_a_refusal(self):
+        result, _ = self._post(
+            ota.rotate_robot_credential,
+            side_effect=requests.ConnectionError("no route to host"),
+        )
+
+        self.assertTrue(result.unreachable)
+        self.assertFalse(result.unauthorized)
+
+    def test_retiring_reports_what_it_stopped(self):
+        result, posted = self._post(
+            ota.retire_superseded_credentials,
+            return_value=_mock_response(
+                json_data={"data": {"retiredKeyIds": ["old-key"]}}
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.retired_key_ids, ("old-key",))
+        self.assertEqual(
+            posted.call_args[0][0],
+            "https://ota.example.com/robots/me/credentials/retire-superseded",
+        )
+
+    def test_retiring_nothing_is_a_success(self):
+        # The ordinary answer on a retry: the agent crashed after retiring and
+        # tried again. Reading an empty list as a failure would make a healthy
+        # rotation look broken every time it recovered.
+        result, _ = self._post(
+            ota.retire_superseded_credentials,
+            return_value=_mock_response(json_data={"data": {"retiredKeyIds": []}}),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.retired_key_ids, ())

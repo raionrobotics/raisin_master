@@ -952,6 +952,13 @@ class RobotCallOutcome:
     unauthorized: bool = False
     unreachable: bool = False
     detail: Optional[str] = None
+    #: `X-Credential-Expires` as the server sent it, or None when it sent
+    #: nothing. Verbatim on purpose: an ISO timestamp, the word `never`, and an
+    #: absent header are three different facts, and normalising any of them
+    #: here would collapse "this credential does not expire" into "this server
+    #: did not say" — the one confusion that skips a rotation
+    #: (`raisin-ota-agent#10`). Parsing belongs to the caller that acts on it.
+    credential_expires: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -965,6 +972,22 @@ class FlushResult(RobotCallOutcome):
 
     drained: bool = False
     remaining: int = 0
+
+
+#: What the server sends on every machine response (`raisin-package-manager#323`).
+CREDENTIAL_EXPIRES_HEADER = "X-Credential-Expires"
+
+
+def _credential_expires(response) -> Optional[str]:
+    """The caller's own credential expiry, as the server stated it.
+
+    Nothing is ever gated on this. Whether a credential still works is answered
+    by the 401 on a real request, and the server re-reads the row every time —
+    so this is scheduling input, and a stale or missing value costs a late
+    rotation, never an access decision.
+    """
+    headers = getattr(response, "headers", {}) or {}
+    return headers.get(CREDENTIAL_EXPIRES_HEADER) or None
 
 
 def _retry_after_seconds(response) -> Optional[float]:
@@ -1822,6 +1845,7 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
 _ROBOT_SCOPE_MISSING = "ROBOT_CREDENTIAL_SCOPE_MISSING"
 _ROBOT_NODE_MISMATCH = "ROBOT_CREDENTIAL_NODE_MISMATCH"
 _ROBOT_CREDENTIAL_EXPIRED = "ROBOT_CREDENTIAL_EXPIRED"
+_ROBOT_CREDENTIAL_REVOKED = "ROBOT_CREDENTIAL_REVOKED"
 
 
 def _api_error_field(response, field: str) -> Optional[str]:
@@ -1876,6 +1900,17 @@ def _robot_auth_refusal_detail(response) -> str:
             return (
                 "the OTA server says this robot credential has expired; "
                 "issue and deploy a replacement credential"
+            )
+        if code == _ROBOT_CREDENTIAL_REVOKED:
+            # The third of the three the generic sentence lists without
+            # choosing, and the one that sends a reader furthest wrong: an
+            # expiry is a date somebody controls, a revocation means this robot
+            # was taken out of the fleet or its key was replaced by hand. Told
+            # "mistyped", they inspect a file that is perfectly correct.
+            return (
+                "the OTA server says this robot credential has been revoked; "
+                "somebody took this robot out of the fleet, or replaced its key "
+                "by hand -- enroll it again or deploy the current credential"
             )
         return (
             "the OTA server says this robot credential is not valid "
@@ -1955,17 +1990,164 @@ def fetch_robot_desired_state() -> RobotCallResult:
                 status=resp.status_code,
                 unauthorized=True,
                 detail=_robot_auth_refusal_detail(resp),
+                credential_expires=_credential_expires(resp),
             )
         resp.raise_for_status()
         state = _unwrap_response(resp.json())
         return RobotCallResult(
-            value=state if isinstance(state, dict) else None, status=resp.status_code
+            value=state if isinstance(state, dict) else None,
+            status=resp.status_code,
+            credential_expires=_credential_expires(resp),
         )
     except (requests.ConnectionError, requests.Timeout) as e:
         return RobotCallResult(unreachable=True, detail=str(e))
     except (requests.RequestException, ValueError) as e:
         print(f"⚠️ Failed to fetch OTA desired state: {e}")
         return RobotCallResult(detail=str(e))
+
+
+@dataclass(frozen=True)
+class RotatedCredential(RobotCallOutcome):
+    """The credential a rotation minted, or why none was.
+
+    `plain_key` is returned once and never again, so a caller that loses it has
+    to rotate again — which is safe, because the old credential is still live
+    until `retire_superseded_credentials` says otherwise.
+
+    `expires_at` is the *replacement's* expiry, not the header's. On a rotation
+    the header still describes the credential that authenticated the call, and
+    an agent that scheduled against it would aim at the key it just replaced.
+    """
+
+    key_id: Optional[str] = None
+    plain_key: Optional[str] = None
+    node_id: Optional[str] = None
+    scopes: tuple = ()
+    expires_at: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        # The secret, not the status. A 201 carrying no key is a server that
+        # answered and gave the robot nothing to write.
+        return bool(self.plain_key)
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+@dataclass(frozen=True)
+class RetiredCredentials(RobotCallOutcome):
+    """What a retirement stopped.
+
+    `retired` rather than reading `retired_key_ids`: an empty list is the
+    ordinary answer on a retry — the agent crashed after retiring and tried
+    again — and treating it as a failure would make a healthy rotation look
+    broken every time it recovered.
+    """
+
+    retired: bool = False
+    retired_key_ids: tuple = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.retired
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _robot_post(path: str):
+    """POST to a machine route, and say why if it did not happen.
+
+    Returns `(payload, outcome)`. `payload` is None when the call did not
+    produce one, and `outcome` always carries the fields every robot call
+    shares, so each caller builds its own result type without repeating the
+    failure mapping.
+    """
+    headers = _robot_auth_headers()
+    if not headers:
+        return None, {"detail": "no robot credential configured"}
+
+    base = get_ota_endpoint().rstrip("/")
+    try:
+        resp = requests.post(f"{base}/{path}", headers=headers, timeout=10)
+        shared = {
+            "status": resp.status_code,
+            "credential_expires": _credential_expires(resp),
+        }
+        if resp.status_code == 429:
+            return None, {
+                **shared,
+                "throttled": True,
+                "retry_after": _retry_after_seconds(resp),
+                "detail": "throttled by the OTA server",
+            }
+        if resp.status_code in (401, 403):
+            # Kept apart for the same reason the poll keeps them apart. A 403 on
+            # these routes is usually a credential without `credential:rotate`,
+            # which an operator fixes by issuing one that has it; a 401 is a
+            # credential that is gone, which they cannot fix from a unit file.
+            return None, {
+                **shared,
+                "unauthorized": True,
+                "detail": _robot_auth_refusal_detail(resp),
+            }
+        resp.raise_for_status()
+        payload = _unwrap_response(resp.json())
+        return (payload if isinstance(payload, dict) else {}), shared
+    except (requests.ConnectionError, requests.Timeout) as e:
+        return None, {"unreachable": True, "detail": str(e)}
+    except (requests.RequestException, ValueError) as e:
+        return None, {"detail": str(e)}
+
+
+def rotate_robot_credential() -> RotatedCredential:
+    """Ask for a replacement for the credential making this call.
+
+    Mints and nothing else: the credential in use stays live, so a robot that
+    cannot write the replacement to disk has lost an attempt rather than its
+    access. Retiring the old one is the separate call below, made *with the new
+    credential* — reaching it is the server's proof the replacement works.
+
+    No body. Everything the rotation needs — which robot, which node, which
+    scopes, what lifetime — comes from the credential presented, and sending
+    anything would only offer a caller the chance to ask for more than it holds.
+    """
+    payload, outcome = _robot_post("robots/me/credentials/rotate")
+    if payload is None:
+        return RotatedCredential(**outcome)
+
+    return RotatedCredential(
+        key_id=payload.get("keyId"),
+        plain_key=payload.get("plainKey"),
+        node_id=payload.get("nodeId"),
+        scopes=tuple(payload.get("scopes") or ()),
+        expires_at=payload.get("expiresAt"),
+        **outcome,
+    )
+
+
+def retire_superseded_credentials() -> RetiredCredentials:
+    """Stop every other live credential for this node.
+
+    Call it with the credential a rotation produced. Authenticating it is the
+    proof the replacement works, so nothing else has to be sent — and a robot
+    that could not write the replacement simply never gets here, leaving the old
+    credential working.
+
+    Idempotent, and worth knowing which way: it keeps the credential that made
+    the call. Sent with the *old* one it retires the replacement and undoes the
+    rotation, so an agent must call it with the key it just wrote.
+    """
+    payload, outcome = _robot_post("robots/me/credentials/retire-superseded")
+    if payload is None:
+        return RetiredCredentials(**outcome)
+
+    return RetiredCredentials(
+        retired=True,
+        retired_key_ids=tuple(payload.get("retiredKeyIds") or ()),
+        **outcome,
+    )
 
 
 #: Reasons that mean nothing was assigned, as opposed to something was and this
