@@ -31,7 +31,7 @@ import yaml
 from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from . import install_tree
 from .install_tree import safe_component
@@ -1909,8 +1909,9 @@ def _robot_auth_refusal_detail(response) -> str:
             # "mistyped", they inspect a file that is perfectly correct.
             return (
                 "the OTA server says this robot credential has been revoked; "
-                "somebody took this robot out of the fleet, or replaced its key "
-                "by hand -- enroll it again or deploy the current credential"
+                "somebody took this robot out of the fleet, or replaced its "
+                "key by hand; deploy the current credential, or enroll this "
+                "robot again"
             )
         return (
             "the OTA server says this robot credential is not valid "
@@ -2022,7 +2023,7 @@ class RotatedCredential(RobotCallOutcome):
     key_id: Optional[str] = None
     plain_key: Optional[str] = None
     node_id: Optional[str] = None
-    scopes: tuple = ()
+    scopes: Tuple[str, ...] = ()
     expires_at: Optional[str] = None
 
     @property
@@ -2046,7 +2047,7 @@ class RetiredCredentials(RobotCallOutcome):
     """
 
     retired: bool = False
-    retired_key_ids: tuple = ()
+    retired_key_ids: Tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -2140,9 +2141,25 @@ def rotate_robot_credential() -> RotatedCredential:
     if payload is None:
         return RotatedCredential(**outcome)
 
+    plain_key = payload.get("plainKey")
+    if not plain_key:
+        # The server answered and gave the robot nothing to write. `ok` already
+        # reads false off the missing key, but a result that is not ok and
+        # carries no `detail` makes the caller log "could not obtain a
+        # replacement credential: None" — the one failure message here that
+        # names nothing at all.
+        outcome = {
+            **outcome,
+            "detail": (
+                "the OTA server accepted the rotation and returned no "
+                "credential, so there is nothing to store; the credential in "
+                "use is unchanged"
+            ),
+        }
+
     return RotatedCredential(
         key_id=payload.get("keyId"),
-        plain_key=payload.get("plainKey"),
+        plain_key=plain_key,
         node_id=payload.get("nodeId"),
         scopes=tuple(payload.get("scopes") or ()),
         expires_at=payload.get("expiresAt"),

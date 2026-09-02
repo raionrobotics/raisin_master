@@ -5796,6 +5796,11 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
         message = str(unusable)
         self.assertIn("revoked", message)
         self.assertNotIn("mistyped", message)
+        # The cause *and* what to do about it, which is the standard the expiry
+        # case above is held to. Naming only the cause leaves the reader where
+        # the generic sentence left them; a mutation that kept "revoked" and
+        # dropped the rest passed until this line existed.
+        self.assertIn("deploy the current credential", message)
 
     def test_a_credential_that_is_not_permitted_says_that_instead(self):
         """Not the same sentence: one is fixable by configuration, one is not."""
@@ -6788,6 +6793,11 @@ class TestRotatingTheRobotCredential(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertFalse(bool(result))
+        # And it says so. Every other way this can fail sets `detail`; without
+        # one here the caller logs "could not obtain a replacement credential:
+        # None", which is the one failure message that names nothing at all.
+        self.assertIsNotNone(result.detail)
+        self.assertIn("no credential", result.detail)
 
     def test_a_refused_rotation_is_not_mistaken_for_a_minted_one(self):
         refused = _mock_response(status_code=401)
