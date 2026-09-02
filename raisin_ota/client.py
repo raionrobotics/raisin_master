@@ -2092,13 +2092,36 @@ def _robot_post(path: str):
                 "unauthorized": True,
                 "detail": _robot_auth_refusal_detail(resp),
             }
+        if resp.status_code == 404:
+            # A partial deploy, and the only way to reach these routes on one:
+            # a server old enough to lack them sends no `X-Credential-Expires`
+            # either, and a caller reading that as "cannot tell" never asks. So
+            # this is a server new enough to send the header and old enough to
+            # lack the routes.
+            #
+            # Named rather than left as `404 Client Error`, which is the
+            # standard the rest of this module's refusals were held to. Neither
+            # a refusal nor an outage: nothing about the credential is wrong and
+            # the server answered.
+            return None, {
+                **shared,
+                "detail": (
+                    "the OTA server does not support credential rotation; "
+                    "it answered 404 for this route, so it needs upgrading "
+                    "before this robot can renew its own credential"
+                ),
+            }
         resp.raise_for_status()
         payload = _unwrap_response(resp.json())
         return (payload if isinstance(payload, dict) else {}), shared
     except (requests.ConnectionError, requests.Timeout) as e:
         return None, {"unreachable": True, "detail": str(e)}
     except (requests.RequestException, ValueError) as e:
-        return None, {"detail": str(e)}
+        # The status where there is one. `raise_for_status` discards it into a
+        # string otherwise, and a caller that wants to tell a 500 from a
+        # malformed body has to parse prose to do it.
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        return None, {"status": status, "detail": str(e)}
 
 
 def rotate_robot_credential() -> RotatedCredential:

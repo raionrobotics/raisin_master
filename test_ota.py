@@ -6811,6 +6811,44 @@ class TestRotatingTheRobotCredential(unittest.TestCase):
         self.assertTrue(result.unauthorized)
         self.assertEqual(result.status, 403)
 
+    def test_a_server_without_the_routes_says_so(self):
+        """A partial deploy, and the only way to reach these routes on one.
+
+        An older server sends no `X-Credential-Expires`, the agent reads that as
+        "cannot tell" and never rotates — so a server that predates rotation is
+        never asked. What is left is a server new enough to send the header and
+        old enough to lack the routes, which answers 404.
+
+        Left as `404 Client Error` it names no corrective action, which is the
+        standard the rest of this module's refusals were held to in #101.
+        """
+        missing = _mock_response(status_code=404)
+        missing.raise_for_status.side_effect = requests.HTTPError(response=missing)
+
+        result, _ = self._post(ota.rotate_robot_credential, return_value=missing)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 404)
+        self.assertIn("does not support", result.detail)
+        # Not a refusal and not an outage: nothing about the credential is
+        # wrong, and the server answered.
+        self.assertFalse(result.unauthorized)
+        self.assertFalse(result.unreachable)
+
+    def test_a_server_error_keeps_the_status_it_answered_with(self):
+        # `raise_for_status` puts the code in a string and throws the number
+        # away, so a caller that wants to tell a 500 from a malformed body has
+        # to parse prose. Nothing else on this result can distinguish them.
+        broken = _mock_response(status_code=500)
+        broken.raise_for_status.side_effect = requests.HTTPError(response=broken)
+
+        result, _ = self._post(ota.rotate_robot_credential, return_value=broken)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 500)
+        self.assertFalse(result.unauthorized)
+        self.assertFalse(result.unreachable)
+
     def test_being_offline_is_not_a_refusal(self):
         result, _ = self._post(
             ota.rotate_robot_credential,
