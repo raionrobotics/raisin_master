@@ -6633,10 +6633,6 @@ class TestTwoWritersDoNotLoseEachOthersEvents(unittest.TestCase):
 # ============================================================================
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestTheServerSaysWhenTheCredentialExpires(unittest.TestCase):
     """`X-Credential-Expires`, carried across the boundary rather than dropped.
 
@@ -6894,3 +6890,96 @@ class TestRotatingTheRobotCredential(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.retired_key_ids, ())
+
+
+class TestTheCallerDecidesWhenInstalledIsTrue(unittest.TestCase):
+    """`download_all_from_archive` reports the switch; two callers disagree on
+    whether the switch is the end.
+
+    `commands/install.py` runs this and stops, so for it the switch *is* the
+    final state and this is its only report. The OTA agent has eight steps left
+    — dependencies, stop the node, deploy, build, start, health check — and a
+    rollback behind them, so a snapshot sent here can name a version the robot
+    never runs. Measured on a robot: reported, and thirty-one seconds later
+    the health check failed and the tree was rolled back.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        self.live = Path(self._tmp.name) / "release" / "install"
+        self.live.mkdir(parents=True)
+
+    def tearDown(self):
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _download(self, **kwargs):
+        packages = [
+            {
+                "packageName": "mypkg",
+                "tagName": "v1.2.0",
+                "packageId": "p1",
+                "manifestHash": "a" * 64,
+            }
+        ]
+        download_file = Path(self._tmp.name) / "install" / "mypkg-ota-1.2.0.zip"
+        download_file.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(download_file, "w") as zf:
+            zf.writestr("release.yaml", "version: 1.2.0\n")
+
+        with (
+            # Through desired state, which is the route a robot takes and the
+            # only one that reaches the switch without a tag lookup.
+            patch(
+                "raisin_ota.client._resolve_desired_state",
+                return_value=(
+                    False,
+                    "raisin-robot",
+                    "v2024.01",
+                    (packages, "arch-1", "v2024.01"),
+                ),
+            ),
+            patch(
+                "raisin_ota.client._fetch_archive_manifest",
+                return_value=(packages, "arch-1", "v2024.01"),
+            ),
+            patch(
+                "raisin_ota.client._download_package_blob", return_value=(True, None)
+            ),
+            patch("raisin_ota.client.get_install_session_id", return_value="session-1"),
+        ):
+            return ota.download_all_from_archive("release", self.live, **kwargs)
+
+    @patch("raisin_ota.client._report_snapshot_from_install_metadata")
+    def test_a_caller_that_ends_here_still_gets_its_only_report(self, mock_report):
+        """The default, and `commands/install.py` depends on it: there is no
+        later moment in that path, so removing this would make a human install
+        invisible to the fleet."""
+        self._download()
+
+        mock_report.assert_called_once()
+
+    @patch("raisin_ota.client._report_snapshot_from_install_metadata")
+    def test_a_caller_with_more_to_do_can_say_so(self, mock_report):
+        """What the agent passes. It reports from the tree at the end of its own
+        cycle instead — after recovery, so it describes what is actually there
+        rather than what was staged."""
+        self._download(report_snapshot=False)
+
+        mock_report.assert_not_called()
+
+    def test_the_switch_still_happens_when_the_report_is_suppressed(self):
+        """Suppressing the *report* must not suppress the *install*. The pointer
+        move is what the caller asked for; the snapshot is only how the fleet
+        hears about it."""
+        result = self._download(report_snapshot=False)
+
+        self.assertIn("mypkg", result)
+
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
