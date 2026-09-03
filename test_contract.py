@@ -227,6 +227,67 @@ class TestWriteRoutesRefuseAsExpected(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+@skip_without_server
+class TestCredentialRotationContract(unittest.TestCase):
+    """The routes `rotate_robot_credential` calls, asserted against a server.
+
+    Every other check on these lives in this client's own mocks, which encode
+    the contract as this client believes it -- so a server that never deployed
+    them, or moved them, keeps all of it green. The client would then answer
+    "could not obtain a replacement credential: 404 Client Error" on a fleet
+    that has no way to renew itself, and nothing here would have said so first.
+
+    No credential is needed and nothing is created: these assert *how the routes
+    refuse*, which is rule 2 of this suite. A route that is not deployed answers
+    404, and one that is answers 401 -- and the difference is the whole thing
+    worth knowing.
+    """
+
+    def _refusal(self, path):
+        return requests.post(f"{ENDPOINT}/{path}", timeout=15)
+
+    def test_the_rotation_route_is_deployed_and_machine_guarded(self):
+        resp = self._refusal("robots/me/credentials/rotate")
+
+        self.assertEqual(
+            resp.status_code,
+            401,
+            "a 404 here means the server predates credential rotation, and this "
+            "client's rotation calls cannot work against it",
+        )
+
+    def test_the_retirement_route_is_deployed_and_machine_guarded(self):
+        resp = self._refusal("robots/me/credentials/retire-superseded")
+
+        self.assertEqual(resp.status_code, 401)
+
+    def test_a_path_that_does_not_exist_still_answers_404(self):
+        # The control. Without it the two assertions above would pass just as
+        # well against a server that answers 401 to everything under this
+        # prefix, which would tell us nothing about whether the routes are there.
+        resp = self._refusal("robots/me/credentials/no-such-route")
+
+        self.assertEqual(resp.status_code, 404)
+
+    def test_an_unauthenticated_refusal_carries_no_credential_expiry(self):
+        """`X-Credential-Expires` is about the caller's own credential.
+
+        A caller that has not proved one must not be told anything, and the
+        server's ordering is what guarantees it -- the guard refuses before the
+        interceptor has a credential to describe. Asserted here because it is a
+        property of the server this client would not notice losing.
+        """
+        resp = requests.get(
+            f"{ENDPOINT}/robots/me/desired-state",
+            headers={"x-robot-api-key": "rk_not_a_real_key"},
+            timeout=15,
+        )
+
+        self.assertEqual(resp.status_code, 401)
+        self.assertNotIn(ota.CREDENTIAL_EXPIRES_HEADER.lower(),
+                         {k.lower() for k in resp.headers})
+
+
 @skip_without_robot_key
 class TestRobotContract(unittest.TestCase):
     """What a robot credential alone can obtain — the agent's whole surface."""
