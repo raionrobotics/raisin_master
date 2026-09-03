@@ -3389,6 +3389,7 @@ def download_all_from_archive(
     package_filter: Optional[list] = None,
     archive_name: Optional[str] = None,
     tag: Optional[str] = "stable",
+    report_snapshot: bool = True,
 ) -> dict:
     """Download all packages from an archive.
 
@@ -3405,6 +3406,24 @@ def download_all_from_archive(
             `archive_version` is None, the archive is fetched via the tag
             and a missing tag aborts the install with a SystemExit.
             Pass None to fall back to legacy latest-by-time selection.
+        report_snapshot: whether to tell the server what is installed once
+            the switch is done. True is right for a caller whose work ends
+            here: `commands/install.py` runs this and stops, so the switch
+            *is* the final state and this is its only report.
+
+            A caller with more to do should pass False and report when it is
+            actually done. The OTA agent has eight steps after this one --
+            dependencies, stop the node, deploy, build, start, health check --
+            and rolls back when the last fails, so a snapshot sent here can
+            describe a version the robot never runs. Measured on a robot:
+            reported, and thirty-one seconds later the health check failed
+            and the tree was rolled back. It reports at the end of its own
+            cycle instead, reading the archive identity back out of the
+            installed tree, which is after recovery and so describes what is
+            actually there.
+
+            Default True because taking the report away from a caller with no
+            later moment is worse than sending it early to one that has.
 
     Returns:
         dict mapping package_name to {'version': str, 'dependencies': list}
@@ -3670,16 +3689,22 @@ def download_all_from_archive(
             )
         return {}
 
-    _report_snapshot_from_install_metadata(
-        install_base_path=install_base_path,
-        archive_id=archive_id,
-        archive_name=archive_name,
-        archive_version=actual_version,
-        platform_str=platform_str,
-        build_type=build_type,
-        install_session_id=install_session_id,
-        manifest_hashes=manifest_hashes_by_package_id(packages),
-    )
+    # The caller decides when "installed" is true, because the callers do not
+    # agree on it. `commands/install.py` ends here, so this is its final state.
+    # The OTA agent has eight steps left and a rollback behind them, and reports
+    # from the tree once its own cycle is done -- so telling the server now
+    # would be describing a version it may never run.
+    if report_snapshot:
+        _report_snapshot_from_install_metadata(
+            install_base_path=install_base_path,
+            archive_id=archive_id,
+            archive_name=archive_name,
+            archive_version=actual_version,
+            platform_str=platform_str,
+            build_type=build_type,
+            install_session_id=install_session_id,
+            manifest_hashes=manifest_hashes_by_package_id(packages),
+        )
     install_tree.prune_versions(release, keep=_version_retention())
 
     return results
