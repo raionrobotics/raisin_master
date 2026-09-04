@@ -85,3 +85,8 @@ vcpkg_installed/*
 
 # raisin test intermediates (gcov scratch files)
 /tmp/
+
+# AI agent tooling
+.claude
+.codex
+.omc
