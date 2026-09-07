@@ -6892,6 +6892,132 @@ class TestRotatingTheRobotCredential(unittest.TestCase):
         self.assertEqual(result.retired_key_ids, ())
 
 
+class TestExchangingLegacyCredential(unittest.TestCase):
+    """The wire half of moving a fielded robot onto a node credential."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = g.script_directory
+        g.script_directory = self._tmp.name
+        _sync_ota_context()
+        _as_robot(self)
+
+    def tearDown(self):
+        g.script_directory = self._orig
+        self._tmp.cleanup()
+
+    def _exchange(self, **kwargs):
+        with (
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch("raisin_ota.client.requests.post", **kwargs) as posted,
+        ):
+            result = ota.exchange_robot_credential(
+                node_key="gimbal",
+                platform="ubuntu-24.04-arm64",
+                hardware_id=" DMI:BOARD-001 ",
+            )
+            return result, posted
+
+    def test_returns_the_one_node_credential(self):
+        result, posted = self._exchange(
+            return_value=_mock_response(
+                status_code=201,
+                json_data={
+                    "data": {
+                        "robotId": "robot-1",
+                        "credentials": [
+                            {
+                                "nodeKey": "gimbal",
+                                "nodeId": "node-1",
+                                "type": "api_key",
+                                "secret": "rk_node_secret",
+                            }
+                        ],
+                        "legacyCredentialExpiresAt": "2026-10-07T00:00:00.000Z",
+                        "alreadyExchanged": False,
+                    }
+                },
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.node_id, "node-1")
+        self.assertEqual(result.plain_key, "rk_node_secret")
+        self.assertEqual(
+            posted.call_args[0][0],
+            "https://ota.example.com/robots/me/credentials/exchange",
+        )
+        self.assertEqual(
+            posted.call_args[1]["json"],
+            {
+                "nodes": [
+                    {
+                        "nodeKey": "gimbal",
+                        "platform": "ubuntu-24.04-arm64",
+                        "hardwareId": "dmi:board-001",
+                    }
+                ]
+            },
+        )
+
+    def test_a_response_without_one_usable_matching_credential_is_failure(self):
+        result, _ = self._exchange(
+            return_value=_mock_response(
+                status_code=201,
+                json_data={
+                    "data": {
+                        "credentials": [
+                            {"nodeKey": "somebody-else", "nodeId": "node-1"}
+                        ]
+                    }
+                },
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.plain_key)
+        self.assertIn("unchanged", result.detail)
+
+    def test_a_server_conflict_is_not_a_credential(self):
+        conflict = _mock_response(status_code=409)
+        conflict.raise_for_status.side_effect = requests.HTTPError(response=conflict)
+
+        result, _ = self._exchange(return_value=conflict)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 409)
+        self.assertFalse(result.unauthorized)
+
+    def test_an_already_pinned_credential_is_identified_by_code(self):
+        pinned = _mock_response(
+            status_code=403,
+            json_data={
+                "error": {"code": "ROBOT_CREDENTIAL_ALREADY_PINNED"}
+            },
+        )
+        pinned.raise_for_status.side_effect = requests.HTTPError(response=pinned)
+
+        result, _ = self._exchange(return_value=pinned)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.already_pinned)
+        self.assertEqual(result.error_code, "ROBOT_CREDENTIAL_ALREADY_PINNED")
+
+    def test_missing_identity_is_refused_without_a_request(self):
+        with patch("raisin_ota.client.requests.post") as posted:
+            result = ota.exchange_robot_credential(
+                node_key="gimbal",
+                platform="ubuntu-24.04-arm64",
+                hardware_id="   ",
+            )
+
+        self.assertFalse(result.ok)
+        posted.assert_not_called()
+
+
 class TestTheCallerDecidesWhenInstalledIsTrue(unittest.TestCase):
     """`download_all_from_archive` reports the switch; two callers disagree on
     whether the switch is the end.

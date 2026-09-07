@@ -256,6 +256,15 @@ class TestCredentialRotationContract(unittest.TestCase):
             "client's rotation calls cannot work against it",
         )
 
+    def test_the_exchange_route_is_deployed_and_machine_guarded(self):
+        resp = self._refusal("robots/me/credentials/exchange")
+
+        self.assertEqual(
+            resp.status_code,
+            401,
+            "a 404 here means fielded agents cannot exchange their robot-wide credential",
+        )
+
     def test_the_retirement_route_is_deployed_and_machine_guarded(self):
         resp = self._refusal("robots/me/credentials/retire-superseded")
 

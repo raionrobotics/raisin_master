@@ -952,6 +952,9 @@ class RobotCallOutcome:
     unauthorized: bool = False
     unreachable: bool = False
     detail: Optional[str] = None
+    #: Stable machine-readable code from the server error envelope. Prose is
+    #: for a person; callers branch only on this.
+    error_code: Optional[str] = None
     #: `X-Credential-Expires` as the server sent it, or None when it sent
     #: nothing. Verbatim on purpose: an ISO timestamp, the word `never`, and an
     #: absent header are three different facts, and normalising any of them
@@ -1840,6 +1843,7 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
         "X-Install-Session-Id": session_id,
         "X-Robot-Node": robot.node_key,
     }
+_ROBOT_CREDENTIAL_ALREADY_PINNED = "ROBOT_CREDENTIAL_ALREADY_PINNED"
 
 
 _ROBOT_SCOPE_MISSING = "ROBOT_CREDENTIAL_SCOPE_MISSING"
@@ -2037,6 +2041,29 @@ class RotatedCredential(RobotCallOutcome):
 
 
 @dataclass(frozen=True)
+class ExchangedCredential(RobotCallOutcome):
+    """The node-pinned credential returned for a legacy robot-wide one."""
+
+    robot_id: Optional[str] = None
+    node_key: Optional[str] = None
+    node_id: Optional[str] = None
+    plain_key: Optional[str] = None
+    legacy_credential_expires_at: Optional[str] = None
+    already_exchanged: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.plain_key and self.node_id and self.node_key)
+    @property
+    def already_pinned(self) -> bool:
+        return self.error_code == _ROBOT_CREDENTIAL_ALREADY_PINNED
+
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+@dataclass(frozen=True)
 class RetiredCredentials(RobotCallOutcome):
     """What a retirement stopped.
 
@@ -2057,7 +2084,7 @@ class RetiredCredentials(RobotCallOutcome):
         return self.ok
 
 
-def _robot_post(path: str):
+def _robot_post(path: str, json_body: Optional[dict] = None):
     """POST to a machine route, and say why if it did not happen.
 
     Returns `(payload, outcome)`. `payload` is None when the call did not
@@ -2071,10 +2098,14 @@ def _robot_post(path: str):
 
     base = get_ota_endpoint().rstrip("/")
     try:
-        resp = requests.post(f"{base}/{path}", headers=headers, timeout=10)
+        request_options = {"headers": headers, "timeout": 10}
+        if json_body is not None:
+            request_options["json"] = json_body
+        resp = requests.post(f"{base}/{path}", **request_options)
         shared = {
             "status": resp.status_code,
             "credential_expires": _credential_expires(resp),
+            "error_code": _api_error_code(resp),
         }
         if resp.status_code == 429:
             return None, {
@@ -2163,6 +2194,79 @@ def rotate_robot_credential() -> RotatedCredential:
         node_id=payload.get("nodeId"),
         scopes=tuple(payload.get("scopes") or ()),
         expires_at=payload.get("expiresAt"),
+        **outcome,
+    )
+
+
+def exchange_robot_credential(
+    *, node_key: str, platform: str, hardware_id: str
+) -> ExchangedCredential:
+    """Trade a legacy robot-wide credential for this node's pinned one.
+
+    The mechanism owns the wire format only. Deciding whether the credential is
+    legacy, which durable hardware identity to use, and when to adopt the
+    returned secret remain agent policy.
+    """
+    key = (node_key or "").strip()
+    platform_name = (platform or "").strip()
+    identity = (hardware_id or "").strip().lower()
+    if not key or not platform_name or not identity:
+        return ExchangedCredential(
+            detail=(
+                "credential exchange requires a node key, platform and durable "
+                "hardware identity"
+            )
+        )
+
+    payload, outcome = _robot_post(
+        "robots/me/credentials/exchange",
+        {
+            "nodes": [
+                {
+                    "nodeKey": key,
+                    "platform": platform_name,
+                    "hardwareId": identity,
+                }
+            ]
+        },
+    )
+    if payload is None:
+        return ExchangedCredential(**outcome)
+
+    credentials = payload.get("credentials")
+    if not isinstance(credentials, list) or len(credentials) != 1:
+        return ExchangedCredential(
+            **outcome,
+            detail=(
+                "the OTA server accepted credential exchange but did not return "
+                "exactly one node credential; the credential in use is unchanged"
+            ),
+        )
+    credential = credentials[0]
+    if not isinstance(credential, dict):
+        credential = {}
+    returned_key = _normalize_optional_string(credential.get("nodeKey"))
+    plain_key = _normalize_optional_string(credential.get("secret"))
+    node_id = _normalize_optional_string(credential.get("nodeId"))
+    if returned_key != key or not plain_key or not node_id:
+        return ExchangedCredential(
+            **outcome,
+            detail=(
+                "the OTA server accepted credential exchange but returned an "
+                "unusable or mismatched node credential; the credential in use "
+                "is unchanged"
+            ),
+        )
+
+    return ExchangedCredential(
+        robot_id=_normalize_optional_string(payload.get("robotId")),
+        node_key=returned_key,
+        node_id=node_id,
+        plain_key=plain_key,
+        legacy_credential_expires_at=_normalize_optional_string(
+            payload.get("legacyCredentialExpiresAt")
+        ),
+        already_exchanged=bool(payload.get("alreadyExchanged")),
         **outcome,
     )
 
