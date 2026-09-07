@@ -1859,6 +1859,7 @@ _ROBOT_SCOPE_MISSING = "ROBOT_CREDENTIAL_SCOPE_MISSING"
 _ROBOT_NODE_MISMATCH = "ROBOT_CREDENTIAL_NODE_MISMATCH"
 _ROBOT_CREDENTIAL_EXPIRED = "ROBOT_CREDENTIAL_EXPIRED"
 _ROBOT_CREDENTIAL_REVOKED = "ROBOT_CREDENTIAL_REVOKED"
+_GONE = "GONE"
 
 
 def _api_error_field(response, field: str) -> Optional[str]:
@@ -2150,6 +2151,18 @@ def _robot_post(path: str, json_body: Optional[dict] = None):
                     "the OTA server does not support this credential operation; "
                     "it answered 404 for this route, so it needs upgrading "
                     "before this robot can continue"
+                ),
+            }
+        if resp.status_code >= 400:
+            return None, {
+                **shared,
+                "detail": _with_server_detail(
+                    "the OTA server returned an error for this credential operation",
+                    (
+                        _api_error_field(resp, "message")
+                        if shared["error_code"] == _GONE
+                        else None
+                    ),
                 ),
             }
         resp.raise_for_status()

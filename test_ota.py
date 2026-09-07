@@ -7034,6 +7034,31 @@ class TestExchangingLegacyCredential(unittest.TestCase):
         self.assertIn("credential operation", result.detail)
         self.assertNotIn("rotation", result.detail)
 
+    def test_a_decommissioned_node_preserves_the_server_reason(self):
+        gone = _mock_response(
+            status_code=410,
+            json_data={
+                "error": {
+                    "code": "GONE",
+                    "message": (
+                        "Robot node gimbal is decommissioned; restore it "
+                        "before retrying credential exchange"
+                    ),
+                }
+            },
+        )
+        gone.raise_for_status.side_effect = requests.HTTPError(response=gone)
+
+        result, _ = self._exchange(return_value=gone)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 410)
+        self.assertEqual(result.error_code, "GONE")
+        self.assertIn("decommissioned", result.detail)
+        self.assertIn("restore", result.detail)
+        self.assertFalse(result.unauthorized)
+        self.assertFalse(result.unreachable)
+
     def test_an_already_pinned_credential_is_identified_by_code(self):
         pinned = _mock_response(
             status_code=403,
