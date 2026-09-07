@@ -6970,7 +6970,12 @@ class TestExchangingLegacyCredential(unittest.TestCase):
                 json_data={
                     "data": {
                         "credentials": [
-                            {"nodeKey": "somebody-else", "nodeId": "node-1"}
+                            {
+                                "nodeKey": "somebody-else",
+                                "nodeId": "node-1",
+                                "type": "api_key",
+                                "secret": "rk_node_secret",
+                            }
                         ]
                     }
                 },
@@ -6981,6 +6986,33 @@ class TestExchangingLegacyCredential(unittest.TestCase):
         self.assertIsNone(result.plain_key)
         self.assertIn("unchanged", result.detail)
 
+    def test_non_string_or_wrong_type_credentials_are_rejected(self):
+        for credential in (
+            {
+                "nodeKey": "gimbal",
+                "nodeId": "node-1",
+                "type": "api_key",
+                "secret": {"unexpected": "object"},
+            },
+            {
+                "nodeKey": "gimbal",
+                "nodeId": "node-1",
+                "type": "bearer",
+                "secret": "rk_node_secret",
+            },
+        ):
+            with self.subTest(credential=credential):
+                result, _ = self._exchange(
+                    return_value=_mock_response(
+                        status_code=201,
+                        json_data={"data": {"credentials": [credential]}},
+                    )
+                )
+
+                self.assertFalse(result.ok)
+                self.assertIsNone(result.plain_key)
+                self.assertIn("unchanged", result.detail)
+
     def test_a_server_conflict_is_not_a_credential(self):
         conflict = _mock_response(status_code=409)
         conflict.raise_for_status.side_effect = requests.HTTPError(response=conflict)
@@ -6990,6 +7022,17 @@ class TestExchangingLegacyCredential(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, 409)
         self.assertFalse(result.unauthorized)
+
+    def test_a_missing_exchange_route_does_not_claim_rotation_failed(self):
+        missing = _mock_response(status_code=404)
+        missing.raise_for_status.side_effect = requests.HTTPError(response=missing)
+
+        result, _ = self._exchange(return_value=missing)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 404)
+        self.assertIn("credential operation", result.detail)
+        self.assertNotIn("rotation", result.detail)
 
     def test_an_already_pinned_credential_is_identified_by_code(self):
         pinned = _mock_response(

@@ -148,6 +148,13 @@ def _normalize_optional_string(value) -> Optional[str]:
     return value
 
 
+def _response_optional_string(value) -> Optional[str]:
+    """Accept a server field only when it is actually a non-empty string."""
+    if not isinstance(value, str):
+        return None
+    return _normalize_optional_string(value)
+
+
 @dataclass(frozen=True)
 class RobotIdentity:
     """Who this process is to the OTA server.
@@ -1843,6 +1850,8 @@ def _robot_auth_headers(install_session_id: Optional[str] = None) -> Optional[di
         "X-Install-Session-Id": session_id,
         "X-Robot-Node": robot.node_key,
     }
+
+
 _ROBOT_CREDENTIAL_ALREADY_PINNED = "ROBOT_CREDENTIAL_ALREADY_PINNED"
 
 
@@ -2054,10 +2063,10 @@ class ExchangedCredential(RobotCallOutcome):
     @property
     def ok(self) -> bool:
         return bool(self.plain_key and self.node_id and self.node_key)
+
     @property
     def already_pinned(self) -> bool:
         return self.error_code == _ROBOT_CREDENTIAL_ALREADY_PINNED
-
 
     def __bool__(self) -> bool:
         return self.ok
@@ -2138,9 +2147,9 @@ def _robot_post(path: str, json_body: Optional[dict] = None):
             return None, {
                 **shared,
                 "detail": (
-                    "the OTA server does not support credential rotation; "
+                    "the OTA server does not support this credential operation; "
                     "it answered 404 for this route, so it needs upgrading "
-                    "before this robot can renew its own credential"
+                    "before this robot can continue"
                 ),
             }
         resp.raise_for_status()
@@ -2245,10 +2254,16 @@ def exchange_robot_credential(
     credential = credentials[0]
     if not isinstance(credential, dict):
         credential = {}
-    returned_key = _normalize_optional_string(credential.get("nodeKey"))
-    plain_key = _normalize_optional_string(credential.get("secret"))
-    node_id = _normalize_optional_string(credential.get("nodeId"))
-    if returned_key != key or not plain_key or not node_id:
+    returned_key = _response_optional_string(credential.get("nodeKey"))
+    plain_key = _response_optional_string(credential.get("secret"))
+    node_id = _response_optional_string(credential.get("nodeId"))
+    credential_type = _response_optional_string(credential.get("type"))
+    if (
+        returned_key != key
+        or credential_type != "api_key"
+        or not plain_key
+        or not node_id
+    ):
         return ExchangedCredential(
             **outcome,
             detail=(
@@ -2259,14 +2274,14 @@ def exchange_robot_credential(
         )
 
     return ExchangedCredential(
-        robot_id=_normalize_optional_string(payload.get("robotId")),
+        robot_id=_response_optional_string(payload.get("robotId")),
         node_key=returned_key,
         node_id=node_id,
         plain_key=plain_key,
-        legacy_credential_expires_at=_normalize_optional_string(
+        legacy_credential_expires_at=_response_optional_string(
             payload.get("legacyCredentialExpiresAt")
         ),
-        already_exchanged=bool(payload.get("alreadyExchanged")),
+        already_exchanged=payload.get("alreadyExchanged") is True,
         **outcome,
     )
 
