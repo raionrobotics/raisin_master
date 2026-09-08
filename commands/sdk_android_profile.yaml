@@ -1,0 +1,70 @@
+# Android SDK profiles for RAISIN (`raisin build_sdk android`).
+# Other platforms keep their profiles in sdk_<platform>_profile.yaml.
+#
+# A profile pins the package/dependency closure, the CMake feature settings and
+# the interface packages for one target platform. The Python dependency scanner
+# (setup.find_dependencies) collects raisin_find_package() calls with a regex and
+# cannot evaluate CMake conditionals, so it reports packages that a disabled
+# feature branch never actually needs. The `packages` allowlist below is the
+# authoritative closure; `cmake_options` must agree with it and is cross-checked
+# by commands.sdk_target_config.validate_profile().
+
+android_comm:
+  platform: android
+  description: >-
+    Communication-only Raisin core for Android: discovery, TCP sessions, topics
+    and services. No shared memory, data logging, parameters, WebSocket, dynamic
+    encryption, node flow, realtime scheduling or OpenSSL.
+
+  source_repositories:
+    - raisin_third_party_common
+    - raisin
+
+  packages:
+    - raisin_compat
+    - raisin_encryption
+    - raisin_empty_encryption
+    - raisin_thread_pool
+    - raisin_network
+    - raisin_interfaces
+
+    # Owned by src/raisin_third_party_common; discovered like other packages.
+    - zstd
+
+  message_packages:
+    - action_msgs
+    - builtin_interfaces
+    - geometry_msgs
+    - raisin_interfaces
+    - sensor_msgs
+    - std_msgs
+    - std_srvs
+    - unique_identifier_msgs
+
+  # Use active src/ first, otherwise an installed release. Only IDL and headers
+  # are used; these repositories' CMake projects and host binaries are not built.
+  interface_repositories:
+    - raisin_ros2_messages
+
+  # Header-only files needed by the public API whose owning package cannot be
+  # built for this target (raisin_util pulls in raisim).
+  extra_headers:
+    raisin_util/time.hpp: src/raisin/raisin_util/include/raisin_util/time.hpp
+
+  cmake_options:
+    CMAKE_POSITION_INDEPENDENT_CODE: "ON"
+    ZSTD_BUILD_STATIC: "ON"
+    ZSTD_BUILD_SHARED: "OFF"
+    ZSTD_BUILD_PROGRAMS: "OFF"
+    ZSTD_BUILD_TESTS: "OFF"
+    ZSTD_MULTITHREAD_SUPPORT: "OFF"
+    RAISIN_NETWORK_ENABLE_SHARED_MEMORY: "OFF"
+    RAISIN_NETWORK_ENABLE_DATA_LOGGER: "OFF"
+    RAISIN_NETWORK_ENABLE_PARAMETERS: "OFF"
+    RAISIN_NETWORK_ENABLE_WEBSOCKET: "OFF"
+    RAISIN_NETWORK_ENABLE_DYNAMIC_ENCRYPTION: "OFF"
+    RAISIN_NETWORK_ENABLE_NODE_FLOW: "OFF"
+    RAISIN_NETWORK_ENABLE_REALTIME: "OFF"
+    RAISIN_NETWORK_ENABLE_OPENSSL: "OFF"
+    RAISIN_THREAD_POOL_ENABLE_DATA_LOGGER: "OFF"
+    RAISIN_THREAD_POOL_ENABLE_REALTIME: "OFF"

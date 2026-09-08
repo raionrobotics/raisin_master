@@ -23,6 +23,7 @@ from collections import defaultdict
 from typing import List, Tuple, Dict, Any, Set, Optional
 
 from commands.repo_dependency_check import guard_src_repo_release_yaml_dependencies
+from commands.sdk_target_config import TargetConfig, TargetConfigError
 
 # Import globals, constants, and utilities
 from commands import globals as g
@@ -52,6 +53,10 @@ def _resolve_vcpkg_cache_dir(env_var_name, default_path):
 # ============================================================================
 
 PURE_CMAKE_CACHE_FILE = ".cache/pure_cmake_build_cache.json"
+
+# Populated by deploy_target_interfaces(); read back by the SDK packager to
+# record the provenance of the shipped IDL.
+TARGET_INTERFACE_SOURCES: Dict[str, Dict[str, str]] = {}
 
 
 def _compute_source_hash(source_dir: Path) -> str:
@@ -306,7 +311,7 @@ def create_service_file(srv_file, project_directory, install_dir):
 
     # Determine the target directory in include/<project_name>/srv
     include_project_srv_dir = os.path.join(
-        g.script_directory, "generated", "include", project_name, "srv"
+        g.generated_dir, "include", project_name, "srv"
     )
 
     # Recreate the directory to ensure it's clean
@@ -633,7 +638,11 @@ def find_topic_directories(search_directories):
 
 
 def find_project_directories(
-    search_directories, install_dir, packages_to_ignore=None, repos_to_ignore=None
+    search_directories,
+    install_dir,
+    packages_to_ignore=None,
+    repos_to_ignore=None,
+    packages_allowed=None,
 ):
     """
     Search for all subdirectories in <g.script_directory> containing 'CMakeLists.txt'.
@@ -648,6 +657,7 @@ def find_project_directories(
     if packages_to_ignore is None:
         packages_to_ignore = []
     repo_ignore_set = set(repos_to_ignore or [])
+    allow_set = set(packages_allowed) if packages_allowed is not None else None
     project_directories = []
 
     # Walk through the specified directories
@@ -665,10 +675,12 @@ def find_project_directories(
                 dirs.clear()
                 continue
             if "CMakeLists.txt" in files:
-                # Add the directory containing CMakeLists.txt to the list
-                project_directories.append(root)
                 # Do not recurse into subdirectories (clear the dirs list)
                 dirs.clear()
+                if allow_set is not None and project_name not in allow_set:
+                    continue
+                # Add the directory containing CMakeLists.txt to the list
+                project_directories.append(root)
 
     for project_directory in project_directories:
         # Directories to copy
@@ -716,6 +728,7 @@ def find_interface_files(
     interface_types,
     packages_to_ignore=None,
     repos_to_ignore=None,
+    packages_allowed=None,
 ):
     """
     Finds ROS interface files (e.g., .action, .msg, .srv) in specified directories.
@@ -733,6 +746,7 @@ def find_interface_files(
     if packages_to_ignore is None:
         packages_to_ignore = []
     repo_ignore_set = set(repos_to_ignore or [])
+    allow_set = set(packages_allowed) if packages_allowed is not None else None
 
     # This dictionary maps an interface type (e.g., 'action') to its file extension
     # and the list where its found files will be stored.
@@ -740,7 +754,7 @@ def find_interface_files(
 
     for search_dir in search_directories:
         search_path = Path(g.script_directory) / search_dir
-        generated_dest_dir = Path(g.script_directory) / "generated" / "include"
+        generated_dest_dir = Path(g.generated_dir) / "include"
 
         if not os.path.isdir(search_path):
             continue
@@ -755,6 +769,14 @@ def find_interface_files(
             if os.path.basename(root) in packages_to_ignore:
                 dirs.clear()
                 continue
+
+            owns_interfaces = any(
+                (Path(root) / kind).is_dir() for kind in ("msg", "srv", "action")
+            )
+            if owns_interfaces and allow_set is not None:
+                if os.path.basename(root) not in allow_set:
+                    dirs.clear()
+                    continue
 
             if (Path(root) / "include").is_dir():
                 if (Path(root) / "msg").is_dir() or (Path(root) / "srv").is_dir():
@@ -1091,7 +1113,7 @@ def create_action_file(action_file, project_directory, install_dir):
 
     # Determine the target directory in include/<project_name>/msg
     include_project_msg_dir = os.path.join(
-        g.script_directory, "generated", "include", project_name, "action"
+        g.generated_dir, "include", project_name, "action"
     )
     destination_file = os.path.join(install_dir, "messages", project_name, "action", "")
     os.makedirs(destination_file, exist_ok=True)
@@ -1199,7 +1221,7 @@ def create_message_file(msg_file, project_directory, install_dir):
 
     # Determine the target directory in include/<project_name>/msg
     include_project_msg_dir = os.path.join(
-        g.script_directory, "generated", "include", project_name, "msg"
+        g.generated_dir, "include", project_name, "msg"
     )
     destination_file = os.path.join(install_dir, "messages", project_name, "msg", "")
     os.makedirs(destination_file, exist_ok=True)
@@ -1908,7 +1930,7 @@ def deploy_install_packages():
                     continue
 
             final_dest_dir = os.path.join(g.script_directory, "install")
-            generated_dest_dir = os.path.join(g.script_directory, "generated")
+            generated_dest_dir = g.generated_dir
 
             # Print the target-specific message only once
             if target_name not in deployed_targets:
@@ -1951,6 +1973,134 @@ def deploy_install_packages():
 
     except Exception as e:
         print(f"❌ An error occurred during deployment: {e}")
+
+
+def _release_archive_dir(target_name: str) -> Optional[Path]:
+    """
+    Locate a deployed release archive for `target_name`.
+
+    Release archives are laid out per build host tuple. For a cross target we
+    only ever read architecture-independent content out of them (IDL text and
+    generated headers), so any host tuple will do; prefer this host's.
+    """
+    root = Path(g.script_directory) / "release" / "install" / target_name
+    if not root.is_dir():
+        return None
+    preferred = root / g.os_type / g.os_version / g.architecture
+    candidates = []
+    if preferred.is_dir():
+        candidates.extend(sorted(p for p in preferred.iterdir() if p.is_dir()))
+    candidates.extend(
+        sorted(p for p in root.glob("*/*/*/*") if p.is_dir() and p not in candidates)
+    )
+    for candidate in candidates:
+        if (candidate / "messages").is_dir():
+            return candidate
+    return None
+
+
+def resolve_sdk_dependencies(target: TargetConfig, packages_to_ignore, repos_to_ignore):
+    """Check SDK inputs before deleting outputs; select active source or release IDL."""
+    root = Path(g.script_directory)
+    ignored = set(packages_to_ignore) | set(repos_to_ignore)
+    source_roots = []
+    for repository in target.source_repositories:
+        source = root / "src" / repository
+        if not source.is_dir() or repository in ignored:
+            raise TargetConfigError(
+                f"{target.platform} SDK requires active source at {source}; "
+                "a release package cannot replace this dependency."
+            )
+        source_roots.append(source)
+
+    interface_sources = {}
+    for repository in target.interface_repositories:
+        source = root / "src" / repository
+        if source.is_dir() and repository not in ignored:
+            source_roots.append(source)
+            path, kind = source, "source"
+        else:
+            path, kind = _release_archive_dir(repository), "release"
+            if path is None:
+                raise TargetConfigError(
+                    f"{target.platform} SDK requires {repository}: provide active "
+                    f"source at {source} or run `./raisin install {repository}`."
+                )
+        version = "unknown"
+        release_yaml = path / "release.yaml"
+        if release_yaml.is_file():
+            with open(release_yaml, encoding="utf-8") as stream:
+                version = str((yaml.safe_load(stream) or {}).get("version", "unknown"))
+        interface_sources[repository] = {
+            "kind": kind, "path": str(path), "version": version,
+        }
+
+    wanted = set(target.message_packages)
+    source_packages = {}
+    for source in source_roots:
+        for directory, children, _ in os.walk(source):
+            children[:] = [name for name in children if name not in ignored and name != ".git"]
+            package = Path(directory)
+            if package.name in wanted and package.name not in ignored:
+                if any((package / kind).is_dir() for kind in ("msg", "srv", "action")):
+                    # Core-owned definitions take precedence over message repositories.
+                    source_packages.setdefault(package.name, package)
+
+    provided = set(source_packages)
+    for info in interface_sources.values():
+        if info["kind"] == "release":
+            provided.update(package for package in wanted
+                            if (Path(info["path"]) / "messages" / package).is_dir())
+    missing = sorted(wanted - provided)
+    if missing:
+        raise TargetConfigError(
+            f"message package(s) {missing} required by SDK profile '{target.profile}' "
+            "were not found in the selected source/release dependencies."
+        )
+    return source_packages, interface_sources
+
+
+def deploy_target_interfaces(target: TargetConfig, install_dir, source_packages, interface_sources):
+    """Copy release-only interfaces; active source packages are generated by setup."""
+    messages_dest = Path(g.script_directory) / install_dir / "messages"
+    generated_dest = Path(g.generated_dir) / "include"
+    TARGET_INTERFACE_SOURCES.clear()
+    TARGET_INTERFACE_SOURCES.update(interface_sources)
+    for name, info in interface_sources.items():
+        print(f"  -> interfaces from '{name}' {info['version']} ({info['kind']}: {info['path']})")
+        if info["kind"] != "release":
+            continue
+        archive = Path(info["path"])
+        for package in sorted(set(target.message_packages) - source_packages.keys()):
+            src_messages = archive / "messages" / package
+            if src_messages.is_dir():
+                shutil.copytree(
+                    src_messages, messages_dest / package, dirs_exist_ok=True
+                )
+            src_generated = archive / "generated" / "include" / package
+            if src_generated.is_dir():
+                shutil.copytree(
+                    src_generated, generated_dest / package, dirs_exist_ok=True
+                )
+
+
+def copy_extra_headers(target: TargetConfig) -> None:
+    """
+    Install header-only files from packages that cannot be built for the target
+    (declared as `extra_headers` in the profile).
+    """
+    dest_root = Path(g.generated_dir) / "include"
+    for relative, source in sorted(target.extra_headers.items()):
+        source_path = Path(g.script_directory) / source
+        if not source_path.is_file():
+            raise SystemExit(
+                f"❌ profile '{target.profile}' extra header '{relative}' not found "
+                f"at {source_path}"
+            )
+        destination = dest_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination)
+        print(f"  -> extra header {relative}")
 
 
 def collect_src_vcpkg_dependencies(repos_to_ignore=None):
@@ -2220,6 +2370,7 @@ def setup(
     build_dir="",
     build_test_enabled=None,
     raisin_march: Optional[str] = None,
+    target: Optional[TargetConfig] = None,
 ):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
@@ -2230,55 +2381,86 @@ def setup(
         build_dir: Build directory path
         build_test_enabled: Whether to build tests
         raisin_march: Optional CPU target override for pure-CMake dependencies
+        target: Build target (commands.sdk_target_config.TargetConfig). Defaults to
+            the build host. SDK targets prepare their own headers and install
+            prefix; build_sdk owns their CMake generation.
+
+    Returns:
+        Discovered project directories, for SDK CMake generation by the caller.
     """
 
-    check_supported_architecture()
-    if raisin_march is None:
-        raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
+    if target is None:
+        target = TargetConfig.host()
+    cross = target.is_cross
 
-    if package_name == "":
+    check_supported_architecture()  # build host, not the target
+    if raisin_march is None:
+        raisin_march = target.march or os.environ.get(
+            "RAISIN_MARCH", get_default_portable_march()
+        )
+
+    g.generated_dir = str(target.generated_dir())
+
+    if cross:
+        src_dir = "src"
+        install_dir = str(target.install_dir())
+        packages_allowed = set(target.packages) | set(target.message_packages)
+    elif package_name == "":
         src_dir = "src"
         install_dir = "install"
+        packages_allowed = None
     else:
         src_dir = "src/" + package_name
         install_dir = f"release/install/{package_name}/{g.os_type}/{g.os_version}/{g.architecture}/{build_type}"
+        packages_allowed = None
 
-    delete_directory(
-        os.path.join(g.script_directory, "generated")
-    )  # Delete the whole 'include' directory
+    packages_to_ignore = get_packages_to_ignore()
+    repos_to_ignore = get_repos_to_ignore()
+    if cross:
+        source_packages, interface_sources = resolve_sdk_dependencies(
+            target, packages_to_ignore, repos_to_ignore
+        )
+
+    delete_directory(g.generated_dir)  # Delete the whole 'include' directory
     delete_directory(Path(g.script_directory) / install_dir)
     os.makedirs(Path(g.script_directory) / install_dir, exist_ok=True)
 
     if build_dir:
         os.makedirs(build_dir, exist_ok=True)
 
-    packages_to_ignore = get_packages_to_ignore()
-    repos_to_ignore = get_repos_to_ignore()
+    if cross:
+        deploy_target_interfaces(target, install_dir, source_packages, interface_sources)
+    else:
+        deploy_install_packages()
 
-    deploy_install_packages()
+        guard_src_repo_release_yaml_dependencies(packages_to_ignore, repos_to_ignore)
 
-    guard_src_repo_release_yaml_dependencies(packages_to_ignore, repos_to_ignore)
-
-    pure_cmake_built = build_pure_cmake_projects(
-        install_dir,
-        build_type,
-        package_name,
-        packages_to_ignore,
-        repos_to_ignore,
-        raisin_march=raisin_march,
-    )
-    if pure_cmake_built:
-        packages_to_ignore = list(
-            dict.fromkeys(list(packages_to_ignore) + pure_cmake_built)
+        pure_cmake_built = build_pure_cmake_projects(
+            install_dir,
+            build_type,
+            package_name,
+            packages_to_ignore,
+            repos_to_ignore,
+            raisin_march=raisin_march,
         )
+        if pure_cmake_built:
+            packages_to_ignore = list(
+                dict.fromkeys(list(packages_to_ignore) + pure_cmake_built)
+            )
     _print_ignore_lists(packages_to_ignore, repos_to_ignore)
+    if cross:
+        click.echo(f"🎯 target: {target.slug} (profile '{target.profile}')")
+        click.echo(f"📦 packages: {', '.join(sorted(packages_allowed))}")
 
+    interface_dirs = [str(path) for path in source_packages.values()] if cross else ["src"]
     action_files = find_interface_files(
-        ["src"], ["action"], packages_to_ignore, repos_to_ignore
+        interface_dirs, ["action"], packages_to_ignore, repos_to_ignore, packages_allowed
     )[0]
 
+    project_dirs = [f"src/{name}" for name in target.source_repositories] if cross else [src_dir]
     project_directories = find_project_directories(
-        [src_dir], install_dir, packages_to_ignore, repos_to_ignore
+        project_dirs, install_dir, packages_to_ignore, repos_to_ignore,
+        set(target.packages) if cross else packages_allowed,
     )
     _ensure_scripts_executable(install_dir)
 
@@ -2286,8 +2468,10 @@ def setup(
     for action_file in action_files:
         create_action_file(action_file, Path(action_file).parent.parent, install_dir)
 
+    temp_dirs = [f"temp/{name}" for name in source_packages] if cross else ["temp"]
     msg_files, srv_files = find_interface_files(
-        ["src", "temp"], ["msg", "srv"], packages_to_ignore, repos_to_ignore
+        interface_dirs + temp_dirs, ["msg", "srv"], packages_to_ignore, repos_to_ignore,
+        packages_allowed
     )
 
     # Handle .msg files
@@ -2298,25 +2482,28 @@ def setup(
     for srv_file in srv_files:
         create_service_file(srv_file, Path(srv_file).parent.parent, install_dir)
 
-    # Update the CMakeLists.txt based on the template
-    if build_test_enabled is None:
-        build_test_enabled = False
-    update_cmake_file(project_directories, build_dir, bool(build_test_enabled))
+    # SDK CMake generation belongs to build_sdk and its platform templates.
+    if not cross:
+        update_cmake_file(project_directories, build_dir, bool(build_test_enabled))
 
-    if package_name == "":  # this means we are not in the release mode
+    if package_name == "" and not cross:  # this means we are not in the release mode
         copy_resource(install_dir)
 
-    os.makedirs(os.path.join(g.script_directory, "generated/include"), exist_ok=True)
+    if cross:
+        copy_extra_headers(target)
+
+    os.makedirs(os.path.join(g.generated_dir, "include"), exist_ok=True)
     shutil.copy(
         os.path.join(g.script_directory, "templates", "raisin_serialization_base.hpp"),
-        os.path.join(g.script_directory, "generated/include"),
+        os.path.join(g.generated_dir, "include"),
     )
 
     # create release tag
     install_release_file = Path(g.script_directory) / "install" / "release.txt"
 
-    # Read existing data if the file already exists.
-    existing_data = read_existing_data(install_release_file)
+    # Read existing data if the file already exists. A cross prefix starts empty
+    # so it never inherits the host workspace's revisions.
+    existing_data = {} if cross else read_existing_data(install_release_file)
     output_file = Path(g.script_directory) / install_dir / "release.txt"
 
     # Find Git repositories under the base directory.
@@ -2347,7 +2534,7 @@ def setup(
     src_file = os.path.join(
         g.script_directory, "templates", "raisin_serialization_base.hpp"
     )
-    dest_dir = os.path.join(g.script_directory, "generated", "include")
+    dest_dir = os.path.join(g.generated_dir, "include")
 
     os.makedirs(dest_dir, exist_ok=True)  # Ensure destination directory exists
     shutil.copy2(src_file, dest_dir)
@@ -2356,14 +2543,16 @@ def setup(
 
     # install generated files
     shutil.copytree(
-        Path(g.script_directory) / "generated",
+        Path(g.generated_dir),
         Path(g.script_directory) / install_dir / "generated",
         dirs_exist_ok=True,
     )
 
-    collect_src_vcpkg_dependencies(repos_to_ignore)
-    generate_vcpkg_json()
+    if not cross:
+        collect_src_vcpkg_dependencies(repos_to_ignore)
+        generate_vcpkg_json()
     click.secho("✅ Setup finished successfully.", fg="green")
+    return project_directories
 
 
 def _repo_slug_from_cfg(

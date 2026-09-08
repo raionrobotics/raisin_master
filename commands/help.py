@@ -42,6 +42,17 @@ def print_help():
     print(f"  {'':<22} Archives are uploaded to the corresponding GitHub Release.")
     print(f"  {'':<22} Build type defaults to 'release' if not specified.")
 
+    print("-" * 35)
+    print(
+        f"  {'build_sdk android [--abi <abi>] [--api <n>]':<20} 🤖 Cross-compiles the communication-only core with the Android NDK"
+    )
+    print(
+        f"  {'':<22} and packages a relocatable CMake SDK plus a local archive."
+    )
+    print(
+        f"  {'':<22} Host outputs are untouched. 'build_sdk android --list-profiles' lists the target profiles."
+    )
+
     print("\n## Package Management Commands")
     print("-" * 70)
     print(
