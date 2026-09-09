@@ -4883,6 +4883,31 @@ class TestInstallOutcomeDecision(unittest.TestCase):
         self.assertEqual(terminal["eventType"], "failed")
         self.assertEqual(terminal["errorCode"], "unknown")
 
+    def test_clean_run_carries_the_callers_verification_detail(self):
+        ota.record_install_event("started")
+
+        ota.report_install_outcome(
+            True, detail={"runtimeVerification": "artifact_only"}
+        )
+
+        terminal = self._events()[-1]
+        self.assertEqual(terminal["eventType"], "succeeded")
+        self.assertEqual(
+            terminal["detail"], {"runtimeVerification": "artifact_only"}
+        )
+
+    def test_failure_outranks_and_drops_success_detail(self):
+        ota.record_install_event("started")
+        ota.note_install_failure("activate", "service_failed")
+
+        ota.report_install_outcome(
+            True, detail={"runtimeVerification": "health_checked"}
+        )
+
+        terminal = self._events()[-1]
+        self.assertEqual(terminal["eventType"], "failed")
+        self.assertNotIn("detail", terminal)
+
 
 class TestInstallIntegration(unittest.TestCase):
     """Verify OTA is used correctly in install_command."""
@@ -7022,6 +7047,82 @@ class TestExchangingLegacyCredential(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, 409)
         self.assertFalse(result.unauthorized)
+
+    def test_a_mixed_case_node_key_is_the_same_key(self):
+        """The server folds a node key; the comparison here must fold too.
+
+        `RobotNodeKey.create` on the server is `trim().toLowerCase()`, so
+        `Primary` and `primary` are one key there. Comparing the returned key
+        against an unfolded request rejected the exchange for a spelling --
+        after the server had already minted the pinned credential, retired what
+        it supersedes and put the legacy credential on a grace deadline. The
+        one-time secret was then dropped, and every retry failed the same way,
+        so the robot ran out the grace period without ever adopting.
+
+        The hardware id two lines above was already folded for this reason.
+        """
+        with (
+            patch(
+                "raisin_ota.client.get_ota_endpoint",
+                return_value="https://ota.example.com",
+            ),
+            patch(
+                "raisin_ota.client.requests.post",
+                return_value=_mock_response(
+                    status_code=201,
+                    json_data={
+                        "data": {
+                            "robotId": "robot-1",
+                            "credentials": [
+                                {
+                                    "nodeKey": "primary",
+                                    "nodeId": "node-1",
+                                    "type": "api_key",
+                                    "secret": "rk_pinned",
+                                }
+                            ],
+                        }
+                    },
+                ),
+            ) as posted,
+        ):
+            result = ota.exchange_robot_credential(
+                node_key="  Primary ",
+                platform="ubuntu-24.04-arm64",
+                hardware_id="dmi:board-001",
+            )
+
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.plain_key, "rk_pinned")
+        self.assertEqual(result.node_key, "primary")
+        # Folded on the way out too, so the server is asked about the key it
+        # would have stored rather than one it has to fold on arrival.
+        sent = posted.call_args.kwargs["json"]["nodes"][0]
+        self.assertEqual(sent["nodeKey"], "primary")
+
+    def test_a_different_node_is_still_refused(self):
+        # Folding must not soften the check it lives in: a credential for
+        # another node is the thing this comparison exists to catch.
+        result, _ = self._exchange(
+            return_value=_mock_response(
+                status_code=201,
+                json_data={
+                    "data": {
+                        "credentials": [
+                            {
+                                "nodeKey": "jetson",
+                                "nodeId": "node-2",
+                                "type": "api_key",
+                                "secret": "rk_other",
+                            }
+                        ]
+                    }
+                },
+            )
+        )
+
+        self.assertIsNone(result.plain_key)
+        self.assertIn("mismatched", result.detail)
 
     def test_a_missing_exchange_route_does_not_claim_rotation_failed(self):
         missing = _mock_response(status_code=404)

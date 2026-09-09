@@ -832,12 +832,16 @@ def install_attempt_started() -> bool:
     return _install_event_marker_seen(get_install_session_id(), "started")
 
 
-def report_install_outcome(overall_success: bool) -> Optional[dict]:  # noqa: C901
+def report_install_outcome(
+    overall_success: bool, detail: Optional[dict] = None
+) -> Optional[dict]:  # noqa: C901
     """Close the attempt with exactly one terminal event.
 
     Only the caller knows whether the run as a whole worked, and a noted
     failure outranks it: `install_command` returns True when *any* package
     landed, so a partial archive install would otherwise report success.
+    `detail` describes only a successful run and is deliberately discarded
+    when a failure was noted; failure attribution remains the first cause.
     """
     if not install_attempt_started():
         return None
@@ -849,7 +853,7 @@ def report_install_outcome(overall_success: bool) -> Optional[dict]:  # noqa: C9
             "failed", stage=stage, error_code=error_code, error_message=message
         )
     if overall_success:
-        return record_install_event("succeeded")
+        return record_install_event("succeeded", detail=detail)
     return record_install_event(
         "failed",
         error_code=ERROR_UNKNOWN,
@@ -2229,7 +2233,15 @@ def exchange_robot_credential(
     legacy, which durable hardware identity to use, and when to adopt the
     returned secret remain agent policy.
     """
-    key = (node_key or "").strip()
+    # Folded, not merely trimmed, and for the same reason the hardware id below
+    # is: the server matches by equality and its `RobotNodeKey.create` is
+    # `trim().toLowerCase()`, so the spelling is part of the identity. Comparing
+    # an unfolded request against the folded key that comes back rejected the
+    # exchange for a spelling -- after the server had minted the pinned
+    # credential, retired what it supersedes and dated the legacy one. The
+    # one-time secret was dropped and every retry failed identically, so the
+    # robot ran out its grace period without ever adopting (raisin_master#109).
+    key = (node_key or "").strip().lower()
     platform_name = (platform or "").strip()
     identity = (hardware_id or "").strip().lower()
     if not key or not platform_name or not identity:
