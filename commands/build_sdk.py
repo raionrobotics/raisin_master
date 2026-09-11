@@ -24,6 +24,7 @@ import yaml
 
 from commands import globals as g
 from commands.sdk_target_config import (
+    CORE_VARIANT_OPTION,
     TargetConfig,
     TargetConfigError,
     load_profiles,
@@ -136,7 +137,8 @@ def generate_sdk_cmake(target: TargetConfig, project_directories) -> Path:
         f'# Profile {target.profile}: commands/sdk_{target.platform}_profile.yaml',
     ]
     for key, value in sorted(target.cmake_options.items()):
-        settings.append(f'set({key} {value} CACHE BOOL "" FORCE)')
+        cache_type = "STRING" if key == CORE_VARIANT_OPTION else "BOOL"
+        settings.append(f'set({key} {value} CACHE {cache_type} "" FORCE)')
     values = {
         "SCRIPT_DIR": Path(g.script_directory).as_posix(),
         "GENERATED_INCLUDE": (target.generated_dir() / "include").as_posix(),
@@ -244,9 +246,6 @@ def package_sdk(target: TargetConfig, interface_sources: Dict[str, dict]) -> Pat
         "BUNDLED_PACKAGES": ";".join(
             sorted(p.parent.name for p in (prefix / "lib/cmake").glob("*/*Config.cmake")
                    if p.parent.name != SDK_NAME)
-        ),
-        "COMPILE_DEFINITIONS": ";".join(
-            f"{k}={1 if v == 'ON' else 0}" for k, v in sorted(target.cmake_options.items()) if k.startswith("RAISIN_")
         ),
     }
     (config_dir / f"{SDK_NAME}Config.cmake").write_text(

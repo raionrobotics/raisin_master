@@ -17,7 +17,6 @@ set(RAISIN_ANDROID_SDK_BUILD_TYPE "@BUILD_TYPE@")
 set(RAISIN_ANDROID_SDK_IDL_DIR "${RAISIN_ANDROID_SDK_ROOT}/idl")
 set(RAISIN_ANDROID_SDK_JNILIBS_DIR "${RAISIN_ANDROID_SDK_ROOT}/jniLibs")
 set(RAISIN_ANDROID_SDK_METADATA "${RAISIN_ANDROID_SDK_ROOT}/raisin_sdk.json")
-set(RAISIN_ANDROID_SDK_COMPILE_DEFINITIONS "@COMPILE_DEFINITIONS@")
 
 # --- consumer/SDK compatibility -------------------------------------------
 # The public C++ API is templated and feature-dependent, so a consumer built

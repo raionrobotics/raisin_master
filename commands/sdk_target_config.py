@@ -39,33 +39,16 @@ ANDROID_MARCH = {
     "x86": "i686",
 }
 
-# Feature flag -> packages the flag's enabled/disabled branch pulls in. Mirrors
-# the conditionals in raisin_network/CMakeLists.txt and
-# raisin_thread_pool/CMakeLists.txt, which the regex scanner cannot evaluate.
-FEATURE_PACKAGES = {
-    "RAISIN_NETWORK_ENABLE_DATA_LOGGER": {True: ["raisin_data_logger"], False: []},
-    "RAISIN_NETWORK_ENABLE_PARAMETERS": {True: ["raisin_parameter"], False: []},
-    "RAISIN_NETWORK_ENABLE_SHARED_MEMORY": {True: ["raisin_shared_memory"], False: []},
-    "RAISIN_NETWORK_ENABLE_WEBSOCKET": {True: ["websocketpp"], False: []},
-    "RAISIN_NETWORK_ENABLE_DYNAMIC_ENCRYPTION": {
-        True: ["raisin_util"],
-        False: ["raisin_empty_encryption"],
-    },
-    "RAISIN_THREAD_POOL_ENABLE_DATA_LOGGER": {
-        True: ["raisin_util", "raisin_data_logger"],
-        False: ["raisin_compat"],
-    },
+CORE_VARIANT_OPTION = "RAISIN_CORE_VARIANT"
+
+# The scanner cannot evaluate CMake branches. Validate the packages selected
+# for each complete variant; only CMake expands variants into feature macros.
+CORE_VARIANT_PACKAGES = {
+    "full": {"raisin_data_logger", "raisin_parameter", "raisin_shared_memory",
+             "websocketpp", "raisin_util"},
+    "lite": {"raisin_compat", "raisin_empty_encryption"},
 }
-
-# Always required by raisin_network regardless of feature selection.
-BASE_PACKAGES = ("raisin_thread_pool", "raisin_encryption")
-
-# (flag, required_flag) - the first implies the second must be ON.
-FEATURE_REQUIRES = (
-    ("RAISIN_NETWORK_ENABLE_WEBSOCKET", "RAISIN_NETWORK_ENABLE_PARAMETERS"),
-    ("RAISIN_NETWORK_ENABLE_NODE_FLOW", "RAISIN_NETWORK_ENABLE_SHARED_MEMORY"),
-    ("RAISIN_THREAD_POOL_ENABLE_REALTIME", "RAISIN_THREAD_POOL_ENABLE_DATA_LOGGER"),
-)
+BASE_PACKAGES = {"raisin_thread_pool", "raisin_encryption"}
 
 
 class TargetConfigError(Exception):
@@ -218,59 +201,40 @@ def load_profiles(path: Optional[Path] = None, *, platform: str = "android") -> 
 
 
 def validate_profile(name: str, profile: dict) -> None:
-    """Fail loudly when the package allowlist and the feature flags disagree."""
+    """Validate the selected variant and its package closure before preparation."""
     packages = set(profile.get("packages") or [])
     if not packages:
         raise TargetConfigError(f"profile '{name}': 'packages' must not be empty")
 
-    options = {k: _as_bool(v) for k, v in (profile.get("cmake_options") or {}).items()}
-
-    for flag, required in FEATURE_REQUIRES:
-        if options.get(flag, True) and not options.get(required, True):
-            raise TargetConfigError(
-                f"profile '{name}': {flag}=ON requires {required}=ON"
-            )
-
-    network_logger = options.get("RAISIN_NETWORK_ENABLE_DATA_LOGGER", True)
-    pool_logger = options.get("RAISIN_THREAD_POOL_ENABLE_DATA_LOGGER", True)
-    if network_logger != pool_logger:
+    options = profile.get("cmake_options") or {}
+    variant = options.get(CORE_VARIANT_OPTION)
+    if variant not in CORE_VARIANT_PACKAGES:
         raise TargetConfigError(
-            f"profile '{name}': raisin_network and raisin_thread_pool must use the "
-            "same data-logger capability"
+            f"profile '{name}': {CORE_VARIANT_OPTION} must explicitly select full or lite"
         )
-
-    # raisin_network pulls raisin_compat when either data logging or OpenSSL is off.
-    needed = set(BASE_PACKAGES)
-    if not network_logger or not options.get("RAISIN_NETWORK_ENABLE_OPENSSL", True):
-        needed.add("raisin_compat")
-    for flag, branches in FEATURE_PACKAGES.items():
-        needed.update(branches[options.get(flag, True)])
+    if profile.get("platform") == "android" and variant != "lite":
+        raise TargetConfigError(
+            f"profile '{name}': Android SDK profiles currently require {CORE_VARIANT_OPTION}=lite"
+        )
+    needed = BASE_PACKAGES | CORE_VARIANT_PACKAGES[variant]
 
     missing = sorted(needed - packages)
     if missing:
         raise TargetConfigError(
-            f"profile '{name}': cmake_options require package(s) {missing} that are "
+            f"profile '{name}': variant '{variant}' requires package(s) {missing} that are "
             "not in the 'packages' allowlist"
         )
 
     extra = sorted(
         p
         for p in packages
-        if p in _all_feature_packages() and p not in needed
+        if p in set.union(*CORE_VARIANT_PACKAGES.values()) and p not in needed
     )
     if extra:
         raise TargetConfigError(
-            f"profile '{name}': package(s) {extra} are in the allowlist but no "
-            "enabled cmake_option needs them"
+            f"profile '{name}': package(s) {extra} are in the allowlist but "
+            f"variant '{variant}' does not need them"
         )
-
-
-def _all_feature_packages() -> set:
-    names = set()
-    for branches in FEATURE_PACKAGES.values():
-        for pkgs in branches.values():
-            names.update(pkgs)
-    return names
 
 
 def discover_ndk(explicit: str = "") -> Tuple[str, str]:
@@ -383,7 +347,7 @@ def resolve_android_target(
         interface_repositories=tuple(profile.get("interface_repositories") or ()),
         extra_headers=dict(profile.get("extra_headers") or {}),
         cmake_options={
-            k: ("ON" if _as_bool(v) else "OFF")
+            k: (v if k == CORE_VARIANT_OPTION else ("ON" if _as_bool(v) else "OFF"))
             for k, v in (profile.get("cmake_options") or {}).items()
         },
         description=(profile.get("description") or "").strip(),

@@ -6,7 +6,7 @@
 # (setup.find_dependencies) collects raisin_find_package() calls with a regex and
 # cannot evaluate CMake conditionals, so it reports packages that a disabled
 # feature branch never actually needs. The `packages` allowlist below is the
-# authoritative closure; `cmake_options` must agree with it and is cross-checked
+# authoritative closure; the core variant must agree with it and is cross-checked
 # by commands.sdk_target_config.validate_profile().
 
 android_comm:
@@ -58,13 +58,5 @@ android_comm:
     ZSTD_BUILD_PROGRAMS: "OFF"
     ZSTD_BUILD_TESTS: "OFF"
     ZSTD_MULTITHREAD_SUPPORT: "OFF"
-    RAISIN_NETWORK_ENABLE_SHARED_MEMORY: "OFF"
-    RAISIN_NETWORK_ENABLE_DATA_LOGGER: "OFF"
-    RAISIN_NETWORK_ENABLE_PARAMETERS: "OFF"
-    RAISIN_NETWORK_ENABLE_WEBSOCKET: "OFF"
-    RAISIN_NETWORK_ENABLE_DYNAMIC_ENCRYPTION: "OFF"
-    RAISIN_NETWORK_ENABLE_NODE_FLOW: "OFF"
-    RAISIN_NETWORK_ENABLE_REALTIME: "OFF"
-    RAISIN_NETWORK_ENABLE_OPENSSL: "OFF"
-    RAISIN_THREAD_POOL_ENABLE_DATA_LOGGER: "OFF"
-    RAISIN_THREAD_POOL_ENABLE_REALTIME: "OFF"
+    # CMake derives all network/thread-pool feature macros from this variant.
+    RAISIN_CORE_VARIANT: lite

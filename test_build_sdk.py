@@ -397,13 +397,6 @@ class ProfileValidationTest(unittest.TestCase):
         ):
             self.assertNotIn(excluded, packages)
 
-    def test_enabling_a_feature_without_its_package_fails(self):
-        profile = json.loads(json.dumps(self.profile))
-        profile["cmake_options"]["RAISIN_NETWORK_ENABLE_PARAMETERS"] = "ON"
-        with self.assertRaises(tc.TargetConfigError) as ctx:
-            tc.validate_profile("bad", profile)
-        self.assertIn("raisin_parameter", str(ctx.exception))
-
     def test_package_with_no_enabled_feature_fails(self):
         profile = json.loads(json.dumps(self.profile))
         profile["packages"].append("raisin_shared_memory")
@@ -411,19 +404,25 @@ class ProfileValidationTest(unittest.TestCase):
             tc.validate_profile("bad", profile)
         self.assertIn("raisin_shared_memory", str(ctx.exception))
 
-    def test_websocket_requires_parameters(self):
+    def test_variant_must_be_explicit_and_known(self):
         profile = json.loads(json.dumps(self.profile))
-        profile["cmake_options"]["RAISIN_NETWORK_ENABLE_WEBSOCKET"] = "ON"
-        with self.assertRaises(tc.TargetConfigError) as ctx:
-            tc.validate_profile("bad", profile)
-        self.assertIn("RAISIN_NETWORK_ENABLE_PARAMETERS", str(ctx.exception))
+        for value in (None, "minimal", "OFF"):
+            profile["cmake_options"][tc.CORE_VARIANT_OPTION] = value
+            with self.assertRaisesRegex(tc.TargetConfigError, "must explicitly select"):
+                tc.validate_profile("bad", profile)
 
-    def test_data_logger_must_match_between_network_and_thread_pool(self):
+    def test_android_profile_requires_lite(self):
         profile = json.loads(json.dumps(self.profile))
-        profile["cmake_options"]["RAISIN_THREAD_POOL_ENABLE_DATA_LOGGER"] = "ON"
-        with self.assertRaises(tc.TargetConfigError) as ctx:
+        profile["cmake_options"][tc.CORE_VARIANT_OPTION] = "full"
+        with self.assertRaisesRegex(tc.TargetConfigError, "Android SDK profiles currently require"):
             tc.validate_profile("bad", profile)
-        self.assertIn("data-logger", str(ctx.exception))
+
+    def test_lite_profile_requires_compat_and_empty_encryption(self):
+        for package in ("raisin_compat", "raisin_empty_encryption"):
+            profile = json.loads(json.dumps(self.profile))
+            profile["packages"].remove(package)
+            with self.assertRaisesRegex(tc.TargetConfigError, package):
+                tc.validate_profile("bad", profile)
 
     def test_empty_package_list_fails(self):
         with self.assertRaises(tc.TargetConfigError):
@@ -523,8 +522,10 @@ class DependencyClosureTest(unittest.TestCase):
             if line.startswith("add_subdirectory("):
                 self.assertEqual(len(line.rstrip(")").split()), 2, line)
 
-        # Feature flags are emitted ahead of the subprojects.
-        flags_at = text.index("RAISIN_NETWORK_ENABLE_SHARED_MEMORY OFF")
+        # The variant is emitted ahead of the subprojects; only CMake expands it.
+        flags_at = text.index('RAISIN_CORE_VARIANT lite CACHE STRING')
+        self.assertNotIn("set(RAISIN_NETWORK_ENABLE_", text)
+        self.assertNotIn("set(RAISIN_THREAD_POOL_ENABLE_", text)
         first_add = text.index("add_subdirectory(")
         self.assertLess(flags_at, first_add)
         self.assertNotIn("@@", text)
@@ -718,7 +719,6 @@ class SdkMetadataTest(unittest.TestCase):
             "STL": "c++_shared",
             "NDK_VERSION": FAKE_NDK_VERSION,
             "BUILD_TYPE": "RelWithDebInfo",
-            "COMPILE_DEFINITIONS": "A=0",
             "BUNDLED_PACKAGES": "raisin_network;raisin_thread_pool",
         }
         rendered = self.android._render_template(
@@ -803,7 +803,6 @@ set_target_properties({package} PROPERTIES
             "PROTOCOL_VERSION": protocol, "PROFILE": "android_comm",
             "ABI": "arm64-v8a", "API_LEVEL": 24, "STL": stl,
             "NDK_VERSION": ndk_version, "BUILD_TYPE": "RelWithDebInfo",
-            "COMPILE_DEFINITIONS": "",
             "BUNDLED_PACKAGES": "raisin_network;raisin_thread_pool",
         }
         (directory / "raisin_android_sdkConfig.cmake").write_text(
@@ -928,13 +927,25 @@ class InstalledSdkTest(unittest.TestCase):
                 offenders.append(str(path.relative_to(self.prefix)))
         self.assertEqual(offenders, [], "SDK references its build workspace")
 
-    def test_feature_definitions_match_the_profile(self):
+    def test_profile_metadata_and_exported_features(self):
         profile = tc.load_profiles()[self.metadata["target"]["profile"]]
         expected = {
-            k: ("ON" if str(v).upper() in ("ON", "TRUE", "1") else "OFF")
+            k: (v if k == tc.CORE_VARIANT_OPTION else
+                ("ON" if str(v).upper() in ("ON", "TRUE", "1") else "OFF"))
             for k, v in profile["cmake_options"].items()
         }
         self.assertEqual(self.metadata["features"], expected)
+        # The exported targets supply macros to consumers without a separate feature file.
+        definitions = {}
+        for package in ("raisin_network", "raisin_thread_pool"):
+            export = self.prefix / f"lib/cmake/{package}/{package}Targets.cmake"
+            for key, value in re.findall(
+                    r'(RAISIN_(?:NETWORK|THREAD_POOL)_ENABLE_[A-Z_]+)=\\?\$<BOOL:(ON|OFF)>',
+                    export.read_text()):
+                definitions[key] = value
+        self.assertEqual(len(definitions), 10)
+        self.assertEqual(set(definitions.values()), {"OFF"})
+
 
 
 if __name__ == "__main__":
