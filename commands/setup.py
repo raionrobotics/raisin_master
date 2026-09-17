@@ -670,6 +670,8 @@ def find_project_directories(
                 # Do not recurse into subdirectories (clear the dirs list)
                 dirs.clear()
 
+    packages_by_name = {os.path.basename(d): d for d in project_directories}
+
     for project_directory in project_directories:
         # Directories to copy
         directories_to_copy = ["resource", "config", "scripts"]
@@ -692,10 +694,36 @@ def find_project_directories(
                 os.makedirs(target_directory, exist_ok=True)
                 target_path = os.path.join(target_directory, directory)
 
+                # Resources shared by the repository go in first so the package's own files replace them.
+                if directory == "resource":
+                    for base in _resource_base_packages(project_directory):
+                        base_dir = packages_by_name.get(base)
+                        if base_dir is None or not os.path.isdir(os.path.join(base_dir, "resource")):
+                            print(f"❌ {os.path.basename(_repo_directory(project_directory))}/properties_base names '{base}', which has no resource/ in this workspace")
+                            sys.exit(1)
+                        shutil.copytree(os.path.join(base_dir, "resource"), target_path, dirs_exist_ok=True)
+
                 # Copy the entire directory
                 shutil.copytree(source_dir, target_path, dirs_exist_ok=True)
 
     return project_directories
+
+
+def _repo_directory(project_directory):
+    """The repository folder directly under src/ that holds the package."""
+    src = os.path.join(g.script_directory, "src")
+    return os.path.join(src, os.path.relpath(project_directory, src).split(os.sep)[0])
+
+
+def _resource_base_packages(project_directory):
+    """Packages listed in <repo>/properties_base (one per line) whose resource/ underlies every
+    other package of that repository; empty for those packages themselves and without the file."""
+    marker = os.path.join(_repo_directory(project_directory), "properties_base")
+    if not os.path.isfile(marker):
+        return []
+    with open(marker, "r", encoding="utf-8") as f:
+        bases = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    return [] if os.path.basename(project_directory) in bases else bases
 
 
 def _ensure_scripts_executable(install_dir):
