@@ -289,6 +289,30 @@ raisin publish raisin_network --dry-run
 
 > **Note:** Use `--upload-ota` to upload to the OTA server instead of GitHub. This requires `RAISIN_OTA_ENDPOINT` to be set.
 
+#### Build an SDK
+
+Build an SDK for use by other projects. Currently supports Android.
+
+| Dependency | Required location |
+| --- | --- |
+| `raisin_third_party_common` | `src/` |
+| `raisin_ros2_messages` | `src/` or installed release (active source takes precedence) |
+| `raisin` | `src/` |
+| Android NDK | Installed; optionally specify with `--ndk` |
+
+```bash
+# Build the Android SDK (arm64-v8a, API 24, RelWithDebInfo)
+raisin build_sdk android
+
+# Specify the NDK directory
+raisin build_sdk android --ndk /path/to/android-ndk
+
+# View available options
+raisin build_sdk android --help
+```
+
+SDK files are written under `sdk/android/`, with archives in `sdk/android/archives/`.
+
 #### Cross-Architecture Build Support
 
 RAISIN uses portable CPU architecture flags by default on Linux so generated and published binaries work across different machines within the same architecture family.
@@ -421,6 +445,9 @@ raisin setup
 
 # 8. Build
 raisin build -t release
+
+# 9. (Optional) Cross-compile the Android SDK
+raisin build_sdk android
 ```
 
 ---
