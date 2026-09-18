@@ -156,7 +156,6 @@ def _install(
         if local_src_packages:
             print(f"  -> Found local packages to process: {local_src_packages}")
             install_queue.extend(local_src_packages)
-    processed_packages = dict()
     is_successful = True
 
     # When an archive is pinned — on the command line, or per-node through
@@ -320,7 +319,6 @@ def _install(
                     print(
                         f"✅ Found suitable {package_type} package '{package_name}=={version_str}'"
                     )
-                    processed_packages[package_name] = version_str
                 return True
             return False
 
@@ -376,7 +374,6 @@ def _install(
                     tag=resolved_tag,
                 )
             if ota_result:
-                processed_packages[package_name] = ota_result["version"]
                 install_queue.extend(ota_result.get("dependencies", []))
                 continue
             # OTA is the only source now, so "not there" ends this package

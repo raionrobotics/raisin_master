@@ -1801,17 +1801,24 @@ def _fetch_archive_with_stable_fallback(
     platform_str: str,
     tag: str,
 ):
-    """Resolve ``tag`` against OTA, falling back to 'stable' before giving up.
+    """Resolve ``tag`` against OTA, then 'stable', then the newest archive.
 
     Resolution order:
       1. The requested ``tag`` (e.g. 'latest', 'beta', etc.).
       2. 'stable' — skipped if ``tag`` is already 'stable'.
-      3. None  — no archive resolved; the caller reports it.
+      3. The newest archive for the platform, by publish time.
+      4. None  — no archive at all; the caller reports it.
 
     This keeps tagged installs resilient: a devel user whose 'latest' tag
     hasn't been promoted yet still lands on the OTA-blessed 'stable'
-    archive, while explicit
-    `--tag X` requests still try X first.
+    archive, while explicit `--tag X` requests still try X first.
+
+    Step 3 exists because tags are promoted by hand. A package published to an
+    archive nobody has tagged yet is still the thing to install -- there is
+    nowhere else to get it now that GitHub releases are gone -- so an untagged
+    archive is better than no install. It says so rather than sliding down
+    quietly: which archive was chosen, and why, is exactly what an operator
+    needs when the version turns out not to be the one they expected.
     """
     manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
     if manifest is not None:
@@ -1831,6 +1838,19 @@ def _fetch_archive_with_stable_fallback(
                 f"'{archive_name}' on {platform_str}."
             )
             return manifest
+
+    print(
+        f"↪️  No '{_STABLE_FALLBACK_TAG}' archive either — falling back to the "
+        f"newest archive published for {platform_str}..."
+    )
+    manifest = _fetch_archive_manifest(archive_name, platform_str, None)
+    if manifest is not None:
+        _, _, actual_version = manifest
+        print(
+            f"  ✓ Using untagged archive '{archive_name}' "
+            f"{actual_version or '(version unknown)'} on {platform_str}."
+        )
+        return manifest
 
     return None
 
@@ -3310,7 +3330,7 @@ def download_package(
             # promising another attempt.
             print(
                 f"❌ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' or 'stable'."
+                f"with tag '{tag}', with 'stable', or untagged."
             )
             return None
     else:
@@ -3643,7 +3663,7 @@ def download_all_from_archive(
                 _give_up_on_the_assignment(unusable_desired_state)
             print(
                 f"❌ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' or 'stable'."
+                f"with tag '{tag}', with 'stable', or untagged."
             )
             return {}
     else:

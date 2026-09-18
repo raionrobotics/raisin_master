@@ -3622,16 +3622,51 @@ class TestDownload(unittest.TestCase):
 
     @patch("raisin_ota.client._fetch_archive_by_tag")
     def test_download_all_returns_empty_when_tag_unresolvable(self, mock_fetch_by_tag):
-        # When the requested tag can't be resolved (and tag IS 'stable' so
-        # no further fallback), the function should surface an empty result
-        # (and a warning) rather than aborting, so install.py can fall back
-        # to GitHub releases for each repo.
+        # Nothing resolves: not the requested tag, not 'stable', and no
+        # untagged archive either. The function surfaces an empty result and a
+        # warning rather than aborting; install.py turns that into a failed
+        # install, since OTA is the only source.
         mock_fetch_by_tag.return_value = None
         with tempfile.TemporaryDirectory() as tmpdir:
             result = ota.download_all_from_archive(
                 "release", Path(tmpdir), tag="stable"
             )
         self.assertEqual(result, {})
+
+    @patch("raisin_ota.client._fetch_archive_manifest")
+    @patch("raisin_ota.client._fetch_archive_by_tag", return_value=None)
+    def test_neither_tag_resolves_so_the_newest_archive_is_used(
+        self, mock_by_tag, mock_newest
+    ):
+        """Tags are promoted by hand, so an archive can exist with none on it.
+
+        A package published to an untagged archive is still the thing to
+        install -- there is nowhere else to get it. Before, the chain stopped
+        at 'stable' and install.py went to GitHub releases; with those gone,
+        stopping there would mean no install at all.
+        """
+        newest = ([{"packageName": "raisin"}], "arch-untagged", "1.0.99")
+        mock_newest.return_value = newest
+
+        result = ota._fetch_archive_with_stable_fallback(
+            "raisin-robot", "ubuntu-24.04-x86_64", "latest"
+        )
+
+        self.assertEqual(result, newest)
+        # 'latest' then 'stable', and only then the untagged lookup.
+        self.assertEqual([c.args[2] for c in mock_by_tag.call_args_list],
+                         ["latest", "stable"])
+        mock_newest.assert_called_once_with(
+            "raisin-robot", "ubuntu-24.04-x86_64", None
+        )
+
+    @patch("raisin_ota.client._fetch_archive_manifest", return_value=None)
+    @patch("raisin_ota.client._fetch_archive_by_tag", return_value=None)
+    def test_no_archive_at_all_still_gives_up(self, _by_tag, _newest):
+        result = ota._fetch_archive_with_stable_fallback(
+            "raisin-robot", "ubuntu-24.04-x86_64", "latest"
+        )
+        self.assertIsNone(result)
 
     @patch("raisin_ota.client._download_package_blob", return_value=(True, None))
     @patch("raisin_ota.client._fetch_archive_by_tag")
