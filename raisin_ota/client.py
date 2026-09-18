@@ -1134,7 +1134,7 @@ def archive_is_pinned(
     """Whether this install targets one deliberately chosen archive.
 
     A pin is a decision someone made about this machine, so nothing may quietly
-    substitute another archive, another tag, or GitHub releases for it. It can
+    substitute another archive or another tag for it. It can
     come from the command line, or per-node from `RAISIN_ARCHIVE_NAME` — an
     operator who exports that on a robot has pinned that robot.
 
@@ -1791,11 +1791,11 @@ def _fetch_archive_with_stable_fallback(
     Resolution order:
       1. The requested ``tag`` (e.g. 'latest', 'beta', etc.).
       2. 'stable' — skipped if ``tag`` is already 'stable'.
-      3. None  — callers should then fall back to GitHub releases.
+      3. None  — no archive resolved; the caller reports it.
 
     This keeps tagged installs resilient: a devel user whose 'latest' tag
     hasn't been promoted yet still lands on the OTA-blessed 'stable'
-    archive rather than skipping straight to GitHub, while explicit
+    archive, while explicit
     `--tag X` requests still try X first.
     """
     manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
@@ -3290,11 +3290,12 @@ def download_package(
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
         if manifest is None:
-            # Neither the requested tag nor 'stable' resolved on OTA.
-            # Return None so install.py falls back to GitHub releases.
+            # Neither the requested tag nor 'stable' resolved on OTA. There is
+            # nowhere else to look, so say what was missing rather than
+            # promising another attempt.
             print(
-                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' or 'stable' — falling back to GitHub releases."
+                f"❌ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}' or 'stable'."
             )
             return None
     else:
@@ -3621,15 +3622,13 @@ def download_all_from_archive(
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
         if manifest is None:
-            # Neither the requested tag nor 'stable' resolved on OTA.
-            # Return empty so install.py falls back to GitHub releases
-            # for each repo declared in configuration_setting.yaml.
+            # Neither the requested tag nor 'stable' resolved on OTA. There is
+            # nowhere else to look; the caller reports the empty result.
             if unusable_desired_state:
                 _give_up_on_the_assignment(unusable_desired_state)
             print(
-                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' or 'stable' — falling back to GitHub "
-                f"releases for each package."
+                f"❌ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}' or 'stable'."
             )
             return {}
     else:
