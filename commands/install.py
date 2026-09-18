@@ -1,7 +1,7 @@
 """
 Install command for RAISIN.
 
-Downloads and installs packages from OTA server (primary) or GitHub releases (fallback).
+Downloads and installs packages from the OTA server.
 
 Install modes:
 - Default: Download from latest archive based on build type
@@ -10,13 +10,10 @@ Install modes:
 """
 
 import re
-import shutil
 from functools import wraps
 import click
 from pathlib import Path
 from typing import Optional
-import requests
-import zipfile
 import yaml
 from packaging.version import parse as parse_version
 from packaging.version import InvalidVersion
@@ -64,7 +61,6 @@ def install_command(
     archive_version: Optional[str] = None,
     archive_name: Optional[str] = None,
     at_timestamp: Optional[str] = None,
-    from_github: bool = False,
     tag: Optional[str] = None,
 ) -> bool:
     """Install packages, reporting a broken install tree rather than raising.
@@ -82,7 +78,6 @@ def install_command(
             archive_version,
             archive_name,
             at_timestamp,
-            from_github,
             tag,
         )
     except InstallTreeUnusable as unusable:
@@ -101,7 +96,6 @@ def _install(
     archive_version: Optional[str] = None,
     archive_name: Optional[str] = None,
     at_timestamp: Optional[str] = None,
-    from_github: bool = False,
     tag: Optional[str] = None,
 ) -> bool:
     """
@@ -113,7 +107,6 @@ def _install(
         archive_version (str): Optional specific archive version (e.g., 'v2024.01')
         archive_name (str): Optional archive base name override (e.g., 'raisin-robot')
         at_timestamp (str): Optional timestamp for time-travel install (e.g., '2024-01-15')
-        from_github (bool): If True, skip OTA and download directly from GitHub
         tag (str): Archive tag to resolve. When None (default), the tag is
             derived from configuration_setting.yaml: `user_type: devel` →
             "latest", anything else → "stable". Pass an explicit tag string
@@ -137,20 +130,7 @@ def _install(
     script_dir_path = Path(script_directory)
 
     # Load configuration
-    (
-        all_repositories,
-        tokens,
-        user_type,
-        _,
-        repos_to_ignore,
-    ) = load_configuration()
-    if not all_repositories:
-        print("❌ Error: No repositories found in configuration_setting.yaml")
-        return False
-    if not tokens:
-        print(
-            "⚠️ No GitHub tokens found. Packages not available via OTA will be skipped."
-        )
+    _, _, user_type, _, repos_to_ignore = load_configuration()
 
     # If the caller didn't pin a tag, derive it from the user_type.
     # "devel" → bleeding-edge ("latest"), anything else → "stable".
@@ -177,12 +157,11 @@ def _install(
             print(f"  -> Found local packages to process: {local_src_packages}")
             install_queue.extend(local_src_packages)
     processed_packages = dict()
-    session = requests.Session()
     is_successful = True
 
     # When an archive is pinned — on the command line, or per-node through
     # RAISIN_ARCHIVE_NAME — we refuse to fall back silently to another archive,
-    # another tag, or GitHub releases. A miss must be a hard, loud failure: the
+    # another tag. A miss must be a hard, loud failure: the
     # alternative is what caused `--archive-name dso --archive-version 1.0.3`
     # to quietly resolve to `raisin-dev 1.0.3` and install the wrong controllers.
     explicit_archive_pin = archive_is_pinned(archive_name, archive_version)
@@ -271,32 +250,20 @@ def _install(
                 f"{os_type}-{os_version}-{architecture} ({build_type})"
             )
             print(
-                "   No GitHub fallback is performed when an archive is "
-                "pinned explicitly."
             )
             print("=" * 72)
             return False
 
-        # OTA returned nothing (tag missing, server unreachable, etc.) and
-        # the caller did NOT pin a specific archive. Fall back to GitHub
-        # releases per repo, but make the fallback visible.
+        # OTA returned nothing (tag missing, server unreachable, etc.). There is
+        # nowhere else to look: say so rather than reporting an empty success.
         print("")
         print("=" * 72)
-        print("⚠️  OTA archive not available — falling back to GitHub releases.")
-        print("    This installs every configured repository individually and")
-        print("    may not match any single archive on the OTA server.")
+        print("❌ No archive available on OTA — nothing was installed.")
+        print(f"   platform        : {os_type}-{os_version}-{architecture} ({build_type})")
+        print("   Check the OTA endpoint and that an archive is published for")
+        print("   this platform and tag.")
         print("=" * 72)
-        for repo_name in all_repositories.keys():
-            if repo_name in repo_ignore_set:
-                continue
-            install_queue.append(repo_name)
-
-        if not install_queue:
-            print(
-                "❌ Error: No fallback targets — every repository is in "
-                "repos_to_ignore. Nothing to install."
-            )
-            return False
+        return False
 
     while install_queue:
         target_spec = install_queue.pop(0)
@@ -380,198 +347,65 @@ def _install(
             print(f"Skipping '{package_name}' because it exists in local source")
             continue
 
-        # Priority 3: OTA Server (skip if --from-github specified)
-        if not from_github:
-            try:
-                ota_result = None
-                if at_timestamp:
-                    # Timestamp-based download (time-travel)
-
-                    ota_result = download_package_at_timestamp(
-                        package_name,
-                        at_timestamp,
-                        build_type,
-                        script_dir_path / "release" / "install",
-                    )
-                else:
-                    # Archive-based download (default or specific version)
-                    from raisin_ota.client import download_package as ota_download
-
-                    # Normalize 'none' (case-insensitive) to None so the OTA
-                    # client falls back to legacy latest-by-time selection.
-                    resolved_tag = (
-                        None if (tag is None or str(tag).lower() == "none") else tag
-                    )
-                    ota_result = ota_download(
-                        package_name,
-                        spec_str,
-                        build_type,
-                        script_dir_path / "release" / "install",
-                        archive_version=archive_version,
-                        archive_name=archive_name,
-                        tag=resolved_tag,
-                    )
-                if ota_result:
-                    processed_packages[package_name] = ota_result["version"]
-                    install_queue.extend(ota_result.get("dependencies", []))
-                    continue
-                if explicit_archive_pin:
-                    # User pinned an archive; if the package isn't in it,
-                    # do not quietly grab it from GitHub instead.
-                    print(
-                        f"❌ Package '{package_name}' not found in pinned "
-                        f"archive '{archive_name or '(default)'}'"
-                        f"{f' v{archive_version}' if archive_version else ''}"
-                        " — refusing to fall back to GitHub."
-                    )
-                    is_successful = False
-                    continue
-            except InstallTreeUnusable:
-                # Not a per-package problem, and retrying the next package
-                # against the same broken tree would only repeat it.
-                raise
-            except Exception as e:
-                print(
-                    f"⚠️ OTA download failed for '{package_name}': {e}. Falling back to GitHub."
-                )
-                if explicit_archive_pin:
-                    print(
-                        "❌ Archive was pinned explicitly — aborting "
-                        f"'{package_name}' instead of falling back to GitHub."
-                    )
-                    is_successful = False
-                    continue
-
-        # Priority 4: Find and install remote release
-        repo_info = all_repositories.get(package_name)
-        if not repo_info or "url" not in repo_info:
-            print(f"⚠️ Warning: No repository URL found for '{package_name}'. Skipping.")
-            continue
-
-        git_url = repo_info["url"]
-        match = re.search(r"git@github.com:(.*)/(.*)\.git", git_url)
-        if not match:
-            print(f"❌ Error: Could not parse GitHub owner/repo from URL '{git_url}'.")
-            is_successful = False
-            continue
-
-        owner, repo_name = match.groups()
-        token = tokens.get(owner, tokens.get("default")) if tokens else None
-        if token:
-            session.headers.update(
-                {
-                    "Authorization": f"token {token}",
-                    "Accept": "application/vnd.github.v3+json",
-                }
-            )
-        else:  # Clear auth header if no token for this owner
-            if "Authorization" in session.headers:
-                del session.headers["Authorization"]
-
+        # Priority 3: OTA Server
         try:
-            api_url = f"https://api.github.com/repos/{owner}/{repo_name}/releases"
-            response = session.get(api_url)
-            response.raise_for_status()
-            releases_list = response.json()
+            ota_result = None
+            if at_timestamp:
+                # Timestamp-based download (time-travel)
 
-            best_release = None
-            best_version = parse_version("0.0.0")
-
-            for release in releases_list:
-                tag = release.get("tag_name")
-                if not tag or (release.get("prerelease") and user_type != "devel"):
-                    continue
-                try:
-                    current_version = parse_version(tag)
-                    if (
-                        spec.contains(current_version)
-                        and current_version >= best_version
-                    ):
-                        best_version = current_version
-                        best_release = release
-                except InvalidVersion:
-                    continue
-
-            if not best_release:
-                print(
-                    f"❌ Error: No release found for '{package_name}' that satisfies spec '{spec}'."
+                ota_result = download_package_at_timestamp(
+                    package_name,
+                    at_timestamp,
+                    build_type,
+                    script_dir_path / "release" / "install",
                 )
-                is_successful = False
-                continue
+            else:
+                # Archive-based download (default or specific version)
+                from raisin_ota.client import download_package as ota_download
 
-            release_data = best_release
-            version = release_data["tag_name"]
-            if package_name in processed_packages:
-                installed_version = processed_packages[package_name]
-                if parse_version(version) <= parse_version(installed_version):
-                    print(
-                        f"ℹ️  '{package_name}' version '{installed_version}' is already installed. Skipping."
-                    )
-                    continue
-            processed_packages[package_name] = version
-
-            asset_name = f"{package_name}-{os_type}-{os_version}-{architecture}-{build_type}-{version}.zip"
-            asset_api_url = next(
-                (
-                    asset["url"]
-                    for asset in release_data.get("assets", [])
-                    if asset["name"] == asset_name
-                ),
-                None,
-            )
-
-            if not asset_api_url:
-                print(
-                    f"❌ Error: Could not find asset '{asset_name}' for release '{version}'."
+                # Normalize 'none' (case-insensitive) to None so the OTA
+                # client falls back to legacy latest-by-time selection.
+                resolved_tag = (
+                    None if (tag is None or str(tag).lower() == "none") else tag
                 )
-                is_successful = False
+                ota_result = ota_download(
+                    package_name,
+                    spec_str,
+                    build_type,
+                    script_dir_path / "release" / "install",
+                    archive_version=archive_version,
+                    archive_name=archive_name,
+                    tag=resolved_tag,
+                )
+            if ota_result:
+                processed_packages[package_name] = ota_result["version"]
+                install_queue.extend(ota_result.get("dependencies", []))
                 continue
-
-            install_dir = (
-                script_dir_path
-                / "release/install"
-                / package_name
-                / os_type
-                / os_version
-                / architecture
-                / build_type
-            )
-            download_path = Path(script_directory) / "install" / asset_name
-            download_path.parent.mkdir(parents=True, exist_ok=True)
-            if install_dir.exists():
-                shutil.rmtree(install_dir)
-            install_dir.mkdir(parents=True, exist_ok=True)
-
-            print("-" * 40)
-            print(f"⬇️  Downloading {asset_name}...")
-            download_headers = {"Accept": "application/octet-stream"}
-            if token:
-                download_headers["Authorization"] = f"token {token}"
-
-            with session.get(asset_api_url, headers=download_headers, stream=True) as r:
-                r.raise_for_status()
-                with open(download_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-
-            print(f"📂 Unzipping to {install_dir}...")
-            with zipfile.ZipFile(download_path, "r") as zip_ref:
-                zip_ref.extractall(install_dir)
-            download_path.unlink()
-            print(f"✅ Successfully installed '{package_name}=={version}'.")
-            print("-" * 40)
-
-            release_yaml_path = install_dir / "release.yaml"
-            if release_yaml_path.is_file():
-                with open(release_yaml_path, "r") as f:
-                    release_info = yaml.safe_load(f)
-                    dependencies = release_info.get("dependencies", [])
-                    if dependencies:
-                        install_queue.extend(dependencies)
-
-        except Exception as e:
-            print(f"❌ An error occurred while processing '{package_name}': {e}")
+            # OTA is the only source now, so "not there" ends this package
+            # rather than moving on to somewhere else to look.
+            if explicit_archive_pin:
+                print(
+                    f"❌ Package '{package_name}' not found in pinned "
+                    f"archive '{archive_name or '(default)'}'"
+                    f"{f' v{archive_version}' if archive_version else ''}."
+                )
+            else:
+                print(
+                    f"❌ Package '{package_name}'"
+                    f"{f' {spec_str}' if spec_str else ''} is not on the OTA "
+                    "server, and it is neither a local source package nor "
+                    "already installed."
+                )
             is_successful = False
+            continue
+        except InstallTreeUnusable:
+            # Not a per-package problem, and retrying the next package
+            # against the same broken tree would only repeat it.
+            raise
+        except Exception as e:
+            print(f"❌ OTA download failed for '{package_name}': {e}")
+            is_successful = False
+            continue
 
     if is_successful:
         print("🎉🎉🎉 Installation process finished successfully.")
@@ -632,12 +466,6 @@ def _with_install_state_lock(function):
     help="Install packages at a specific timestamp (e.g., '2024-01-15' or '2024-01-15T10:00:00Z')",
 )
 @click.option(
-    "--from-github",
-    "from_github",
-    is_flag=True,
-    help="Skip OTA and download directly from GitHub releases",
-)
-@click.option(
     "--tag",
     "tag",
     default=None,
@@ -645,8 +473,8 @@ def _with_install_state_lock(function):
         "Install from the archive marked with this tag. When omitted, the tag "
         "defaults based on configuration_setting.yaml user_type: 'devel' → "
         "'latest', anything else → 'stable'. Fallback chain when the requested "
-        "tag is missing on OTA: tag → 'stable' → GitHub releases (each step "
-        "prints a clear warning). Pass 'none' to skip the tag and use legacy "
+        "tag is missing on OTA: tag → 'stable' (each step prints a clear "
+        "warning). Pass 'none' to skip the tag and use legacy "
         "latest-by-time selection on OTA."
     ),
 )
@@ -657,11 +485,10 @@ def install_cli_command(
     archive_version,
     archive_name,
     at_timestamp,
-    from_github,
     tag,
 ):
     """
-    Download and install packages from OTA server or GitHub releases.
+    Download and install packages from the OTA server.
 
     \b
     Examples:
@@ -672,7 +499,6 @@ def install_cli_command(
         raisin install --archive-version v2024.01   # Install from specific archive
         raisin install --archive-name team-robot    # Install from a custom archive name
         raisin install --at 2024-01-15               # Install packages at timestamp
-        raisin install --from-github                 # Skip OTA, use GitHub only
     """
     packages = list(packages)
 
@@ -684,9 +510,7 @@ def install_cli_command(
     # cases like the dso/raisin-dev cross-archive bug.
     overall_success = True
     for bt in build_types:
-        if from_github:
-            click.echo(f"📥 Installing from GitHub releases ({bt})...")
-        elif at_timestamp:
+        if at_timestamp:
             click.echo(f"📥 Installing packages at {at_timestamp} ({bt})...")
         elif archive_name and archive_version:
             click.echo(
@@ -706,7 +530,6 @@ def install_cli_command(
             archive_version,
             archive_name,
             at_timestamp,
-            from_github,
             tag=tag,
         )
         if not succeeded:

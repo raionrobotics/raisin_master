@@ -17,6 +17,7 @@ import errno
 import hashlib
 import itertools
 import json
+import io
 import os
 import shutil
 import struct
@@ -1336,7 +1337,6 @@ class TestHaltStopsTheInstall(unittest.TestCase):
                 side_effect=ota.OtaInstallHalted("halted by tenant"),
             ),
             patch("raisin_ota.client.download_package") as mock_download,
-            patch("commands.install.requests.Session"),
         ):
             result = install_command([], "release")
 
@@ -1510,7 +1510,6 @@ class TestAnUnusableAssignmentReachesTheOperator(unittest.TestCase):
                 ),
             ),
             patch("raisin_ota.client.download_package") as self.download,
-            patch("commands.install.requests.Session"),
             patch("builtins.print") as self.printed,
         ):
             return install_command([], "release")
@@ -1644,7 +1643,6 @@ class TestUnusableTreeStopsTheInstall(unittest.TestCase):
                 ),
             ),
             patch("raisin_ota.client.download_package") as mock_download,
-            patch("commands.install.requests.Session"),
             patch("builtins.print") as mock_print,
         ):
             result = install_command([], "release")
@@ -1699,7 +1697,6 @@ class TestNodeLevelArchivePin(unittest.TestCase):
         with (
             patch("commands.install.download_all_from_archive", return_value={}),
             patch("raisin_ota.client.download_package") as mock_download,
-            patch("commands.install.requests.Session"),
             patch.dict(os.environ, {"RAISIN_ARCHIVE_NAME": "node-archive"}),
         ):
             result = install_command([], "release")
@@ -4752,7 +4749,7 @@ class TestInstallCliEventReporting(unittest.TestCase):
             try:
                 # It is a click Command; call the underlying function.
                 install_mod.install_cli_command.callback(
-                    ["mypkg"], "release", None, None, None, False, "stable"
+                    ["mypkg"], "release", None, None, None, "stable"
                 )
             except click.exceptions.Exit:
                 pass
@@ -4909,6 +4906,54 @@ class TestInstallOutcomeDecision(unittest.TestCase):
         self.assertNotIn("detail", terminal)
 
 
+class TestOtaIsTheOnlySource(unittest.TestCase):
+    """A package OTA does not have must end the install, not be passed over.
+
+    While GitHub releases were a fallback, reaching the end of the per-package
+    loop meant "try the next source". With that source gone the same fall-through
+    would have meant "skip it", and `install_command` would have returned True
+    having installed nothing -- the quiet kind of failure this whole retirement
+    is meant to avoid.
+    """
+
+    @patch("commands.install.load_configuration")
+    def test_a_package_missing_from_ota_fails_the_install(self, mock_config):
+        mock_config.return_value = ({}, {}, "devel", None, [])
+        from commands.install import install_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            _sync_ota_context()
+            with patch("raisin_ota.client.download_package", return_value=None):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    result = install_command(["nosuchpkg"], "release")
+                output = buf.getvalue()
+
+        self.assertFalse(result, "an absent package must not report success")
+        self.assertIn("nosuchpkg", output, "the package that could not be had must be named")
+
+    @patch("commands.install.load_configuration")
+    def test_an_ota_error_fails_the_install(self, mock_config):
+        mock_config.return_value = ({}, {}, "devel", None, [])
+        from commands.install import install_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            _sync_ota_context()
+            with patch(
+                "raisin_ota.client.download_package",
+                side_effect=RuntimeError("OTA unreachable"),
+            ):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    result = install_command(["mypkg"], "release")
+                output = buf.getvalue()
+
+        self.assertFalse(result)
+        self.assertIn("OTA unreachable", output)
+
+
 class TestInstallIntegration(unittest.TestCase):
     """Verify OTA is used correctly in install_command."""
 
@@ -4935,15 +4980,9 @@ class TestInstallIntegration(unittest.TestCase):
         )
 
         with patch("raisin_ota.client.download_package", return_value=None) as mock_dl:
-            with patch("commands.install.requests.Session") as MockSession:
-                session = MagicMock()
-                MockSession.return_value = session
-                resp = _mock_response(json_data=[])
-                session.get.return_value = resp
+            from commands.install import install_command
 
-                from commands.install import install_command
-
-                install_command(["mypkg"], "release")
+            install_command(["mypkg"], "release")
 
             # OTA download should have been attempted for 'mypkg'
             call_args_list = [c[0][0] for c in mock_dl.call_args_list]
@@ -4960,14 +4999,9 @@ class TestInstallIntegration(unittest.TestCase):
         )
 
         with patch("raisin_ota.client.download_package", return_value=None) as mock_dl:
-            with patch("commands.install.requests.Session") as MockSession:
-                session = MagicMock()
-                MockSession.return_value = session
-                session.get.return_value = _mock_response(json_data=[])
+            from commands.install import install_command
 
-                from commands.install import install_command
-
-                install_command(["mypkg"], "release", archive_name="team-archive")
+            install_command(["mypkg"], "release", archive_name="team-archive")
 
         self.assertEqual(mock_dl.call_args.kwargs["archive_name"], "team-archive")
 
@@ -5103,10 +5137,8 @@ class TestInstallIntegration(unittest.TestCase):
 class TestPublishIntegration(unittest.TestCase):
     """Verify OTA messaging in publish dry-run mode."""
 
-    @patch("commands.publish.load_configuration")
     @patch("commands.publish.setup")
     @patch("commands.publish.guard_require_version_bump_for_src_packages")
-    @patch("commands.publish.get_commit_hash", return_value="abc123")
     @patch("commands.publish.subprocess.run")
     @patch("commands.publish.shutil.make_archive")
     @patch("commands.publish.shutil.copy")
@@ -5115,20 +5147,10 @@ class TestPublishIntegration(unittest.TestCase):
         _copy,
         _archive,
         _subproc,
-        _commit,
         _guard,
         _setup,
-        mock_config,
         capsys=None,
     ):
-        mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
-            {"org": "ghtoken"},
-            "devel",
-            None,
-            [],
-        )
-
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
             _sync_ota_context()
@@ -5140,13 +5162,10 @@ class TestPublishIntegration(unittest.TestCase):
             from commands.publish import publish
 
             # Capture printed output
-            import io
-            from contextlib import redirect_stdout
-
             buf = io.StringIO()
-            with redirect_stdout(buf):
-                # --upload-ota flag triggers OTA message in dry-run
-                publish("mypkg", "release", dry_run=True, upload_ota=True)
+            with contextlib.redirect_stdout(buf):
+                # OTA is the only destination, so the dry-run names it
+                publish("mypkg", "release", dry_run=True)
 
             output = buf.getvalue()
             self.assertIn("OTA", output)

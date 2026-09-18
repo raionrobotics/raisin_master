@@ -1,13 +1,11 @@
 """
 Publish command for RAISIN.
 
-Builds, archives, and uploads releases to GitHub or OTA server.
+Builds, archives, and uploads releases to the OTA server.
 """
 
-import json
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -19,14 +17,12 @@ import yaml
 
 from commands import globals as g
 from commands.utils import (
-    load_configuration,
     is_qemu_emulated,
     get_build_jobs,
     get_default_portable_march,
 )
 from commands.setup import (
     setup,
-    get_commit_hash,
     guard_require_version_bump_for_src_packages,
 )
 
@@ -313,221 +309,17 @@ def _upload_to_ota(
 
 
 # ============================================================================
-# Upload: GitHub
-# ============================================================================
-
-
-def _parse_github_repo(repo_url: str) -> Optional[str]:
-    """Extract 'owner/repo' slug from git URL."""
-    match = re.search(r"git@github\.com:(.*)\.git", repo_url)
-    return match.group(1) if match else None
-
-
-def _check_github_release(
-    tag_name: str,
-    repo_slug: str,
-    auth_env: dict,
-) -> tuple:
-    """Check if a GitHub release exists.
-
-    Returns (exists: bool, is_prerelease: bool, assets: list[str])
-    """
-    try:
-        result = subprocess.run(
-            [
-                "gh",
-                "release",
-                "view",
-                tag_name,
-                "--repo",
-                repo_slug,
-                "--json",
-                "assets,isPrerelease",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            env=auth_env,
-        )
-        data = json.loads(result.stdout)
-        assets = [a["name"] for a in data.get("assets", [])]
-        return (True, bool(data.get("isPrerelease")), assets)
-    except subprocess.CalledProcessError as e:
-        if "release not found" in e.stderr:
-            return (False, False, [])
-        raise
-
-
-def _update_github_release_notes(
-    tag_name: str,
-    repo_slug: str,
-    notes: str,
-    auth_env: dict,
-):
-    """Update release notes for an existing GitHub release."""
-    # Get release ID
-    release_id = subprocess.run(
-        ["gh", "api", f"repos/{repo_slug}/releases/tags/{tag_name}", "--jq", ".id"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=auth_env,
-    ).stdout.strip()
-
-    if not release_id:
-        raise RuntimeError(f"Could not resolve release id for '{tag_name}'")
-
-    # Patch release notes
-    subprocess.run(
-        [
-            "gh",
-            "api",
-            "-X",
-            "PATCH",
-            f"repos/{repo_slug}/releases/{release_id}",
-            "-f",
-            f"body={notes}",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=auth_env,
-    )
-
-
-def _upload_to_github(
-    archive_path: Path,
-    target: str,
-    version: str,
-    paths: dict,
-) -> bool:
-    """Upload archive to GitHub release.
-
-    Returns True on success, False on failure.
-    """
-    repositories, secrets, _, _, _ = load_configuration()
-
-    if not secrets:
-        print("❌ Error: GitHub tokens not found in configuration. Cannot upload.")
-        return False
-
-    print("\n--- Uploading to GitHub Release ---")
-
-    # Get commit hash for release notes
-    target_dir = paths["target_dir"]
-    commit_hash = get_commit_hash(str(target_dir)) or "UNKNOWN"
-    release_notes = f"Commit: {commit_hash}\n"
-
-    # Get repo info
-    release_info = repositories.get(target)
-    if not (release_info and release_info.get("url")):
-        print(
-            f"ℹ️ Repository URL for '{target}' not found in configuration. Skipping GitHub release."
-        )
-        return False
-
-    repo_slug = _parse_github_repo(release_info["url"])
-    if not repo_slug:
-        print(f"❌ Error: Could not parse repository from URL: {release_info['url']}")
-        return False
-
-    owner = repo_slug.split("/")[0]
-    token = secrets.get(owner)
-    if not token:
-        print(f"❌ Error: Token for owner '{owner}' not found in configuration.")
-        return False
-
-    auth_env = os.environ.copy()
-    auth_env["GH_TOKEN"] = token
-    tag_name = f"v{version}"
-    archive_filename = archive_path.name
-
-    print(f"Checking status of release '{tag_name}' in '{repo_slug}'...")
-
-    try:
-        exists, is_prerelease, assets = _check_github_release(
-            tag_name, repo_slug, auth_env
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Error checking release status: {e.stderr}")
-        return False
-
-    if exists:
-        if not is_prerelease:
-            print(f"🚫 Release '{tag_name}' exists and is not a prerelease. Aborting.")
-            return False
-
-        # Update existing prerelease
-        clobber = archive_filename in assets
-        action = "overwriting" if clobber else "uploading new"
-        print(
-            f"🚀 Prerelease '{tag_name}' exists; {action} asset '{archive_filename}'..."
-        )
-
-        _update_github_release_notes(tag_name, repo_slug, release_notes, auth_env)
-
-        upload_cmd = [
-            "gh",
-            "release",
-            "upload",
-            tag_name,
-            str(archive_path),
-            "--repo",
-            repo_slug,
-        ]
-        if clobber:
-            upload_cmd.append("--clobber")
-
-        subprocess.run(
-            upload_cmd, check=True, capture_output=True, text=True, env=auth_env
-        )
-        print(f"✅ Successfully uploaded asset to prerelease '{tag_name}'.")
-
-    else:
-        # Create new prerelease
-        print(f"✅ Release '{tag_name}' does not exist. Creating a new one...")
-        subprocess.run(
-            [
-                "gh",
-                "release",
-                "create",
-                tag_name,
-                str(archive_path),
-                "--repo",
-                repo_slug,
-                "--title",
-                tag_name,
-                "--notes",
-                release_notes,
-                "--prerelease",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            env=auth_env,
-        )
-        print(
-            f"✅ Successfully created new prerelease and uploaded '{archive_filename}'."
-        )
-
-    return True
-
-
-# ============================================================================
 # Main Publish Function
 # ============================================================================
 
 
-def publish(
-    target: str, build_type: str, dry_run: bool = False, upload_ota: bool = False
-):
-    """Build, archive, and upload a release.
+def publish(target: str, build_type: str, dry_run: bool = False):
+    """Build, archive, and upload a release to the OTA server.
 
     Args:
         target: Target package name
         build_type: Build type (debug/release)
-        dry_run: If True, skip actual publishing
-        upload_ota: If True, upload to OTA server instead of GitHub
+        dry_run: If True, build and archive but do not upload
     """
     guard_require_version_bump_for_src_packages()
 
@@ -541,14 +333,6 @@ def publish(
     print(f"✅ Found release file for '{target}'.")
     version = details.get("version", "0.0.0")
 
-    # Check user type
-    _, _, user_type, _, _ = load_configuration()
-    if user_type != "devel":
-        print(
-            "ℹ️  Note: This publish flow creates prerelease GitHub releases; "
-            "non-'devel' users may not install prereleases."
-        )
-
     try:
         # Build
         if not _build_package(target, build_type, paths):
@@ -557,20 +341,17 @@ def publish(
         # Archive
         archive_path = _create_archive(target, version, build_type, paths)
 
-        # Dry run
+        # Dry run. The archive above is still produced: CI builds with --dry-run
+        # and then uploads release/*.zip itself.
         if dry_run:
-            dest = "OTA server" if upload_ota else "GitHub"
-            print(f"\n--- [DRY-RUN] Skipping {dest} Upload ---")
-            print(f"[DRY-RUN] Would upload '{archive_path}' to {dest}")
+            print("\n--- [DRY-RUN] Skipping OTA Upload ---")
+            print(f"[DRY-RUN] Would upload '{archive_path}' to the OTA server")
             print(f"[DRY-RUN] Tag: v{version}")
             print("[DRY-RUN] Build and archive completed successfully.")
             return
 
         # Upload
-        if upload_ota:
-            _upload_to_ota(archive_path, target, version, build_type)
-        else:
-            _upload_to_github(archive_path, target, version, paths)
+        _upload_to_ota(archive_path, target, version, build_type)
 
     except FileNotFoundError as e:
         print(
@@ -607,26 +388,20 @@ def publish(
     is_flag=True,
     help="Perform a dry run without actual publishing",
 )
-@click.option(
-    "--upload-ota",
-    is_flag=True,
-    help="Upload to OTA server instead of GitHub",
-)
-def publish_command(target, build_type, dry_run, upload_ota):
+def publish_command(target, build_type, dry_run):
     """
-    Build, package, and upload a release to GitHub or OTA server.
+    Build, package, and upload a release to the OTA server.
 
     \b
     Examples:
-        raisin publish raisin_network                # Publish to GitHub
+        raisin publish raisin_network                # Publish to OTA
         raisin publish raisin_network --type release # Publish only release build
-        raisin publish raisin_network --upload-ota   # Publish to OTA server instead
         raisin publish my_package -t release
-        raisin publish my_package -t both --dry-run  # Dry run without uploading
+        raisin publish my_package -t both --dry-run  # Build and archive only
     """
     build_types = (
         ["release", "debug"] if build_type.lower() == "both" else [build_type.lower()]
     )
     click.echo(f"📦 Publishing {target} ({', '.join(build_types)} builds)...")
     for bt in build_types:
-        publish(target, bt, dry_run, upload_ota)
+        publish(target, bt, dry_run)

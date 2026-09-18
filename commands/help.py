@@ -39,7 +39,7 @@ def print_help():
     print(
         f"  {'publish <target> [--type debug|release]':<20} 📦 Builds, archives, and uploads a distributable package for the target."
     )
-    print(f"  {'':<22} Archives are uploaded to the corresponding GitHub Release.")
+    print(f"  {'':<22} Archives are uploaded to the OTA server.")
     print(f"  {'':<22} Build type defaults to 'release' if not specified.")
 
     print("-" * 35)
@@ -69,14 +69,6 @@ def print_help():
     )
     print(
         f"  {'':<22} their dependency graph, printing a colored report of the status."
-    )
-    print("-" * 35)
-    print(
-        f"  {'index release [<package_name>]':<20} 📜 Lists available remote packages from GitHub Releases."
-    )
-    print(f"  {'':<22} Without a package name, it lists all packages.")
-    print(
-        f"  {'':<22} With a package name, it lists all available versions for that package."
     )
 
     print("\n## Git Integration Commands")
