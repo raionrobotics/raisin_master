@@ -37,9 +37,9 @@ def print_help():
     )
     print("-" * 35)
     print(
-        f"  {'publish <target> [--type debug|release]':<20} 📦 Builds, archives, and uploads a distributable package for the target."
+        f"  {'publish <target> [--type debug|release]':<20} 📦 Builds the target and archives it into 'release/'."
     )
-    print(f"  {'':<22} Archives are uploaded to the OTA server.")
+    print(f"  {'':<22} Uploading is done by CI; this command does not.")
     print(f"  {'':<22} Build type defaults to 'release' if not specified.")
 
     print("-" * 35)

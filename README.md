@@ -265,22 +265,19 @@ raisin build -t debug --tsan && raisin test debug --tsan --unit
 ### 10. Additional Commands
 
 #### Publish a Release
-Build, package, and upload a release to the OTA server:
+Build a package and archive it into `release/`:
 ```bash
-# Publish
+# Build and archive
 raisin publish raisin_network
 
-# Publish only release build
+# Release build only
 raisin publish raisin_network --type release
 
-# Publish only debug build
+# Debug build only
 raisin publish raisin_network --type debug
-
-# Build and archive without uploading
-raisin publish raisin_network --dry-run
 ```
 
-> **Note:** Publishing requires `RAISIN_OTA_ENDPOINT` to be set. `--dry-run` still builds and archives into `release/`; it skips only the upload.
+> **Note:** This command does not upload. The OTA server accepts a manifest only with `sourceType: jenkins` — the field records whether a build came from CI or from someone's machine, and those are different things to trust — so uploading is done by CI (`raisin_package_builder/ota-upload.groovy`) against the archives this produces. `--dry-run` is accepted and ignored; it has nothing left to suppress.
 
 #### Build an SDK
 

@@ -1,7 +1,7 @@
 """
 Publish command for RAISIN.
 
-Builds, archives, and uploads releases to the OTA server.
+Builds a package and archives it into release/. Uploading is CI's job.
 """
 
 import os
@@ -274,58 +274,30 @@ def _create_archive(
 
 
 # ============================================================================
-# Upload: OTA
-# ============================================================================
-
-
-def _upload_to_ota(
-    archive_path: Path,
-    target: str,
-    version: str,
-    build_type: str,
-) -> bool:
-    """Upload archive to OTA server.
-
-    Returns True on success, False on failure.
-    """
-    print("\n--- Uploading to OTA Server ---")
-    try:
-        from raisin_ota.client import upload_package as ota_upload
-
-        success = ota_upload(
-            archive_path=archive_path,
-            package_name=target,
-            version=version,
-            build_type=build_type,
-        )
-        if success:
-            print(f"✅ OTA upload successful for '{target}'.")
-        else:
-            print(f"❌ OTA upload failed for '{target}'.")
-        return success
-    except Exception as e:
-        print(f"❌ OTA upload failed: {e}")
-        return False
-
-
-# ============================================================================
 # Main Publish Function
 # ============================================================================
 
 
 def publish(target: str, build_type: str, dry_run: bool = False) -> bool:
-    """Build, archive, and upload a release to the OTA server.
+    """Build a package and archive it into release/.
+
+    This does not upload. The OTA server takes a manifest only from Jenkins:
+    `sourceType` is constrained to that one producer, deliberately, because the
+    field records whether a build came from CI or from someone's machine and
+    those are different things to trust. So publishing is two jobs in two
+    places -- this produces the archive, and raisin_package_builder's
+    ota-upload.groovy uploads it.
 
     Args:
         target: Target package name
         build_type: Build type (debug/release)
-        dry_run: If True, build and archive but do not upload
+        dry_run: Accepted and ignored. Kept so CI, which still passes it, keeps
+            working; there is no upload left for it to suppress.
 
     Returns:
-        True when the archive was produced and, unless this is a dry run,
-        uploaded. The caller turns a False into a non-zero exit: CI reads that
-        exit code, and `raisin publish` is now the only thing that produces the
-        archives the OTA upload stage consumes.
+        True when the archive was produced. The caller turns a False into a
+        non-zero exit -- CI reads that exit code, and this is the only thing
+        that produces the archives the OTA upload stage consumes.
     """
     guard_require_version_bump_for_src_packages()
 
@@ -346,18 +318,9 @@ def publish(target: str, build_type: str, dry_run: bool = False) -> bool:
 
         # Archive
         archive_path = _create_archive(target, version, build_type, paths)
-
-        # Dry run. The archive above is still produced: CI builds with --dry-run
-        # and then uploads release/*.zip itself.
-        if dry_run:
-            print("\n--- [DRY-RUN] Skipping OTA Upload ---")
-            print(f"[DRY-RUN] Would upload '{archive_path}' to the OTA server")
-            print(f"[DRY-RUN] Tag: v{version}")
-            print("[DRY-RUN] Build and archive completed successfully.")
-            return True
-
-        # Upload
-        return _upload_to_ota(archive_path, target, version, build_type)
+        print(f"\n✅ Archived '{target}' v{version} to '{archive_path}'.")
+        print("   Uploading is CI's job (ota-upload.groovy); this command does not.")
+        return True
 
     except FileNotFoundError as e:
         print(
@@ -392,18 +355,17 @@ def publish(target: str, build_type: str, dry_run: bool = False) -> bool:
 @click.option(
     "--dry-run",
     is_flag=True,
-    help="Perform a dry run without actual publishing",
+    help="Deprecated and ignored: this command never uploads.",
 )
 def publish_command(target, build_type, dry_run):
     """
-    Build, package, and upload a release to the OTA server.
+    Build a package and archive it into release/ for CI to upload.
 
     \b
     Examples:
-        raisin publish raisin_network                # Publish to OTA
-        raisin publish raisin_network --type release # Publish only release build
+        raisin publish raisin_network                # Build and archive
+        raisin publish raisin_network --type release # Release build only
         raisin publish my_package -t release
-        raisin publish my_package -t both --dry-run  # Build and archive only
     """
     build_types = (
         ["release", "debug"] if build_type.lower() == "both" else [build_type.lower()]

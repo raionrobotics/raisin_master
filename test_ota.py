@@ -5204,11 +5204,10 @@ class TestPublishReportsFailureThroughItsExitCode(unittest.TestCase):
             result = self._invoke("mypkg", "--type", "release", "--dry-run")
         self.assertEqual(result.exit_code, 1, result.output)
 
-    @patch("commands.publish._upload_to_ota", return_value=False)
-    @patch("commands.publish._create_archive", return_value=Path("/tmp/a.zip"))
+    @patch("commands.publish._create_archive", side_effect=OSError("disk full"))
     @patch("commands.publish._build_package", return_value=True)
     @patch("commands.publish.guard_require_version_bump_for_src_packages")
-    def test_a_failed_upload_exits_non_zero(self, _guard, _build, _archive, _upload):
+    def test_a_failed_archive_exits_non_zero(self, _guard, _build, _archive):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
             target = Path(tmpdir) / "src" / "mypkg"
@@ -5231,14 +5230,19 @@ class TestPublishReportsFailureThroughItsExitCode(unittest.TestCase):
 
 
 class TestPublishIntegration(unittest.TestCase):
-    """Verify OTA messaging in publish dry-run mode."""
+    """`raisin publish` archives and says the upload is not its job.
+
+    The OTA server accepts a manifest only with sourceType 'jenkins', so
+    uploading belongs to ota-upload.groovy. This command stops at the archive,
+    and says so rather than leaving the reader to assume it published.
+    """
 
     @patch("commands.publish.setup")
     @patch("commands.publish.guard_require_version_bump_for_src_packages")
     @patch("commands.publish.subprocess.run")
     @patch("commands.publish.shutil.make_archive")
     @patch("commands.publish.shutil.copy")
-    def test_dry_run_prints_ota_message(
+    def test_it_archives_and_says_upload_is_not_its_job(
         self,
         _copy,
         _archive,
@@ -5260,11 +5264,12 @@ class TestPublishIntegration(unittest.TestCase):
             # Capture printed output
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                # OTA is the only destination, so the dry-run names it
-                publish("mypkg", "release", dry_run=True)
+                publish("mypkg", "release")
 
             output = buf.getvalue()
-            self.assertIn("OTA", output)
+            self.assertIn("Archived", output)
+            self.assertIn("ota-upload.groovy", output)
+            self.assertNotIn("Uploading to OTA Server", output)
 
 
 class TestArchiveIdentityIsThisMachines(unittest.TestCase):
