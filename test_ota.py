@@ -5134,6 +5134,67 @@ class TestInstallIntegration(unittest.TestCase):
 # ============================================================================
 
 
+class TestPublishReportsFailureThroughItsExitCode(unittest.TestCase):
+    """`raisin publish` returned 0 whatever happened.
+
+    That was survivable while the pipeline treated the command as one of several
+    things it did. It is not now: Create Releases runs `raisin publish --dry-run`
+    and nothing else produces the archives that Upload to OTA consumes, so a
+    publish that quietly produced nothing would leave the upload stage running
+    against whatever was already in release/ -- and the build green.
+    """
+
+    def _invoke(self, *args):
+        from commands.publish import publish_command
+
+        return CliRunner().invoke(publish_command, list(args))
+
+    def test_a_missing_target_exits_non_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            with patch("commands.publish.guard_require_version_bump_for_src_packages"):
+                result = self._invoke("nosuchpkg", "--type", "release", "--dry-run")
+        self.assertEqual(result.exit_code, 1, result.output)
+
+    @patch("commands.publish._create_archive", return_value=Path("/tmp/a.zip"))
+    @patch("commands.publish._build_package", return_value=True)
+    @patch("commands.publish.guard_require_version_bump_for_src_packages")
+    def test_a_failed_build_exits_non_zero(self, _guard, mock_build, _archive):
+        mock_build.return_value = False
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            target = Path(tmpdir) / "src" / "mypkg"
+            target.mkdir(parents=True)
+            (target / "release.yaml").write_text("version: 1.0.0\n")
+            result = self._invoke("mypkg", "--type", "release", "--dry-run")
+        self.assertEqual(result.exit_code, 1, result.output)
+
+    @patch("commands.publish._upload_to_ota", return_value=False)
+    @patch("commands.publish._create_archive", return_value=Path("/tmp/a.zip"))
+    @patch("commands.publish._build_package", return_value=True)
+    @patch("commands.publish.guard_require_version_bump_for_src_packages")
+    def test_a_failed_upload_exits_non_zero(self, _guard, _build, _archive, _upload):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            target = Path(tmpdir) / "src" / "mypkg"
+            target.mkdir(parents=True)
+            (target / "release.yaml").write_text("version: 1.0.0\n")
+            result = self._invoke("mypkg", "--type", "release")
+        self.assertEqual(result.exit_code, 1, result.output)
+
+    @patch("commands.publish._create_archive", return_value=Path("/tmp/a.zip"))
+    @patch("commands.publish._build_package", return_value=True)
+    @patch("commands.publish.guard_require_version_bump_for_src_packages")
+    def test_a_successful_dry_run_still_exits_zero(self, _guard, _build, _archive):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            target = Path(tmpdir) / "src" / "mypkg"
+            target.mkdir(parents=True)
+            (target / "release.yaml").write_text("version: 1.0.0\n")
+            result = self._invoke("mypkg", "--type", "release", "--dry-run")
+        self.assertEqual(result.exit_code, 0, result.output)
+
+
 class TestPublishIntegration(unittest.TestCase):
     """Verify OTA messaging in publish dry-run mode."""
 

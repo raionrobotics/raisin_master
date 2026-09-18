@@ -236,7 +236,7 @@ def _install(
             # not satisfy that request. Don't quietly install something else.
             print("")
             print("=" * 72)
-            print("❌ Requested archive not found on OTA — refusing to fall back.")
+            print("❌ Requested archive not found on OTA — nothing was installed.")
             print(
                 "   archive_name    : "
                 f"{archive_name if archive_name else '(default)'}"
@@ -248,8 +248,6 @@ def _install(
             print(
                 "   platform        : "
                 f"{os_type}-{os_version}-{architecture} ({build_type})"
-            )
-            print(
             )
             print("=" * 72)
             return False

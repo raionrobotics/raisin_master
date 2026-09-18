@@ -1348,7 +1348,10 @@ def authenticate() -> Optional[str]:
     key_path = get_ssh_key_path()
 
     if not key_path.exists():
-        print(f"⚠️ SSH key not found at {key_path}. Skipping OTA.")
+        print(
+            f"⚠️ SSH key not found at {key_path} — continuing without OTA "
+            "authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
 
@@ -1384,19 +1387,31 @@ def authenticate() -> Optional[str]:
         return _cached_token
 
     except FileNotFoundError:
-        print("⚠️ ssh-keygen not found. Skipping OTA authentication.")
+        print(
+            "⚠️ ssh-keygen not found — continuing without OTA authentication; "
+            "only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
     except subprocess.CalledProcessError as e:
-        print(f"⚠️ SSH key operation failed: {e.stderr.strip()}. Skipping OTA.")
+        print(
+            f"⚠️ SSH key operation failed: {e.stderr.strip()} — continuing without "
+            "OTA authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
     except requests.RequestException as e:
-        print(f"⚠️ OTA server unreachable: {e}. Skipping OTA.")
+        print(
+            f"⚠️ OTA server unreachable while authenticating: {e} — continuing "
+            "without OTA authentication."
+        )
         _auth_failed = True
         return None
     except (KeyError, ValueError) as e:
-        print(f"⚠️ Unexpected OTA auth response: {e}. Skipping OTA.")
+        print(
+            f"⚠️ Unexpected OTA auth response: {e} — continuing without OTA "
+            "authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
 

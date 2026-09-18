@@ -313,13 +313,19 @@ def _upload_to_ota(
 # ============================================================================
 
 
-def publish(target: str, build_type: str, dry_run: bool = False):
+def publish(target: str, build_type: str, dry_run: bool = False) -> bool:
     """Build, archive, and upload a release to the OTA server.
 
     Args:
         target: Target package name
         build_type: Build type (debug/release)
         dry_run: If True, build and archive but do not upload
+
+    Returns:
+        True when the archive was produced and, unless this is a dry run,
+        uploaded. The caller turns a False into a non-zero exit: CI reads that
+        exit code, and `raisin publish` is now the only thing that produces the
+        archives the OTA upload stage consumes.
     """
     guard_require_version_bump_for_src_packages()
 
@@ -328,7 +334,7 @@ def publish(target: str, build_type: str, dry_run: bool = False):
     # Validate target
     details = _validate_target(paths["target_dir"])
     if not details:
-        return
+        return False
 
     print(f"✅ Found release file for '{target}'.")
     version = details.get("version", "0.0.0")
@@ -336,7 +342,7 @@ def publish(target: str, build_type: str, dry_run: bool = False):
     try:
         # Build
         if not _build_package(target, build_type, paths):
-            return
+            return False
 
         # Archive
         archive_path = _create_archive(target, version, build_type, paths)
@@ -348,15 +354,15 @@ def publish(target: str, build_type: str, dry_run: bool = False):
             print(f"[DRY-RUN] Would upload '{archive_path}' to the OTA server")
             print(f"[DRY-RUN] Tag: v{version}")
             print("[DRY-RUN] Build and archive completed successfully.")
-            return
+            return True
 
         # Upload
-        _upload_to_ota(archive_path, target, version, build_type)
+        return _upload_to_ota(archive_path, target, version, build_type)
 
     except FileNotFoundError as e:
         print(
             f"❌ Command not found: '{e.filename}'. "
-            "Is the required tool (cmake, ninja, zip, gh) installed and in your PATH?"
+            "Is the required tool (cmake, ninja, zip) installed and in your PATH?"
         )
         sys.exit(1)
     except subprocess.CalledProcessError as e:
@@ -403,5 +409,13 @@ def publish_command(target, build_type, dry_run):
         ["release", "debug"] if build_type.lower() == "both" else [build_type.lower()]
     )
     click.echo(f"📦 Publishing {target} ({', '.join(build_types)} builds)...")
+    # Run every build type so the operator sees the full picture, then report a
+    # failure in any of them. A zero exit from a publish that produced nothing
+    # would let the pipeline's upload stage run against whatever happened to be
+    # in release/ already.
+    succeeded = True
     for bt in build_types:
-        publish(target, bt, dry_run)
+        if not publish(target, bt, dry_run):
+            succeeded = False
+    if not succeeded:
+        raise click.exceptions.Exit(code=1)
