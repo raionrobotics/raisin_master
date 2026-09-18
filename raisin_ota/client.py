@@ -1134,7 +1134,7 @@ def archive_is_pinned(
     """Whether this install targets one deliberately chosen archive.
 
     A pin is a decision someone made about this machine, so nothing may quietly
-    substitute another archive, another tag, or GitHub releases for it. It can
+    substitute another archive or another tag for it. It can
     come from the command line, or per-node from `RAISIN_ARCHIVE_NAME` — an
     operator who exports that on a robot has pinned that robot.
 
@@ -1348,7 +1348,10 @@ def authenticate() -> Optional[str]:
     key_path = get_ssh_key_path()
 
     if not key_path.exists():
-        print(f"⚠️ SSH key not found at {key_path}. Skipping OTA.")
+        print(
+            f"⚠️ SSH key not found at {key_path} — continuing without OTA "
+            "authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
 
@@ -1384,19 +1387,31 @@ def authenticate() -> Optional[str]:
         return _cached_token
 
     except FileNotFoundError:
-        print("⚠️ ssh-keygen not found. Skipping OTA authentication.")
+        print(
+            "⚠️ ssh-keygen not found — continuing without OTA authentication; "
+            "only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
     except subprocess.CalledProcessError as e:
-        print(f"⚠️ SSH key operation failed: {e.stderr.strip()}. Skipping OTA.")
+        print(
+            f"⚠️ SSH key operation failed: {e.stderr.strip()} — continuing without "
+            "OTA authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
     except requests.RequestException as e:
-        print(f"⚠️ OTA server unreachable: {e}. Skipping OTA.")
+        print(
+            f"⚠️ OTA server unreachable while authenticating: {e} — continuing "
+            "without OTA authentication."
+        )
         _auth_failed = True
         return None
     except (KeyError, ValueError) as e:
-        print(f"⚠️ Unexpected OTA auth response: {e}. Skipping OTA.")
+        print(
+            f"⚠️ Unexpected OTA auth response: {e} — continuing without OTA "
+            "authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
 
@@ -1786,17 +1801,24 @@ def _fetch_archive_with_stable_fallback(
     platform_str: str,
     tag: str,
 ):
-    """Resolve ``tag`` against OTA, falling back to 'stable' before giving up.
+    """Resolve ``tag`` against OTA, then 'stable', then the newest archive.
 
     Resolution order:
       1. The requested ``tag`` (e.g. 'latest', 'beta', etc.).
       2. 'stable' — skipped if ``tag`` is already 'stable'.
-      3. None  — callers should then fall back to GitHub releases.
+      3. The newest archive for the platform, by publish time.
+      4. None  — no archive at all; the caller reports it.
 
     This keeps tagged installs resilient: a devel user whose 'latest' tag
     hasn't been promoted yet still lands on the OTA-blessed 'stable'
-    archive rather than skipping straight to GitHub, while explicit
-    `--tag X` requests still try X first.
+    archive, while explicit `--tag X` requests still try X first.
+
+    Step 3 exists because tags are promoted by hand. A package published to an
+    archive nobody has tagged yet is still the thing to install -- there is
+    nowhere else to get it now that GitHub releases are gone -- so an untagged
+    archive is better than no install. It says so rather than sliding down
+    quietly: which archive was chosen, and why, is exactly what an operator
+    needs when the version turns out not to be the one they expected.
     """
     manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
     if manifest is not None:
@@ -1816,6 +1838,19 @@ def _fetch_archive_with_stable_fallback(
                 f"'{archive_name}' on {platform_str}."
             )
             return manifest
+
+    print(
+        f"↪️  No '{_STABLE_FALLBACK_TAG}' archive either — falling back to the "
+        f"newest archive published for {platform_str}..."
+    )
+    manifest = _fetch_archive_manifest(archive_name, platform_str, None)
+    if manifest is not None:
+        _, _, actual_version = manifest
+        print(
+            f"  ✓ Using untagged archive '{archive_name}' "
+            f"{actual_version or '(version unknown)'} on {platform_str}."
+        )
+        return manifest
 
     return None
 
@@ -3290,11 +3325,12 @@ def download_package(
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
         if manifest is None:
-            # Neither the requested tag nor 'stable' resolved on OTA.
-            # Return None so install.py falls back to GitHub releases.
+            # Neither the requested tag nor 'stable' resolved on OTA. There is
+            # nowhere else to look, so say what was missing rather than
+            # promising another attempt.
             print(
-                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' or 'stable' — falling back to GitHub releases."
+                f"❌ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}', with 'stable', or untagged."
             )
             return None
     else:
@@ -3621,15 +3657,13 @@ def download_all_from_archive(
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
         if manifest is None:
-            # Neither the requested tag nor 'stable' resolved on OTA.
-            # Return empty so install.py falls back to GitHub releases
-            # for each repo declared in configuration_setting.yaml.
+            # Neither the requested tag nor 'stable' resolved on OTA. There is
+            # nowhere else to look; the caller reports the empty result.
             if unusable_desired_state:
                 _give_up_on_the_assignment(unusable_desired_state)
             print(
-                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' or 'stable' — falling back to GitHub "
-                f"releases for each package."
+                f"❌ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}', with 'stable', or untagged."
             )
             return {}
     else:

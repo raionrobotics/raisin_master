@@ -64,7 +64,7 @@ Create your local configuration file by copying the provided example.
 cp configuration_setting_example.yaml configuration_setting.yaml
 ```
 Next, open **`configuration_setting.yaml`** and edit the following fields:
-* **`gh_tokens`**: (Optional) GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`). Only needed for GitHub fallback or publishing to GitHub.
+* **`gh_tokens`**: (Optional) GitHub Personal Access Token for each organization (e.g., `"raionrobotics": "ghp_your_token"`). Used to authenticate git over HTTPS when cloning private repositories.
 * **`user_type`**: Set to `"user"` for stable releases or `"devel"` for development builds.
 * **`robot.api_key`**: (Optional) Robot API key for robot-authenticated OTA downloads. Prefer `RAISIN_ROBOT_API_KEY` for deployments.
 * **`robot.node`**: (Required when using a robot API key) Robot-local node key registered on the OTA server, e.g. `"jetson"` or `"primary"`.
@@ -73,7 +73,7 @@ Next, open **`configuration_setting.yaml`** and edit the following fields:
 
 ### 3. OTA Server Configuration
 
-RAISIN downloads packages from the OTA (Over-The-Air) server by default, with GitHub releases as fallback. The default endpoint is `https://raisin-ota-api.raionrobotics.com/api`.
+RAISIN downloads packages from the OTA (Over-The-Air) server. The default endpoint is `https://raisin-ota-api.raionrobotics.com/api`.
 
 ```bash
 # (Optional) Override the default OTA endpoint
@@ -130,7 +130,7 @@ git checkout <branch-name>
 
 ### 5. Install Release Packages
 
-Run the `install` command to download packages from the OTA server (primary) or GitHub releases (fallback).
+Run the `install` command to download packages from the OTA server.
 
 ```bash
 # Install from the tagged archive (default tag is derived from
@@ -174,25 +174,21 @@ raisin install --archive-name team-robot
 raisin install --at 2024-01-15
 raisin install --at 2024-01-15T10:00:00Z
 
-# Skip OTA and download directly from GitHub (for debugging)
-raisin install --from-github
-
 # Combine options
 raisin install raisin_network --type debug --archive-name team-robot --archive-version v2024.01
 ```
 
-> **Note:** Packages are downloaded from the OTA server by default. Use `--archive-name` to override `RAISIN_ARCHIVE_NAME` for a single install command. For debug installs, `-debug` is added only when the provided archive name does not already end with `-debug`. Use `--from-github` to bypass OTA and download directly from GitHub releases (useful for debugging or when OTA is unavailable).
+> **Note:** Packages are downloaded from the OTA server by default. Use `--archive-name` to override `RAISIN_ARCHIVE_NAME` for a single install command. For debug installs, `-debug` is added only when the provided archive name does not already end with `-debug`.
 >
 > **Tag selection:** By default `raisin install` resolves the archive through a tag derived from `configuration_setting.yaml`:
 > - `user_type: devel` → defaults to **`latest`** (newest archive available, including pre-releases)
 > - anything else (e.g. `user_type: user`) → defaults to **`stable`** (the promoted/blessed archive)
 >
-> **Fallback chain** when the requested tag is missing on OTA (or the server is unreachable):
+> **Fallback** when the requested tag is missing on OTA (or the server is unreachable):
 > 1. Try the requested tag (e.g. `latest`).
-> 2. Fall back to **`stable`** on OTA — so a devel user lands on the blessed archive when `latest` hasn't been promoted yet, instead of skipping straight to GitHub.
-> 3. Fall back to GitHub releases for each configured repository.
+> 2. Fall back to **`stable`** on OTA — so a devel user lands on the blessed archive when `latest` hasn't been promoted yet.
 >
-> Each step prints a clear warning so operators can spot misconfigured tags in logs. Pass `--tag <name>` to override (e.g. `beta`), or `--tag none` to skip the tag and use the legacy latest-by-time selection on OTA.
+> If neither resolves, the install stops and says so; OTA is the only source. Each step prints a clear warning so operators can spot misconfigured tags in logs. Pass `--tag <name>` to override (e.g. `beta`), or `--tag none` to skip the tag and use the legacy latest-by-time selection on OTA.
 
 ### 6. Install Package Dependencies
 
@@ -269,25 +265,19 @@ raisin build -t debug --tsan && raisin test debug --tsan --unit
 ### 10. Additional Commands
 
 #### Publish a Release
-Build, package, and upload a release to GitHub or OTA server:
+Build a package and archive it into `release/`:
 ```bash
-# Publish to GitHub (default)
+# Build and archive
 raisin publish raisin_network
 
-# Publish only release build
+# Release build only
 raisin publish raisin_network --type release
 
-# Publish only debug build
+# Debug build only
 raisin publish raisin_network --type debug
-
-# Publish to OTA server instead of GitHub
-raisin publish raisin_network --upload-ota
-
-# Dry run without uploading
-raisin publish raisin_network --dry-run
 ```
 
-> **Note:** Use `--upload-ota` to upload to the OTA server instead of GitHub. This requires `RAISIN_OTA_ENDPOINT` to be set.
+> **Note:** This command does not upload. The OTA server accepts a manifest only with `sourceType: jenkins` — the field records whether a build came from CI or from someone's machine, and those are different things to trust — so uploading is done by CI (`raisin_package_builder/ota-upload.groovy`) against the archives this produces. `--dry-run` is accepted and ignored; it has nothing left to suppress.
 
 #### Build an SDK
 
@@ -358,11 +348,6 @@ View available packages:
 # List local packages
 raisin index local
 
-# List all remote packages on GitHub
-raisin index release
-
-# List versions of a specific package
-raisin index release raisin_network
 ```
 
 #### Git Operations
@@ -421,7 +406,7 @@ raisin publish -h
 
 # 2. Configure your settings
 cp configuration_setting_example.yaml configuration_setting.yaml
-# Edit configuration_setting.yaml with your GitHub tokens (optional if using OTA)
+# Edit configuration_setting.yaml (gh_tokens are for cloning private repos over HTTPS)
 
 # 3. (Optional) Configure OTA server
 export RAISIN_OTA_ENDPOINT="https://your-ota-server.com/api"
