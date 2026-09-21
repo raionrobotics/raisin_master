@@ -159,10 +159,10 @@ def _install(
     is_successful = True
 
     # When an archive is pinned — on the command line, or per-node through
-    # RAISIN_ARCHIVE_NAME — we refuse to fall back silently to another archive,
-    # another tag. A miss must be a hard, loud failure: the
-    # alternative is what caused `--archive-name dso --archive-version 1.0.3`
-    # to quietly resolve to `raisin-dev 1.0.3` and install the wrong controllers.
+    # RAISIN_ARCHIVE_NAME — we refuse to fall back silently to another archive
+    # or another tag. A miss must be a hard, loud failure: the alternative is
+    # what caused `--archive-name dso --archive-version 1.0.3` to quietly
+    # resolve to `raisin-dev 1.0.3` and install the wrong controllers.
     explicit_archive_pin = archive_is_pinned(archive_name, archive_version)
 
     if not install_queue:

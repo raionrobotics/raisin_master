@@ -3669,7 +3669,8 @@ class TestDownload(unittest.TestCase):
     def test_download_package_returns_none_when_tag_unresolvable(self, _by_tag):
         # Per-package install returns None when the tag can't be resolved
         # (and tag is 'stable' so no further fallback). install.py's
-        # per-target loop will then fall back to GitHub releases.
+        # per-target loop then reports the package as unavailable and fails
+        # the install; OTA is the only source.
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
             _sync_ota_context()
@@ -5219,9 +5220,10 @@ class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
     ):
         """Which is what the line it prints promises, and what it did before.
 
-        `{}` is how this tells `install.py` to try GitHub releases per package.
-        A refusal here is raised ahead of that return, so refusing for an
-        absence did not just mislabel the state — it removed the route.
+        `{}` is how this tells `install.py` that no archive resolved, which it
+        reports as a failed install. A refusal here is raised ahead of that
+        return, so refusing for an absence did not just mislabel the state —
+        it replaced a reported failure with a raised one.
         """
         mock_desired.return_value = (False, None, None, None)
 
@@ -5281,10 +5283,10 @@ class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
     def test_the_tag_route_giving_up_carries_the_reason_too(
         self, mock_desired, _mock_tag
     ):
-        """Otherwise it announces a fall back to GitHub releases per repo.
+        """Otherwise the tag route gives up without saying why.
 
-        Two stacked substitutions, and neither visible as a failure — which is
-        the shape this whole change is about.
+        The reason the assignment was unusable is the signal the fleet most
+        needs, and it is the one a quiet give-up drops.
         """
         mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
 

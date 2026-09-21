@@ -1134,9 +1134,9 @@ def archive_is_pinned(
     """Whether this install targets one deliberately chosen archive.
 
     A pin is a decision someone made about this machine, so nothing may quietly
-    substitute another archive or another tag for it. It can
-    come from the command line, or per-node from `RAISIN_ARCHIVE_NAME` — an
-    operator who exports that on a robot has pinned that robot.
+    substitute another archive or another tag for it. It can come from the
+    command line, or per-node from `RAISIN_ARCHIVE_NAME` — an operator who
+    exports that on a robot has pinned that robot.
 
     Both the core and `install_command` have to agree on what counts, which is
     why they ask here instead of each deciding for themselves.
@@ -1630,9 +1630,9 @@ def _fetch_archive_by_tag(
         if status == 404:
             return None
         if status == 401 and _retry:
-            # Cached token likely expired — clear and retry once, matching
-            # the pattern used by upload_package. Without this, an expired
-            # token would surface as a misleading "tag not found" error.
+            # Cached token likely expired — clear it, re-authenticate and try
+            # once more. Without this, an expired token would surface as a
+            # misleading "tag not found" error.
             _clear_cached_token()
             if authenticate():
                 print("🔄 Re-authenticated with OTA server, retrying tag lookup...")
