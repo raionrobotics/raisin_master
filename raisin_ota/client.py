@@ -1134,9 +1134,9 @@ def archive_is_pinned(
     """Whether this install targets one deliberately chosen archive.
 
     A pin is a decision someone made about this machine, so nothing may quietly
-    substitute another archive, another tag, or GitHub releases for it. It can
-    come from the command line, or per-node from `RAISIN_ARCHIVE_NAME` — an
-    operator who exports that on a robot has pinned that robot.
+    substitute another archive or another tag for it. It can come from the
+    command line, or per-node from `RAISIN_ARCHIVE_NAME` — an operator who
+    exports that on a robot has pinned that robot.
 
     Both the core and `install_command` have to agree on what counts, which is
     why they ask here instead of each deciding for themselves.
@@ -1348,7 +1348,10 @@ def authenticate() -> Optional[str]:
     key_path = get_ssh_key_path()
 
     if not key_path.exists():
-        print(f"⚠️ SSH key not found at {key_path}. Skipping OTA.")
+        print(
+            f"⚠️ SSH key not found at {key_path} — continuing without OTA "
+            "authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
 
@@ -1384,19 +1387,31 @@ def authenticate() -> Optional[str]:
         return _cached_token
 
     except FileNotFoundError:
-        print("⚠️ ssh-keygen not found. Skipping OTA authentication.")
+        print(
+            "⚠️ ssh-keygen not found — continuing without OTA authentication; "
+            "only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
     except subprocess.CalledProcessError as e:
-        print(f"⚠️ SSH key operation failed: {e.stderr.strip()}. Skipping OTA.")
+        print(
+            f"⚠️ SSH key operation failed: {e.stderr.strip()} — continuing without "
+            "OTA authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
     except requests.RequestException as e:
-        print(f"⚠️ OTA server unreachable: {e}. Skipping OTA.")
+        print(
+            f"⚠️ OTA server unreachable while authenticating: {e} — continuing "
+            "without OTA authentication."
+        )
         _auth_failed = True
         return None
     except (KeyError, ValueError) as e:
-        print(f"⚠️ Unexpected OTA auth response: {e}. Skipping OTA.")
+        print(
+            f"⚠️ Unexpected OTA auth response: {e} — continuing without OTA "
+            "authentication; only anonymously readable archives will be visible."
+        )
         _auth_failed = True
         return None
 
@@ -1432,153 +1447,6 @@ def _get_auth_context() -> Optional[tuple]:
     return (base, headers)
 
 
-# ============================================================================
-# Upload Functions (used by publish command)
-# ============================================================================
-
-
-def _compute_sha256(file_path: Path) -> str:
-    """SHA256 hex digest of file, read in 8KB chunks."""
-    h = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        while True:
-            chunk = f.read(8192)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def upload_package(
-    archive_path: Path,
-    package_name: str,
-    version: str,
-    build_type: str,
-    _retry: bool = True,
-) -> bool:
-    """Upload a package archive to the OTA server.
-
-    Steps:
-    1. Authenticate (SSH challenge-response)
-    2. Compute SHA256 of archive for deduplication
-    3. Check if blob already exists on server
-    4. Upload blob if needed
-    5. Ensure package record exists
-    6. Create manifest entry
-    7. Create version tag
-
-    Returns True on success, False on failure. Never raises.
-    """
-    ctx = _get_auth_context()
-    if not ctx:
-        return False
-    base, headers = ctx
-
-    try:
-        # 1. Compute SHA256
-        sha256 = _compute_sha256(archive_path)
-        platform_str = _ctx().platform
-
-        # 2. Check if blob already exists (deduplication)
-        resp = requests.get(
-            f"{base}/blobs/{sha256}/exists", headers=headers, timeout=10
-        )
-        resp.raise_for_status()
-        blob_exists = _unwrap_response(resp.json()).get("exists", False)
-
-        # 3. Upload blob if needed.
-        #
-        # The endpoint streams the body straight to storage and hashes it on the
-        # way through, so it takes the archive as the raw request body and reads
-        # the expected digest from `x-content-sha256`. A multipart form carrying
-        # the digest as a field is refused before anything is read, which is
-        # what publish had been sending.
-        if not blob_exists:
-            blob_headers = dict(headers)
-            blob_headers["x-content-sha256"] = sha256
-            blob_headers["Content-Type"] = "application/zip"
-            with open(archive_path, "rb") as f:
-                resp = requests.post(
-                    f"{base}/blobs",
-                    headers=blob_headers,
-                    data=f,
-                    timeout=120,
-                )
-                resp.raise_for_status()
-
-        # 4. Ensure package record exists
-        found = _search_packages(base, headers, package_name)
-        if found is None:
-            # Creating the record now would risk a duplicate for a package that
-            # may well exist — the lookup never got an answer either way.
-            print(f"⚠️ OTA upload aborted: could not look up '{package_name}'")
-            return False
-
-        existing = next(
-            (p for p in found if p.get("name") == package_name),
-            None,
-        )
-        if existing:
-            package_id = existing["id"]
-        else:
-            resp = requests.post(
-                f"{base}/packages",
-                headers=headers,
-                json={"name": package_name},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            package_id = _unwrap_response(resp.json())["id"]
-
-        # 5. Create manifest
-        resp = requests.post(
-            f"{base}/packages/{package_id}/manifests",
-            headers=headers,
-            json={
-                "version": version,
-                "platform": platform_str,
-                "buildType": build_type,
-                "blobHash": sha256,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-
-        # 6. Create version tag
-        resp = requests.post(
-            f"{base}/packages/{package_id}/tags",
-            headers=headers,
-            json={
-                "tag": f"v{version.lstrip('vV')}",
-                "version": version,
-                "platform": platform_str,
-                "buildType": build_type,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-
-        return True
-
-    except requests.HTTPError as e:
-        if _retry and e.response is not None and e.response.status_code == 401:
-            # Token may have expired — clear caches and retry auth once
-            _clear_cached_token()
-            token = authenticate()
-            if token:
-                print("🔄 Re-authenticated with OTA server, retrying upload...")
-                return upload_package(
-                    archive_path, package_name, version, build_type, _retry=False
-                )
-        print(f"⚠️ OTA upload failed: {e}")
-        return False
-    except requests.RequestException as e:
-        print(f"⚠️ OTA upload failed: {e}")
-        return False
-
-
-# ============================================================================
-# Download Functions (used by install command)
 # ============================================================================
 
 
@@ -1762,9 +1630,9 @@ def _fetch_archive_by_tag(
         if status == 404:
             return None
         if status == 401 and _retry:
-            # Cached token likely expired — clear and retry once, matching
-            # the pattern used by upload_package. Without this, an expired
-            # token would surface as a misleading "tag not found" error.
+            # Cached token likely expired — clear it, re-authenticate and try
+            # once more. Without this, an expired token would surface as a
+            # misleading "tag not found" error.
             _clear_cached_token()
             if authenticate():
                 print("🔄 Re-authenticated with OTA server, retrying tag lookup...")
@@ -1791,12 +1659,20 @@ def _fetch_archive_with_stable_fallback(
     Resolution order:
       1. The requested ``tag`` (e.g. 'latest', 'beta', etc.).
       2. 'stable' — skipped if ``tag`` is already 'stable'.
-      3. None  — callers should then fall back to GitHub releases.
+      3. None — no tagged archive resolved; the caller reports it.
 
     This keeps tagged installs resilient: a devel user whose 'latest' tag
-    hasn't been promoted yet still lands on the OTA-blessed 'stable'
-    archive rather than skipping straight to GitHub, while explicit
-    `--tag X` requests still try X first.
+    hasn't been promoted yet still lands on the OTA-blessed 'stable' archive,
+    while explicit `--tag X` requests still try X first.
+
+    It deliberately stops there rather than reaching for the newest untagged
+    archive. Taking the newest regardless of tags is already expressible, and
+    `--tag none` is how an operator asks for it. Doing it implicitly would
+    answer a different question than the one asked -- and the difference is the
+    promotion gate: a `user_type: user` machine asking for 'stable' would get
+    an unpromoted build, including the one a rollback in flight is moving away
+    from. A tag that resolves to nothing is an answer, not a problem to route
+    around.
     """
     manifest = _fetch_archive_by_tag(archive_name, platform_str, tag)
     if manifest is not None:
@@ -3290,11 +3166,12 @@ def download_package(
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
         if manifest is None:
-            # Neither the requested tag nor 'stable' resolved on OTA.
-            # Return None so install.py falls back to GitHub releases.
+            # Neither the requested tag nor 'stable' resolved on OTA. There is
+            # nowhere else to look, so say what was missing rather than
+            # promising another attempt.
             print(
-                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' or 'stable' — falling back to GitHub releases."
+                f"❌ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}' or 'stable'."
             )
             return None
     else:
@@ -3621,15 +3498,13 @@ def download_all_from_archive(
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
         if manifest is None:
-            # Neither the requested tag nor 'stable' resolved on OTA.
-            # Return empty so install.py falls back to GitHub releases
-            # for each repo declared in configuration_setting.yaml.
+            # Neither the requested tag nor 'stable' resolved on OTA. There is
+            # nowhere else to look; the caller reports the empty result.
             if unusable_desired_state:
                 _give_up_on_the_assignment(unusable_desired_state)
             print(
-                f"⚠️ No OTA archive found for '{archive_name}' on {platform_str} "
-                f"with tag '{tag}' or 'stable' — falling back to GitHub "
-                f"releases for each package."
+                f"❌ No OTA archive found for '{archive_name}' on {platform_str} "
+                f"with tag '{tag}' or 'stable'."
             )
             return {}
     else:

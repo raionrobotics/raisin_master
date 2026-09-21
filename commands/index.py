@@ -1,18 +1,14 @@
 """
 Index commands for RAISIN.
 
-Lists available packages and versions from GitHub releases or local installations.
+Lists locally built packages and validates their declared dependencies.
 """
 
-import re
-import os
 import yaml
-import requests
 import click
 import concurrent.futures
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Set
-from packaging.version import parse as parse_version
 from packaging.version import InvalidVersion
 from packaging.requirements import Requirement
 from packaging.version import Version
@@ -21,271 +17,6 @@ from packaging.specifiers import InvalidSpecifier
 # Import globals, constants, and utilities
 from commands import globals as g
 from commands.constants import Colors
-from commands.utils import load_configuration
-
-
-def index_release_command(package_name=None):
-    """
-    List available packages from GitHub releases.
-
-    If package_name is provided, lists all versions for that package.
-    Otherwise, lists all available packages with their latest versions.
-
-    Args:
-        package_name (str, optional): Specific package to list versions for
-    """
-    if package_name:
-        list_github_release_versions(package_name)
-    else:
-        list_all_available_packages()
-
-
-def list_all_available_packages():
-    """
-    Fetches and lists all available packages from GitHub repositories
-    with their latest versions that have valid assets for the current system.
-    """
-    # Access globals
-    os_type = g.os_type
-    os_version = g.os_version
-    architecture = g.architecture
-
-    # Get System Info for Asset Matching
-    try:
-        print(
-            f"ℹ️  Checking for assets compatible with: {os_type}-{os_version}-{architecture}"
-        )
-    except FileNotFoundError:
-        print("❌ Error: Could not determine OS information from /etc/os-release.")
-        return
-
-    # Load all repository configurations
-    all_repositories, tokens, user_type, _, _ = load_configuration()
-
-    if not all_repositories:
-        print("🤷 No packages found in configuration_setting.yaml.")
-        return
-
-    if not tokens:
-        print("❌ Error: No GitHub tokens found in configuration_setting.yaml")
-        return
-
-    session = requests.Session()
-
-    def get_versions_for_package(package_name):
-        """
-        Fetches and processes release versions with valid assets for a single package.
-        Colors prerelease vs release.
-        """
-        repo_info = all_repositories.get(package_name)
-        if not repo_info or "url" not in repo_info:
-            return package_name, ["(No repository URL found)"]
-
-        git_url = repo_info["url"]
-        match = re.search(r"git@github.com:(.*)/(.*)\.git", git_url)
-        if not match:
-            return package_name, ["(Could not parse repository URL)"]
-
-        owner, repo_name = match.groups()
-        token = tokens.get(owner, tokens.get("default"))
-        headers = {"Accept": "application/vnd.github.v3+json"}
-        if token:
-            headers["Authorization"] = f"token {token}"
-
-        try:
-            api_url = f"https://api.github.com/repos/{owner}/{repo_name}/releases"
-            response = session.get(api_url, headers=headers, timeout=10)
-            response.raise_for_status()
-            releases_list = response.json()
-
-            if not releases_list:
-                return package_name, ["(No releases found)"]
-
-            # Collect (version_obj, is_prerelease) for releases that have a matching asset
-            available_versions = []
-            for release in releases_list:
-                tag = release.get("tag_name")
-                if not tag:
-                    continue
-                is_prerelease = bool(release.get("prerelease"))
-                try:
-                    version_obj = parse_version(tag)
-
-                    # Construct the expected asset filenames
-                    expected_asset_release = f"{package_name}-{os_type}-{os_version}-{architecture}-release-{tag}.zip"
-                    expected_asset_debug = f"{package_name}-{os_type}-{os_version}-{architecture}-debug-{tag}.zip"
-
-                    # Check for a matching asset
-                    for asset in release.get("assets", []):
-                        if (
-                            asset["name"] == expected_asset_release
-                            or asset["name"] == expected_asset_debug
-                        ):
-                            available_versions.append((version_obj, is_prerelease))
-                            break
-                except InvalidVersion:
-                    continue
-
-            if not available_versions:
-                return package_name, ["(No compatible assets found)"]
-
-            # Sort newest-first by version, then colorize prerelease vs release
-            sorted_versions = sorted(
-                available_versions, key=lambda x: x[0], reverse=True
-            )
-
-            colored = []
-            for version_obj, is_prerelease in sorted_versions[:3]:
-                text = str(version_obj)  # normalized version string
-                if is_prerelease:
-                    colored.append(f"{Colors.YELLOW}{text}{Colors.RESET}")
-                else:
-                    colored.append(f"{Colors.GREEN}{text}{Colors.RESET}")
-
-            return package_name, colored
-
-        except requests.exceptions.RequestException:
-            return package_name, ["(API Error)"]
-
-    # Fetch versions concurrently for all packages
-    results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_package = {
-            executor.submit(get_versions_for_package, name): name
-            for name in all_repositories.keys()
-        }
-        for future in concurrent.futures.as_completed(future_to_package):
-            name, version_list = future.result()
-            results[name] = version_list
-
-    # Print the formatted results
-    print("\nAvailable packages and latest versions:")
-    for package_name in sorted(results.keys()):
-        versions_str = ", ".join(results[package_name])
-        print(f"  - {package_name}: {versions_str}")
-
-
-def list_github_release_versions(package_name):
-    """
-    Fetches and lists all available release versions of a package from its GitHub
-    repository that have a valid asset for the current system.
-
-    Args:
-        package_name (str): Name of the package to list versions for
-    """
-    print(f"🔍 Finding available versions with assets for '{package_name}'...")
-
-    # Access globals
-    os_type = g.os_type
-    os_version = g.os_version
-    architecture = g.architecture
-    script_directory = g.script_directory
-
-    script_dir_path = Path(script_directory)
-
-    # Get System Info for Asset Matching
-    try:
-        print(
-            f"ℹ️  Checking for assets compatible with: {os_type}-{os_version}-{architecture}"
-        )
-    except FileNotFoundError:
-        print("❌ Error: Could not determine OS information from /etc/os-release.")
-        return
-
-    # Load Repository and Secrets Configuration
-    all_repositories, tokens, user_type, _, _ = load_configuration()
-
-    if not all_repositories:
-        print("❌ Error: No repositories found in configuration_setting.yaml")
-        return
-    if not tokens:
-        print("❌ Error: No GitHub tokens found in configuration_setting.yaml")
-        return
-
-    # Find the repository URL for the package
-    repo_info = all_repositories.get(package_name)
-    if not repo_info or "url" not in repo_info:
-        print(
-            f"❌ Error: No repository URL found for '{package_name}' in configuration_setting.yaml."
-        )
-        return
-
-    # Parse Owner/Repo from URL
-    git_url = repo_info["url"]
-    match = re.search(r"git@github.com:(.*)/(.*)\.git", git_url)
-    if not match:
-        print(f"❌ Error: Could not parse GitHub owner/repo from URL '{git_url}'.")
-        return
-
-    owner, repo_name = match.groups()
-
-    # Query the GitHub API
-    session = requests.Session()
-    token = tokens.get(owner, tokens.get("default"))
-    if token:
-        session.headers.update(
-            {
-                "Authorization": f"token {token}",
-                "Accept": "application/vnd.github.v3+json",
-            }
-        )
-
-    try:
-        api_url = f"https://api.github.com/repos/{owner}/{repo_name}/releases"
-        response = session.get(api_url)
-        response.raise_for_status()
-        releases_list = response.json()
-
-        if not releases_list:
-            print(f"🤷 No releases found for repository '{owner}/{repo_name}'.")
-            return
-
-        # Parse, Match Assets, Sort, and Display Versions
-        available_versions = []
-        for release in releases_list:
-            tag = release.get("tag_name")
-            if not tag or release.get("prerelease"):
-                continue
-
-            try:
-                version_obj = parse_version(tag)
-                # Construct the expected asset filenames for release and debug builds
-                expected_asset_release = f"{package_name}-{os_type}-{os_version}-{architecture}-release-{tag}.zip"
-                expected_asset_debug = f"{package_name}-{os_type}-{os_version}-{architecture}-debug-{tag}.zip"
-
-                # Check if any asset in this release matches our expected filename
-                for asset in release.get("assets", []):
-                    if (
-                        asset["name"] == expected_asset_release
-                        or asset["name"] == expected_asset_debug
-                    ):
-                        available_versions.append(version_obj)
-                        break  # Found a valid asset, no need to check others in this release
-            except InvalidVersion:
-                continue
-
-        if not available_versions:
-            print(f"🤷 No releases with compatible assets found for '{package_name}'.")
-            return
-
-        # Sort from newest to oldest
-        sorted_versions = sorted(available_versions, reverse=True)
-
-        print(f"Available versions for {package_name} ({owner}/{repo_name}):")
-        for v in sorted_versions:
-            print(f"  {v}")
-
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            print(
-                f"❌ Error: Repository '{owner}/{repo_name}' not found on GitHub or you lack permissions."
-            )
-        else:
-            print(f"❌ HTTP Error fetching release data: {e}")
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Network error: {e}")
-    except Exception as e:
-        print(f"❌ An unexpected error occurred: {e}")
 
 
 def index_local_command():
@@ -647,32 +378,13 @@ def print_aligned_results(results: List[Tuple[str, str, str, str]]):
 @click.group()
 def index_group():
     """
-    List available packages (local or remote).
+    List locally built packages.
 
     \b
     Examples:
         raisin index local                   # List local packages
-        raisin index release                 # List all remote packages
-        raisin index release raisin_network  # List versions of a package
     """
     pass
-
-
-@index_group.command("release")
-@click.argument("package", required=False)
-def index_release_cli(package):
-    """
-    List packages available on GitHub releases.
-
-    \b
-    Examples:
-        raisin index release                 # List all packages
-        raisin index release raisin_network  # Show versions of package
-    """
-    if package:
-        index_release_command(package)
-    else:
-        index_release_command()
 
 
 @index_group.command("local")
