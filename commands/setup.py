@@ -23,6 +23,7 @@ from typing import List, Dict, Set, Optional
 
 from commands.repo_dependency_check import guard_src_repo_release_yaml_dependencies
 from commands.sdk_target_config import TargetConfig, TargetConfigError
+from commands.git_commands import find_repos_with_lfs_pointers
 
 # Import globals, constants, and utilities
 from commands import globals as g
@@ -2230,6 +2231,41 @@ def generate_vcpkg_json():
         print(f"An unexpected error occurred: {e}")
 
 
+def _print_lfs_repo_lines(affected, unreadable):
+    for repo_name, pointers in affected:
+        preview = ", ".join(pointers[:3])
+        if len(pointers) > 3:
+            preview += ", ..."
+        print(f"  - {repo_name}: {len(pointers)} file(s) [{preview}]")
+    for repo_name, reason in unreadable:
+        print(f"  - {repo_name}: could not be scanned ({reason})")
+
+
+def guard_src_repo_lfs_assets():
+    """Stop before anything is wiped when a source repo still holds LFS pointers.
+
+    Every later stage succeeds on a pointer stub -- configure, build and install
+    all copy the 130-byte text file without complaint -- so the first sign of
+    trouble is a parser failing at runtime, hours later and far from the cause.
+
+    The scan covers every source repository rather than the build targets alone,
+    because resource, config and scripts directories are copied into the install
+    tree for every package found under src/, whatever is being built.
+    """
+    affected, unreadable = find_repos_with_lfs_pointers(
+        g.script_directory, get_repos_to_ignore()
+    )
+    if not affected and not unreadable:
+        return
+
+    print("\u274c Error: Git LFS assets are not downloaded; they are still pointer files.")
+    _print_lfs_repo_lines(affected, unreadable)
+    print("  git-lfs comes with 'sudo bash install_system_deps.sh'.")
+    print("  Once it is installed, run in each repository above:")
+    print("    git lfs install --local && git lfs fetch && git lfs checkout")
+    sys.exit(1)
+
+
 def setup(
     package_name="",
     build_type="",
@@ -2260,6 +2296,7 @@ def setup(
     cross = target.is_cross
 
     check_supported_architecture()  # build host, not the target
+    guard_src_repo_lfs_assets()
     if raisin_march is None:
         raisin_march = target.march or os.environ.get(
             "RAISIN_MARCH", get_default_portable_march()

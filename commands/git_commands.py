@@ -22,6 +22,10 @@ from commands import globals as g
 
 _LFS_ATTRIBUTE_RE = re.compile(r"(?:^|\s)filter\s*=\s*lfs(?:\s|$)")
 _LFS_POINTER_HEADER = b"version https://git-lfs.github.com/spec/v1"
+# A pointer stub is ~130 bytes; the cap keeps the scan off real assets.
+_LFS_POINTER_MAX_BYTES = 1024
+_LFS_POINTER_OID_RE = re.compile(rb"^oid [A-Za-z0-9._-]+:[0-9a-fA-F]{32,}$", re.MULTILINE)
+_LFS_POINTER_SIZE_RE = re.compile(rb"^size [0-9]+$", re.MULTILINE)
 
 
 def get_display_width(text):
@@ -264,6 +268,9 @@ def _get_local_changes(cwd):
 def _find_src_git_repos(base_directory=None):
     """
     Locate git repositories directly under the src/ directory.
+
+    A linked worktree or a submodule keeps .git as a file rather than a
+    directory, so both spellings count as a repository.
     """
     base_dir = Path(base_directory or os.getcwd())
     src_path = base_dir / "src"
@@ -272,12 +279,32 @@ def _find_src_git_repos(base_directory=None):
     return [
         str(repo_path)
         for repo_path in src_path.iterdir()
-        if repo_path.is_dir() and (repo_path / ".git").is_dir()
+        if repo_path.is_dir() and (repo_path / ".git").exists()
     ]
 
 
+def _list_tracked_files(repo_path, path_specs=None):
+    """Return tracked paths, or None when git could not answer.
+
+    The listing is NUL separated so that spaces and non-ASCII names survive; the
+    default output quotes them, and a quoted path no longer matches the file on
+    disk.
+    """
+    command = ["git", "ls-files", "-z"]
+    if path_specs:
+        command.extend(["--"] + list(path_specs))
+    output = _run_git_command(command, repo_path)
+    if output is None:
+        return None
+    return [entry for entry in output.split("\0") if entry]
+
+
 def _repo_uses_lfs(repo_path):
-    """Return True when a tracked .gitattributes file enables the LFS filter."""
+    """Return True when a tracked .gitattributes file enables the LFS filter.
+
+    Returns None when the question could not be answered, so that a caller which
+    must not miss an asset can scan anyway instead of reading a failure as a no.
+    """
     attribute_files = _run_git_command(
         [
             "git",
@@ -289,6 +316,8 @@ def _repo_uses_lfs(repo_path):
         ],
         repo_path,
     )
+    if attribute_files is None:
+        return None
     if not attribute_files:
         return False
 
@@ -299,7 +328,9 @@ def _repo_uses_lfs(repo_path):
             attribute_path.relative_to(repo_root)
             contents = attribute_path.read_text(encoding="utf-8", errors="ignore")
         except (OSError, ValueError):
-            continue
+            # An unreadable .gitattributes leaves the question open; saying no
+            # here would silently drop the whole repository from the scan.
+            return None
 
         for line in contents.splitlines():
             line = line.strip()
@@ -325,6 +356,35 @@ def _lfs_recovery_command(remote=None, ref=None):
     )
 
 
+def _is_lfs_pointer_file(repo_root, relative_path):
+    """Return True when the worktree file is still an LFS pointer stub.
+
+    A pointer is a short text file holding the spec URL, an oid and a size. All
+    three are required here so that a document quoting the URL is not mistaken
+    for an unmaterialized asset.
+    """
+    worktree_path = repo_root / relative_path
+    try:
+        if os.path.commonpath(
+            [str(repo_root), str(worktree_path.resolve())]
+        ) != str(repo_root):
+            return False
+        if worktree_path.is_symlink() or not worktree_path.is_file():
+            # Sparse checkouts may intentionally omit a tracked path.
+            return False
+        if worktree_path.stat().st_size > _LFS_POINTER_MAX_BYTES:
+            return False
+        with worktree_path.open("rb") as file_handle:
+            head = file_handle.read(_LFS_POINTER_MAX_BYTES)
+    except (OSError, ValueError):
+        return False
+    if not head.startswith(_LFS_POINTER_HEADER):
+        return False
+    return bool(
+        _LFS_POINTER_OID_RE.search(head) and _LFS_POINTER_SIZE_RE.search(head)
+    )
+
+
 def _remaining_lfs_pointers(repo_path):
     """Return tracked LFS paths whose worktree content is still an LFS pointer."""
     tracked_files = _run_git_command(
@@ -334,23 +394,59 @@ def _remaining_lfs_pointers(repo_path):
         return None
 
     repo_root = Path(repo_path).resolve()
-    pointers = []
-    for relative_path in tracked_files.splitlines():
-        if not relative_path:
+    return [
+        relative_path
+        for relative_path in tracked_files.splitlines()
+        if relative_path and _is_lfs_pointer_file(repo_root, relative_path)
+    ]
+
+
+def find_lfs_pointer_files(repo_path):
+    """Return tracked paths left as LFS pointers, without needing the git-lfs binary.
+
+    A pointer is a small text stub, so every later stage succeeds on it: CMake
+    configures, the build links, the install tree copies it. The failure only
+    shows up at runtime, inside whatever parser reads the asset. Detecting it
+    here does not depend on git-lfs being installed, which matters because the
+    machine that is missing the assets is usually the machine missing git-lfs.
+    """
+    tracked_files = _list_tracked_files(repo_path)
+    if tracked_files is None:
+        return None
+
+    repo_root = Path(repo_path).resolve()
+    return [
+        relative_path
+        for relative_path in tracked_files
+        if _is_lfs_pointer_file(repo_root, relative_path)
+    ]
+
+
+def find_repos_with_lfs_pointers(base_directory=None, repos_to_ignore=None):
+    """Return (affected, unreadable) for the src/ repositories.
+
+    affected is [(repo_name, pointer_paths)] for repositories whose assets are
+    still pointer stubs. unreadable is [(repo_name, reason)] for repositories the
+    scan could not answer for; a scan that cannot read a repository proves
+    nothing, so the caller must not read an empty affected list as a pass.
+    """
+    ignored = set(repos_to_ignore or [])
+    affected = []
+    unreadable = []
+    for repo_path in _find_src_git_repos(base_directory):
+        repo_name = Path(repo_path).name
+        if repo_name in ignored:
             continue
-        try:
-            worktree_path = (repo_root / relative_path).resolve()
-            worktree_path.relative_to(repo_root)
-            if not worktree_path.is_file():
-                # Sparse checkouts may intentionally omit a tracked path.
-                continue
-            with worktree_path.open("rb") as file_handle:
-                header = file_handle.read(len(_LFS_POINTER_HEADER))
-        except (OSError, ValueError):
+        # None means git could not tell; scan that repository rather than skip it.
+        if _repo_uses_lfs(repo_path) is False:
             continue
-        if header == _LFS_POINTER_HEADER:
-            pointers.append(relative_path)
-    return pointers
+        pointers = find_lfs_pointer_files(repo_path)
+        if pointers is None:
+            unreadable.append((repo_name, "git ls-files failed"))
+            continue
+        if pointers:
+            affected.append((repo_name, pointers))
+    return affected, unreadable
 
 
 def _get_lfs_worktree_status(repo_path):

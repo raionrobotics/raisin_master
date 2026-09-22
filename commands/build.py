@@ -291,7 +291,9 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     help="Build tests with ThreadSanitizer (implies --test). Run with 'raisin test --tsan'.",
 )
 @click.argument("targets", nargs=-1)
-def build_cli_command(build_types, install, python_executable, test, asan, tsan, targets):
+def build_cli_command(
+    build_types, install, python_executable, test, asan, tsan, targets
+):
     """
     Compile the project using CMake and Ninja.
 
@@ -328,7 +330,10 @@ def build_cli_command(build_types, install, python_executable, test, asan, tsan,
     sanitizer = "address" if asan else "thread" if tsan else "off"
     build_test_enabled = test or asan or tsan
 
-    setup(raisin_march=raisin_march, build_test_enabled=build_test_enabled)
+    setup(
+        raisin_march=raisin_march,
+        build_test_enabled=build_test_enabled,
+    )
 
     # Then build
     build_types = list(build_types) if build_types else []
