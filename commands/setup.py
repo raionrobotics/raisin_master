@@ -206,8 +206,13 @@ def _build_single_cmake_project(
     is_flag=True,
     help="Enable building unit tests for this setup run",
 )
+@click.option(
+    "--allow-missing-lfs",
+    is_flag=True,
+    help="Continue even when Git LFS assets are still pointer files (they will fail at runtime)",
+)
 @click.argument("targets", nargs=-1)
-def setup_command(test, targets):
+def setup_command(test, allow_missing_lfs, targets):
     """
     Generate interface files (.msg, .srv, .action) and configure CMake.
 
@@ -227,7 +232,7 @@ def setup_command(test, targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup(build_test_enabled=test)
+    setup(build_test_enabled=test, allow_missing_lfs=allow_missing_lfs)
 
 
 def process_build_targets(targets):
@@ -2215,27 +2220,44 @@ def guard_require_version_bump_for_src_packages():
         sys.exit(1)
 
 
-def guard_src_repo_lfs_assets():
-    """Stop before anything is wiped when a source repo still holds LFS pointers.
-
-    Every later stage succeeds on a pointer stub -- configure, build and install
-    all copy the 130-byte text file without complaint -- so the first sign of
-    trouble is a parser failing at runtime, hours later and far from the cause.
-    """
-    affected = find_repos_with_lfs_pointers(
-        g.script_directory, get_repos_to_ignore()
-    )
-    if not affected:
-        return
-
-    print("\u274c Error: Git LFS assets are not downloaded; they are still pointer files.")
+def _print_lfs_repo_lines(affected, unreadable):
     for repo_name, pointers in affected:
         preview = ", ".join(pointers[:3])
         if len(pointers) > 3:
             preview += ", ..."
         print(f"  - {repo_name}: {len(pointers)} file(s) [{preview}]")
+    for repo_name, reason in unreadable:
+        print(f"  - {repo_name}: could not be scanned ({reason})")
+
+
+def guard_src_repo_lfs_assets(allow_missing_lfs=False):
+    """Stop before anything is wiped when a source repo still holds LFS pointers.
+
+    Every later stage succeeds on a pointer stub -- configure, build and install
+    all copy the 130-byte text file without complaint -- so the first sign of
+    trouble is a parser failing at runtime, hours later and far from the cause.
+
+    The scan covers every source repository rather than the build targets alone,
+    because resource, config and scripts directories are copied into the install
+    tree for every package found under src/, whatever is being built.
+    """
+    affected, unreadable = find_repos_with_lfs_pointers(
+        g.script_directory, get_repos_to_ignore()
+    )
+    if not affected and not unreadable:
+        return
+
+    if allow_missing_lfs:
+        print("\u26a0\ufe0f  Continuing without the Git LFS assets, as requested:")
+        _print_lfs_repo_lines(affected, unreadable)
+        print("  Anything that reads those files will fail at runtime.")
+        return
+
+    print("\u274c Error: Git LFS assets are not downloaded; they are still pointer files.")
+    _print_lfs_repo_lines(affected, unreadable)
     print("  Install git-lfs, then run in each repository above:")
     print("    git lfs install --local && git lfs fetch && git lfs checkout")
+    print("  To go ahead without them, pass --allow-missing-lfs.")
     sys.exit(1)
 
 
@@ -2245,6 +2267,7 @@ def setup(
     build_dir="",
     build_test_enabled=None,
     raisin_march: Optional[str] = None,
+    allow_missing_lfs=False,
 ):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
@@ -2255,10 +2278,11 @@ def setup(
         build_dir: Build directory path
         build_test_enabled: Whether to build tests
         raisin_march: Optional CPU target override for pure-CMake dependencies
+        allow_missing_lfs: Continue even when Git LFS assets are still pointers
     """
 
     check_supported_architecture()
-    guard_src_repo_lfs_assets()
+    guard_src_repo_lfs_assets(allow_missing_lfs)
     if raisin_march is None:
         raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
 

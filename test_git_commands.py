@@ -5,14 +5,20 @@ from unittest.mock import patch
 from commands import git_commands
 
 
+LFS_POINTER = (
+    b"version https://git-lfs.github.com/spec/v1\n"
+    b"oid sha256:" + b"a" * 64 + b"\n"
+    b"size 3946984\n"
+)
+
+
 def _make_lfs_repo(tmp_path: Path, pointer=False) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".gitattributes").write_text(
         "*.bin filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8"
     )
-    content = b"version https://git-lfs.github.com/spec/v1\n" if pointer else b"payload"
-    (repo / "asset.bin").write_bytes(content)
+    (repo / "asset.bin").write_bytes(LFS_POINTER if pointer else b"payload")
     return repo
 
 
@@ -239,12 +245,17 @@ def test_status_reports_missing_git_lfs(tmp_path):
     assert status == "Git LFS unavailable"
 
 
+def _tracked(*paths):
+    """Mimic the NUL separated output of git ls-files -z."""
+    return "\0".join(paths)
+
+
 def test_pointer_scan_works_without_the_git_lfs_binary(tmp_path):
     repo = _make_lfs_repo(tmp_path, pointer=True)
 
     def run(command, cwd):
-        if command == ["git", "ls-files"]:
-            return ".gitattributes\nasset.bin"
+        if command == ["git", "ls-files", "-z"]:
+            return _tracked(".gitattributes", "asset.bin")
         return None  # every "git lfs ..." call fails: the binary is absent
 
     with patch.object(git_commands, "_run_git_command", side_effect=run):
@@ -257,8 +268,8 @@ def test_pointer_scan_passes_a_materialized_asset(tmp_path):
     repo = _make_lfs_repo(tmp_path)
 
     def run(command, cwd):
-        if command == ["git", "ls-files"]:
-            return ".gitattributes\nasset.bin"
+        if command == ["git", "ls-files", "-z"]:
+            return _tracked(".gitattributes", "asset.bin")
         return None
 
     with patch.object(git_commands, "_run_git_command", side_effect=run):
@@ -269,13 +280,11 @@ def test_pointer_scan_passes_a_materialized_asset(tmp_path):
 
 def test_pointer_scan_ignores_a_large_file_that_starts_like_a_pointer(tmp_path):
     repo = _make_lfs_repo(tmp_path)
-    (repo / "asset.bin").write_bytes(
-        b"version https://git-lfs.github.com/spec/v1\n" + b"x" * 2048
-    )
+    (repo / "asset.bin").write_bytes(LFS_POINTER + b"x" * 2048)
 
     def run(command, cwd):
-        if command == ["git", "ls-files"]:
-            return "asset.bin"
+        if command == ["git", "ls-files", "-z"]:
+            return _tracked("asset.bin")
         return None
 
     with patch.object(git_commands, "_run_git_command", side_effect=run):
@@ -284,28 +293,108 @@ def test_pointer_scan_ignores_a_large_file_that_starts_like_a_pointer(tmp_path):
     assert pointers == []
 
 
-def test_repo_scan_reports_and_skips_ignored_repositories(tmp_path):
-    src = tmp_path / "src"
-    for name in ("kept", "skipped"):
-        repo = src / name
-        (repo / ".git").mkdir(parents=True)
-        (repo / ".gitattributes").write_text(
-            "*.bin filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8"
-        )
-        (repo / "asset.bin").write_bytes(
-            b"version https://git-lfs.github.com/spec/v1\noid sha256:0\n"
-        )
+def test_pointer_scan_ignores_a_document_that_only_quotes_the_spec_url(tmp_path):
+    repo = _make_lfs_repo(tmp_path)
+    (repo / "asset.bin").write_bytes(
+        b"version https://git-lfs.github.com/spec/v1\n"
+        b"is the first line of every pointer file.\n"
+    )
 
     def run(command, cwd):
-        if command[:3] == ["git", "ls-files", "--cached"]:
-            return ".gitattributes"
-        if command == ["git", "ls-files"]:
-            return "asset.bin"
+        if command == ["git", "ls-files", "-z"]:
+            return _tracked("asset.bin")
         return None
 
     with patch.object(git_commands, "_run_git_command", side_effect=run):
-        affected = git_commands.find_repos_with_lfs_pointers(
+        pointers = git_commands.find_lfs_pointer_files(str(repo))
+
+    assert pointers == []
+
+
+def test_pointer_scan_reads_paths_with_spaces_and_non_ascii_names(tmp_path):
+    repo = _make_lfs_repo(tmp_path)
+    awkward = "resource/모형 파일.STL"
+    (repo / "resource").mkdir()
+    (repo / awkward).write_bytes(LFS_POINTER)
+
+    def run(command, cwd):
+        if command == ["git", "ls-files", "-z"]:
+            return _tracked("asset.bin", awkward)
+        return None
+
+    with patch.object(git_commands, "_run_git_command", side_effect=run):
+        pointers = git_commands.find_lfs_pointer_files(str(repo))
+
+    assert pointers == [awkward]
+
+
+def test_pointer_scan_reports_failure_instead_of_an_empty_result(tmp_path):
+    _make_lfs_repo(tmp_path, pointer=True)
+
+    with patch.object(git_commands, "_run_git_command", return_value=None):
+        pointers = git_commands.find_lfs_pointer_files(str(tmp_path / "repo"))
+
+    assert pointers is None
+
+
+def _make_src_repo(src: Path, name: str, git_as_file=False) -> Path:
+    repo = src / name
+    repo.mkdir(parents=True)
+    if git_as_file:
+        (repo / ".git").write_text("gitdir: ../../.git/worktrees/" + name, encoding="utf-8")
+    else:
+        (repo / ".git").mkdir()
+    (repo / ".gitattributes").write_text(
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8"
+    )
+    (repo / "asset.bin").write_bytes(LFS_POINTER)
+    return repo
+
+
+def test_repo_scan_reports_and_skips_ignored_repositories(tmp_path):
+    src = tmp_path / "src"
+    for name in ("kept", "skipped"):
+        _make_src_repo(src, name)
+
+    def run(command, cwd):
+        if command[:3] == ["git", "ls-files", "-z"] and len(command) > 3:
+            return _tracked(".gitattributes")
+        if command == ["git", "ls-files", "-z"]:
+            return _tracked("asset.bin")
+        return None
+
+    with patch.object(git_commands, "_run_git_command", side_effect=run):
+        affected, unreadable = git_commands.find_repos_with_lfs_pointers(
             str(tmp_path), repos_to_ignore=["skipped"]
         )
 
     assert affected == [("kept", ["asset.bin"])]
+    assert unreadable == []
+
+
+def test_repo_scan_sees_a_worktree_whose_git_is_a_file(tmp_path):
+    src = tmp_path / "src"
+    _make_src_repo(src, "worktree", git_as_file=True)
+
+    def run(command, cwd):
+        if command[:3] == ["git", "ls-files", "-z"] and len(command) > 3:
+            return _tracked(".gitattributes")
+        if command == ["git", "ls-files", "-z"]:
+            return _tracked("asset.bin")
+        return None
+
+    with patch.object(git_commands, "_run_git_command", side_effect=run):
+        affected, unreadable = git_commands.find_repos_with_lfs_pointers(str(tmp_path))
+
+    assert affected == [("worktree", ["asset.bin"])]
+
+
+def test_repo_scan_reports_a_repository_it_could_not_read(tmp_path):
+    src = tmp_path / "src"
+    _make_src_repo(src, "broken")
+
+    with patch.object(git_commands, "_run_git_command", return_value=None):
+        affected, unreadable = git_commands.find_repos_with_lfs_pointers(str(tmp_path))
+
+    assert affected == []
+    assert unreadable == [("broken", "git ls-files failed")]
