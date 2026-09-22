@@ -22,6 +22,8 @@ from commands import globals as g
 
 _LFS_ATTRIBUTE_RE = re.compile(r"(?:^|\s)filter\s*=\s*lfs(?:\s|$)")
 _LFS_POINTER_HEADER = b"version https://git-lfs.github.com/spec/v1"
+# A pointer stub is ~130 bytes; the cap keeps the scan off real assets.
+_LFS_POINTER_MAX_BYTES = 1024
 
 
 def get_display_width(text):
@@ -325,6 +327,23 @@ def _lfs_recovery_command(remote=None, ref=None):
     )
 
 
+def _is_lfs_pointer_file(repo_root, relative_path):
+    """Return True when the worktree file is still an LFS pointer stub."""
+    try:
+        worktree_path = (repo_root / relative_path).resolve()
+        worktree_path.relative_to(repo_root)
+        if not worktree_path.is_file():
+            # Sparse checkouts may intentionally omit a tracked path.
+            return False
+        if worktree_path.stat().st_size > _LFS_POINTER_MAX_BYTES:
+            return False
+        with worktree_path.open("rb") as file_handle:
+            header = file_handle.read(len(_LFS_POINTER_HEADER))
+    except (OSError, ValueError):
+        return False
+    return header == _LFS_POINTER_HEADER
+
+
 def _remaining_lfs_pointers(repo_path):
     """Return tracked LFS paths whose worktree content is still an LFS pointer."""
     tracked_files = _run_git_command(
@@ -334,23 +353,48 @@ def _remaining_lfs_pointers(repo_path):
         return None
 
     repo_root = Path(repo_path).resolve()
-    pointers = []
-    for relative_path in tracked_files.splitlines():
-        if not relative_path:
+    return [
+        relative_path
+        for relative_path in tracked_files.splitlines()
+        if relative_path and _is_lfs_pointer_file(repo_root, relative_path)
+    ]
+
+
+def find_lfs_pointer_files(repo_path):
+    """Return tracked paths left as LFS pointers, without needing the git-lfs binary.
+
+    A pointer is a small text stub, so every later stage succeeds on it: CMake
+    configures, the build links, the install tree copies it. The failure only
+    shows up at runtime, inside whatever parser reads the asset. Detecting it
+    here does not depend on git-lfs being installed, which matters because the
+    machine that is missing the assets is usually the machine missing git-lfs.
+    """
+    tracked_files = _run_git_command(["git", "ls-files"], repo_path)
+    if tracked_files is None:
+        return None
+
+    repo_root = Path(repo_path).resolve()
+    return [
+        relative_path
+        for relative_path in tracked_files.splitlines()
+        if relative_path and _is_lfs_pointer_file(repo_root, relative_path)
+    ]
+
+
+def find_repos_with_lfs_pointers(base_directory=None, repos_to_ignore=None):
+    """Return [(repo_name, pointer_paths)] for src/ repos with unmaterialized assets."""
+    ignored = set(repos_to_ignore or [])
+    affected = []
+    for repo_path in _find_src_git_repos(base_directory):
+        repo_name = Path(repo_path).name
+        if repo_name in ignored:
             continue
-        try:
-            worktree_path = (repo_root / relative_path).resolve()
-            worktree_path.relative_to(repo_root)
-            if not worktree_path.is_file():
-                # Sparse checkouts may intentionally omit a tracked path.
-                continue
-            with worktree_path.open("rb") as file_handle:
-                header = file_handle.read(len(_LFS_POINTER_HEADER))
-        except (OSError, ValueError):
+        if not _repo_uses_lfs(repo_path):
             continue
-        if header == _LFS_POINTER_HEADER:
-            pointers.append(relative_path)
-    return pointers
+        pointers = find_lfs_pointer_files(repo_path)
+        if pointers:
+            affected.append((repo_name, pointers))
+    return affected
 
 
 def _get_lfs_worktree_status(repo_path):

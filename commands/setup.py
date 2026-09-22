@@ -23,6 +23,7 @@ from collections import defaultdict
 from typing import List, Tuple, Dict, Any, Set, Optional
 
 from commands.repo_dependency_check import guard_src_repo_release_yaml_dependencies
+from commands.git_commands import find_repos_with_lfs_pointers
 
 # Import globals, constants, and utilities
 from commands import globals as g
@@ -2214,6 +2215,30 @@ def guard_require_version_bump_for_src_packages():
         sys.exit(1)
 
 
+def guard_src_repo_lfs_assets():
+    """Stop before anything is wiped when a source repo still holds LFS pointers.
+
+    Every later stage succeeds on a pointer stub -- configure, build and install
+    all copy the 130-byte text file without complaint -- so the first sign of
+    trouble is a parser failing at runtime, hours later and far from the cause.
+    """
+    affected = find_repos_with_lfs_pointers(
+        g.script_directory, get_repos_to_ignore()
+    )
+    if not affected:
+        return
+
+    print("\u274c Error: Git LFS assets are not downloaded; they are still pointer files.")
+    for repo_name, pointers in affected:
+        preview = ", ".join(pointers[:3])
+        if len(pointers) > 3:
+            preview += ", ..."
+        print(f"  - {repo_name}: {len(pointers)} file(s) [{preview}]")
+    print("  Install git-lfs, then run in each repository above:")
+    print("    git lfs install --local && git lfs fetch && git lfs checkout")
+    sys.exit(1)
+
+
 def setup(
     package_name="",
     build_type="",
@@ -2233,6 +2258,7 @@ def setup(
     """
 
     check_supported_architecture()
+    guard_src_repo_lfs_assets()
     if raisin_march is None:
         raisin_march = os.environ.get("RAISIN_MARCH", get_default_portable_march())
 

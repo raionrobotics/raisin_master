@@ -237,3 +237,75 @@ def test_status_reports_missing_git_lfs(tmp_path):
         status = git_commands._get_lfs_worktree_status(str(repo))
 
     assert status == "Git LFS unavailable"
+
+
+def test_pointer_scan_works_without_the_git_lfs_binary(tmp_path):
+    repo = _make_lfs_repo(tmp_path, pointer=True)
+
+    def run(command, cwd):
+        if command == ["git", "ls-files"]:
+            return ".gitattributes\nasset.bin"
+        return None  # every "git lfs ..." call fails: the binary is absent
+
+    with patch.object(git_commands, "_run_git_command", side_effect=run):
+        pointers = git_commands.find_lfs_pointer_files(str(repo))
+
+    assert pointers == ["asset.bin"]
+
+
+def test_pointer_scan_passes_a_materialized_asset(tmp_path):
+    repo = _make_lfs_repo(tmp_path)
+
+    def run(command, cwd):
+        if command == ["git", "ls-files"]:
+            return ".gitattributes\nasset.bin"
+        return None
+
+    with patch.object(git_commands, "_run_git_command", side_effect=run):
+        pointers = git_commands.find_lfs_pointer_files(str(repo))
+
+    assert pointers == []
+
+
+def test_pointer_scan_ignores_a_large_file_that_starts_like_a_pointer(tmp_path):
+    repo = _make_lfs_repo(tmp_path)
+    (repo / "asset.bin").write_bytes(
+        b"version https://git-lfs.github.com/spec/v1\n" + b"x" * 2048
+    )
+
+    def run(command, cwd):
+        if command == ["git", "ls-files"]:
+            return "asset.bin"
+        return None
+
+    with patch.object(git_commands, "_run_git_command", side_effect=run):
+        pointers = git_commands.find_lfs_pointer_files(str(repo))
+
+    assert pointers == []
+
+
+def test_repo_scan_reports_and_skips_ignored_repositories(tmp_path):
+    src = tmp_path / "src"
+    for name in ("kept", "skipped"):
+        repo = src / name
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".gitattributes").write_text(
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8"
+        )
+        (repo / "asset.bin").write_bytes(
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:0\n"
+        )
+
+    def run(command, cwd):
+        if command[:3] == ["git", "ls-files", "--cached"]:
+            return ".gitattributes"
+        if command == ["git", "ls-files"]:
+            return "asset.bin"
+        return None
+
+    with patch.object(git_commands, "_run_git_command", side_effect=run):
+        affected = git_commands.find_repos_with_lfs_pointers(
+            str(tmp_path), repos_to_ignore=["skipped"]
+        )
+
+    assert affected == [("kept", ["asset.bin"])]
