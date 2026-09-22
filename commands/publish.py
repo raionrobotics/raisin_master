@@ -23,7 +23,6 @@ from commands.utils import (
 )
 from commands.setup import (
     setup,
-    guard_require_version_bump_for_src_packages,
 )
 
 
@@ -299,8 +298,6 @@ def publish(target: str, build_type: str, dry_run: bool = False) -> bool:
         non-zero exit -- CI reads that exit code, and this is the only thing
         that produces the archives the OTA upload stage consumes.
     """
-    guard_require_version_bump_for_src_packages()
-
     paths = _get_paths(target, build_type)
 
     # Validate target

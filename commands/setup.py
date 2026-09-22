@@ -16,11 +16,10 @@ import hashlib
 import platform
 import subprocess
 import stat
-import requests
 import click
 from pathlib import Path
 from collections import defaultdict
-from typing import List, Tuple, Dict, Any, Set, Optional
+from typing import List, Dict, Set, Optional
 
 from commands.repo_dependency_check import guard_src_repo_release_yaml_dependencies
 from commands.sdk_target_config import TargetConfig, TargetConfigError
@@ -28,7 +27,7 @@ from commands.git_commands import find_repos_with_lfs_pointers
 
 # Import globals, constants, and utilities
 from commands import globals as g
-from commands.constants import Colors, TYPE_MAPPING, STRING_TYPES
+from commands.constants import TYPE_MAPPING, STRING_TYPES
 from commands.utils import (
     load_configuration,
     delete_directory,
@@ -1434,7 +1433,7 @@ def get_packages_to_ignore():
 
     # Get packages from configuration_setting.yaml
     try:
-        _, _, _, config_ignore, _ = load_configuration()
+        _, _, config_ignore, _ = load_configuration()
         ignore_packages.extend(config_ignore)
     except Exception:
         pass  # If configuration loading fails, continue with file-based approach
@@ -1468,7 +1467,7 @@ def get_repos_to_ignore():
         list: Names of src/ subdirectories to skip entirely.
     """
     try:
-        _, _, _, _, repos_to_ignore = load_configuration()
+        _, _, _, repos_to_ignore = load_configuration()
         return repos_to_ignore or []
     except Exception:
         return []
@@ -2232,167 +2231,6 @@ def generate_vcpkg_json():
         print(f"An unexpected error occurred: {e}")
 
 
-def guard_require_version_bump_for_src_packages():
-    """
-    Enforce:
-      1) local src version == latest non-prerelease release version, AND
-      2) (release commit != HEAD) OR (release commit == HEAD AND worktree dirty)
-    → Raise SystemExit with a clear error asking to bump the version.
-    """
-    script_dir = Path(g.script_directory)
-    src_dir = script_dir / "src"
-
-    repositories, tokens, user_type, _, repos_to_ignore = load_configuration()
-    repo_ignore_set = set(repos_to_ignore or [])
-
-    if not src_dir.is_dir():
-        return  # nothing to check
-
-    violations = []
-
-    for pkg_dir in sorted([p for p in src_dir.iterdir() if p.is_dir()]):
-        if repo_ignore_set and pkg_dir.name in repo_ignore_set:
-            continue
-        package_name = pkg_dir.name
-        release_yaml = pkg_dir / "release.yaml"
-        if not release_yaml.is_file():
-            continue
-
-        # Local version
-        try:
-            with open(release_yaml, "r", encoding="utf-8") as f:
-                info = yaml.safe_load(f) or {}
-            local_version = "v" + str(info.get("version", "")).strip()
-            if not local_version:
-                continue  # nothing to compare
-        except Exception:
-            continue
-
-        slug = _repo_slug_from_cfg(package_name, repositories)
-        if not slug:
-            continue
-        owner, repo = slug
-
-        token = tokens.get(owner) or tokens.get("github.com") or None
-        latest = None
-        try:
-            latest = _get_latest_nonprerelease_release(owner, repo, token)
-        except Exception:
-            # If we cannot query, do not block setup; just continue.
-            continue
-
-        if not latest:
-            continue
-
-        latest_tag = (latest.get("tag_name") or "").strip()
-
-        # Normalize tags in case tags are like "v1.2.3"
-        def norm(v):
-            return v[1:] if v.startswith("v") else v
-
-        if norm(latest_tag) != norm(local_version):
-            continue  # versions differ → OK, no guard trips
-
-        # Compare commits
-        latest_commit_in_body = _extract_commit_from_body(latest.get("body") or "")
-        local_commit = get_commit_hash(str(pkg_dir))
-        dirty = _is_worktree_dirty(str(pkg_dir))
-
-        if (latest_commit_in_body != local_commit) or (
-            latest_commit_in_body == local_commit and dirty
-        ):
-            # Build a helpful message for this package
-            details = []
-            details.append(f"version={local_version}")
-            details.append(f"latest_release_tag={latest_tag}")
-            details.append(f"release_commit={latest_commit_in_body or 'N/A'}")
-            details.append(f"local_commit={local_commit or 'N/A'}")
-            details.append(f"worktree_dirty={dirty}")
-            violations.append(
-                {
-                    "package": package_name,
-                    "version": local_version,
-                    "latest_tag": latest_tag,
-                    "release_commit": latest_commit_in_body or "N/A",
-                    "local_commit": local_commit or "N/A",
-                    "dirty": dirty,
-                }
-            )
-
-    if violations:
-        # --- pretty, colored output ---
-        BOLD = "\033[1m"
-        RESET = Colors.RESET
-
-        def short_sha(s: Optional[str]) -> str:
-            s = s or "N/A"
-            return s[:10]
-
-        title = f"{Colors.RED}{BOLD}❌ Version bump required before setup{RESET}"
-        subtitle = (
-            "Your local source version matches the latest stable release, "
-            "but commits differ or the working tree has changes.\n"
-            "Please bump the version in:  src/<package>/release.yaml"
-        )
-
-        headers = [
-            "PACKAGE",
-            "VERSION",
-            "LATEST TAG",
-            "RELEASE COMMIT",
-            "LOCAL COMMIT",
-            "DIRTY",
-        ]
-
-        def w(text):
-            return get_display_width(str(text))
-
-        # compute column widths (use 10-char commit display)
-        col_widths = [w(h) for h in headers]
-        for row in violations:
-            col_widths[0] = max(col_widths[0], w(row["package"]))
-            col_widths[1] = max(col_widths[1], w(row["version"]))
-            col_widths[2] = max(col_widths[2], w(row["latest_tag"]))
-            col_widths[3] = max(col_widths[3], w(short_sha(row["release_commit"])))
-            col_widths[4] = max(col_widths[4], w(short_sha(row["local_commit"])))
-            col_widths[5] = max(col_widths[5], w(str(row["dirty"])))
-
-        def fmt_row(vals):
-            cells = []
-            for i, v in enumerate(vals):
-                s = str(v)
-                pad = col_widths[i] - w(s)
-                cells.append(s + " " * pad)
-            return " | ".join(cells)
-
-        header_line = fmt_row(headers)
-        sep = "-" * get_display_width(header_line)
-
-        body_lines = []
-        for row in violations:
-            body_lines.append(
-                fmt_row(
-                    [
-                        row["package"],
-                        row["version"],
-                        row["latest_tag"],
-                        short_sha(row["release_commit"]),
-                        short_sha(row["local_commit"]),
-                        row["dirty"],
-                    ]
-                )
-            )
-
-        msg = (
-            f"\n{title}\n"
-            f"{Colors.YELLOW}{subtitle}{RESET}\n\n"
-            f"{header_line}\n{sep}\n" + "\n".join(body_lines) + "\n"
-        )
-
-        print(msg)
-        sys.exit(1)
-
-
 def _print_lfs_repo_lines(affected, unreadable):
     for repo_name, pointers in affected:
         preview = ", ".join(pointers[:3])
@@ -2618,70 +2456,3 @@ def setup(
         generate_vcpkg_json()
     click.secho("✅ Setup finished successfully.", fg="green")
     return project_directories
-
-
-def _repo_slug_from_cfg(
-    package_name: str, repositories: Dict[str, Any]
-) -> Optional[Tuple[str, str]]:
-    """Return (owner, repo) for a package from configuration_setting.yaml or None."""
-    info = repositories.get(package_name)
-    if not info or "url" not in info:
-        return None
-    m = re.search(r"git@github\.com:(.*?)/(.*?)\.git", info["url"])
-    if not m:
-        return None
-    return m.group(1), m.group(2)
-
-
-def _get_latest_nonprerelease_release(
-    owner: str, repo: str, token: Optional[str]
-) -> Optional[Dict[str, Any]]:
-    """
-    Return the latest *non-prerelease* GitHub release object (dict) or None.
-    """
-    session = requests.Session()
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        headers["Authorization"] = f"token {token}"
-    resp = session.get(
-        f"https://api.github.com/repos/{owner}/{repo}/releases",
-        headers=headers,
-        timeout=15,
-    )
-    resp.raise_for_status()
-    releases = resp.json()
-    # Sort by created_at desc and filter prerelease==False
-    stable = [r for r in releases if not r.get("prerelease")]
-    if not stable:
-        return None
-
-    # Prefer the greatest semver tag if tags are semantic, else fallback to created_at
-    def tag_key(r):
-        try:
-            return parse_version(r.get("tag_name") or "0.0.0")
-        except Exception:
-            return parse_version("0.0.0")
-
-    stable.sort(key=tag_key, reverse=True)
-    return stable[0]
-
-
-def _extract_commit_from_body(body: str) -> Optional[str]:
-    """
-    Pull a git commit hash (7-40 hex) from the release body; prefers 40-char SHA.
-    """
-    if not body:
-        return None
-    # Prefer full sha-1 first
-    m = re.search(r"\b[0-9a-f]{40}\b", body, re.IGNORECASE)
-    if m:
-        return m.group(0)
-    # else allow short SHAs (>=7 chars)
-    m = re.search(r"\b[0-9a-f]{7,40}\b", body, re.IGNORECASE)
-    return m.group(0) if m else None
-
-
-def _is_worktree_dirty(repo_path: str) -> bool:
-    """True if there are uncommitted changes in repo_path."""
-    out = _run_git_command(["git", "status", "--porcelain"], repo_path)
-    return bool(out)

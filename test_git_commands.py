@@ -398,3 +398,63 @@ def test_repo_scan_reports_a_repository_it_could_not_read(tmp_path):
 
     assert affected == []
     assert unreadable == [("broken", "git ls-files failed")]
+
+# ---------------------------------------------------------------------------
+# gh_tokens -> credential helper
+#
+# This is the only consumer of gh_tokens left in the codebase, and the only
+# `raisin git` behaviour that depends on load_configuration()'s tuple SHAPE
+# rather than on _run_git_command, which every other test in this file mocks
+# away. Without these two, transposing a field in _ensure_github_token() leaves
+# the whole suite green and hands git an ignore list instead of a token.
+# ---------------------------------------------------------------------------
+
+
+def _write_config(tmp_path):
+    """A config whose four fields are mutually distinguishable, so a wrong
+    index is a wrong VALUE and not merely an empty one."""
+    (tmp_path / "configuration_setting.yaml").write_text(
+        "user_type: devel\n"
+        "gh_tokens:\n"
+        "  raionrobotics: sentinel-token\n"
+        "packages_to_ignore:\n"
+        "  - sentinel-package\n"
+        "repos_to_ignore:\n"
+        "  - sentinel-repo\n",
+        encoding="utf-8",
+    )
+
+
+def test_ensure_github_token_returns_gh_tokens_not_a_neighbouring_field(
+    tmp_path, monkeypatch
+):
+    from commands import globals as g
+
+    _write_config(tmp_path)
+    monkeypatch.setattr(g, "script_directory", str(tmp_path))
+
+    assert git_commands._ensure_github_token() == {"raionrobotics": "sentinel-token"}
+
+
+def test_the_configured_token_reaches_the_credential_helper(tmp_path, monkeypatch):
+    from commands import globals as g
+
+    _write_config(tmp_path)
+    monkeypatch.setattr(g, "script_directory", str(tmp_path))
+
+    seen = {}
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _spy(command, **kwargs):
+        seen.update(kwargs.get("env") or {})
+        return _Result()
+
+    monkeypatch.setattr(git_commands.subprocess, "run", _spy)
+    git_commands._run_git_command(["git", "status", "--porcelain"], str(tmp_path))
+
+    assert seen["GIT_CONFIG_KEY_0"] == "credential.https://github.com.helper"
+    assert "sentinel-token" in seen["GIT_CONFIG_VALUE_0"]
