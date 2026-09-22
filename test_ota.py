@@ -393,6 +393,66 @@ class TestConfiguration(unittest.TestCase):
 
 
 # ============================================================================
+# 1a. Configuration loading: the repositories.yaml registry is gone
+# ============================================================================
+
+
+class TestLoadConfigurationIgnoresTheRetiredRegistry(unittest.TestCase):
+    """`repositories.yaml` named a `<package>_release` GitHub repository for
+    every package. Nothing reads it any more, and an upgraded checkout still
+    has the old file sitting on disk, so loading must not depend on it either
+    way."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._orig_script_directory = g.script_directory
+        g.script_directory = self._tmpdir.name
+        _sync_ota_context()
+        (Path(self._tmpdir.name) / "configuration_setting.yaml").write_text(
+            "user_type: devel\n"
+            "gh_tokens:\n"
+            "  raionrobotics: gh-token\n"
+            "packages_to_ignore:\n"
+            "  - skipme\n"
+            "repos_to_ignore:\n"
+            "  - skiprepo\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        g.script_directory = self._orig_script_directory
+        _sync_ota_context()
+        self._tmpdir.cleanup()
+
+    def _write_stale_registry(self):
+        (Path(self._tmpdir.name) / "repositories.yaml").write_text(
+            "raisin:\n  url: git@github.com:raionrobotics/raisin_release.git\n",
+            encoding="utf-8",
+        )
+
+    def test_returns_four_fields_and_no_repository_registry(self):
+        from commands.utils import load_configuration
+
+        result = load_configuration()
+
+        self.assertEqual(len(result), 4)
+        tokens, user_type, packages_to_ignore, repos_to_ignore = result
+        self.assertEqual(tokens, {"raionrobotics": "gh-token"})
+        self.assertEqual(user_type, "devel")
+        self.assertEqual(packages_to_ignore, ["skipme"])
+        self.assertEqual(repos_to_ignore, ["skiprepo"])
+
+    def test_a_leftover_registry_file_changes_nothing(self):
+        from commands.utils import load_configuration
+
+        without = load_configuration()
+        self._write_stale_registry()
+        with_stale_file = load_configuration()
+
+        self.assertEqual(with_stale_file, without)
+
+
+# ============================================================================
 # 1b. Token Persistence Tests
 # ============================================================================
 
@@ -1083,7 +1143,6 @@ class TestHaltStopsTheInstall(unittest.TestCase):
     @patch("commands.install.load_configuration")
     def test_a_halt_does_not_send_the_robot_to_github(self, mock_config):
         mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
             {"org": "ghtoken"},
             "devel",
             None,
@@ -1253,7 +1312,6 @@ class TestAnUnusableAssignmentReachesTheOperator(unittest.TestCase):
 
     def run_install(self, mock_config):
         mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
             {"org": "ghtoken"},
             "devel",
             None,
@@ -1387,7 +1445,6 @@ class TestUnusableTreeStopsTheInstall(unittest.TestCase):
     @patch("commands.install.load_configuration")
     def test_a_cross_device_tree_does_not_fall_back_to_github(self, mock_config):
         mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
             {"org": "ghtoken"},
             "devel",
             None,
@@ -1446,7 +1503,6 @@ class TestNodeLevelArchivePin(unittest.TestCase):
     @patch("commands.install.load_configuration")
     def test_an_env_pinned_archive_refuses_the_github_fallback(self, mock_config):
         mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
             {"org": "ghtoken"},
             "devel",
             None,
@@ -4679,7 +4735,7 @@ class TestOtaIsTheOnlySource(unittest.TestCase):
 
     @patch("commands.install.load_configuration")
     def test_a_package_missing_from_ota_fails_the_install(self, mock_config):
-        mock_config.return_value = ({}, {}, "devel", None, [])
+        mock_config.return_value = ({}, "devel", None, [])
         from commands.install import install_command
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4696,7 +4752,7 @@ class TestOtaIsTheOnlySource(unittest.TestCase):
 
     @patch("commands.install.load_configuration")
     def test_an_ota_error_fails_the_install(self, mock_config):
-        mock_config.return_value = ({}, {}, "devel", None, [])
+        mock_config.return_value = ({}, "devel", None, [])
         from commands.install import install_command
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4733,7 +4789,6 @@ class TestInstallIntegration(unittest.TestCase):
     def test_ota_attempted_when_configured(self, mock_config):
         """Install should try OTA before GitHub."""
         mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
             {"org": "ghtoken"},
             "devel",
             None,
@@ -4752,7 +4807,6 @@ class TestInstallIntegration(unittest.TestCase):
     @patch("commands.install.load_configuration")
     def test_install_command_passes_archive_name_to_ota(self, mock_config):
         mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
             {"org": "ghtoken"},
             "devel",
             None,
@@ -4830,7 +4884,7 @@ class TestInstallIntegration(unittest.TestCase):
             try:
                 with patch(
                     "commands.install.load_configuration",
-                    return_value=([{"name": "any-repo"}], {}, "user", None, []),
+                    return_value=({}, "user", None, []),
                 ):
                     with patch("commands.install.download_all_from_archive") as mock_dl:
                         install_command([], "release", tag="none")
@@ -4868,13 +4922,7 @@ class TestInstallIntegration(unittest.TestCase):
             try:
                 with patch(
                     "commands.install.load_configuration",
-                    return_value=(
-                        [{"name": "any-repo"}],
-                        {},
-                        user_type,
-                        None,
-                        [],
-                    ),
+                    return_value=({}, user_type, None, []),
                 ):
                     with patch("commands.install.download_all_from_archive") as mock_dl:
                         install_command([], "release")
@@ -4913,14 +4961,12 @@ class TestPublishReportsFailureThroughItsExitCode(unittest.TestCase):
     def test_a_missing_target_exits_non_zero(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
-            with patch("commands.publish.guard_require_version_bump_for_src_packages"):
-                result = self._invoke("nosuchpkg", "--type", "release", "--dry-run")
+            result = self._invoke("nosuchpkg", "--type", "release", "--dry-run")
         self.assertEqual(result.exit_code, 1, result.output)
 
     @patch("commands.publish._create_archive", return_value=Path("/tmp/a.zip"))
     @patch("commands.publish._build_package", return_value=True)
-    @patch("commands.publish.guard_require_version_bump_for_src_packages")
-    def test_a_failed_build_exits_non_zero(self, _guard, mock_build, _archive):
+    def test_a_failed_build_exits_non_zero(self, mock_build, _archive):
         mock_build.return_value = False
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
@@ -4932,8 +4978,7 @@ class TestPublishReportsFailureThroughItsExitCode(unittest.TestCase):
 
     @patch("commands.publish._create_archive", side_effect=OSError("disk full"))
     @patch("commands.publish._build_package", return_value=True)
-    @patch("commands.publish.guard_require_version_bump_for_src_packages")
-    def test_a_failed_archive_exits_non_zero(self, _guard, _build, _archive):
+    def test_a_failed_archive_exits_non_zero(self, _build, _archive):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
             target = Path(tmpdir) / "src" / "mypkg"
@@ -4944,8 +4989,7 @@ class TestPublishReportsFailureThroughItsExitCode(unittest.TestCase):
 
     @patch("commands.publish._create_archive", return_value=Path("/tmp/a.zip"))
     @patch("commands.publish._build_package", return_value=True)
-    @patch("commands.publish.guard_require_version_bump_for_src_packages")
-    def test_a_successful_dry_run_still_exits_zero(self, _guard, _build, _archive):
+    def test_a_successful_dry_run_still_exits_zero(self, _build, _archive):
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
             target = Path(tmpdir) / "src" / "mypkg"
@@ -4964,7 +5008,6 @@ class TestPublishIntegration(unittest.TestCase):
     """
 
     @patch("commands.publish.setup")
-    @patch("commands.publish.guard_require_version_bump_for_src_packages")
     @patch("commands.publish.subprocess.run")
     @patch("commands.publish.shutil.make_archive")
     @patch("commands.publish.shutil.copy")
@@ -4973,7 +5016,6 @@ class TestPublishIntegration(unittest.TestCase):
         _copy,
         _archive,
         _subproc,
-        _guard,
         _setup,
         capsys=None,
     ):

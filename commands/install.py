@@ -130,7 +130,7 @@ def _install(
     script_dir_path = Path(script_directory)
 
     # Load configuration
-    _, _, user_type, _, repos_to_ignore = load_configuration()
+    _, user_type, _, repos_to_ignore = load_configuration()
 
     # If the caller didn't pin a tag, derive it from the user_type.
     # "devel" → bleeding-edge ("latest"), anything else → "stable".
