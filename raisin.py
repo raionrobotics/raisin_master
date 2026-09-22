@@ -18,6 +18,7 @@ from commands.git_commands import git_group
 from commands.test import test_command
 from commands.cppcheck import cppcheck_command
 from commands.info import info_command
+from commands.build_sdk import build_sdk_group
 
 try:
     from packaging.requirements import Requirement
@@ -68,6 +69,7 @@ cli.add_command(test_command, name="test")
 cli.add_command(cppcheck_command, name="cppcheck")
 cli.add_command(help_command, name="help")
 cli.add_command(info_command, name="info")
+cli.add_command(build_sdk_group, name="build_sdk")
 
 
 if __name__ == "__main__":

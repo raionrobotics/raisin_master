@@ -17,6 +17,7 @@ import errno
 import hashlib
 import itertools
 import json
+import io
 import os
 import shutil
 import struct
@@ -703,246 +704,6 @@ class TestAuthentication(unittest.TestCase):
 
 
 # ============================================================================
-# 4. Upload Tests
-# ============================================================================
-
-
-class TestUpload(unittest.TestCase):
-    """Verify upload_package and _compute_sha256."""
-
-    @staticmethod
-    def _package_page(name):
-        return _mock_response(
-            json_data={
-                "data": {
-                    "packages": [
-                        {"id": "other", "name": f"{name}_extra"},
-                        {"id": "pkg-1", "name": name},
-                    ],
-                    "total": 2,
-                    "page": 1,
-                    "limit": 100,
-                    "totalPages": 1,
-                }
-            }
-        )
-
-    def setUp(self):
-        ota._cached_token = None
-        ota._auth_failed = False
-        self._orig_os_type = g.os_type
-        self._orig_os_version = g.os_version
-        self._orig_architecture = g.architecture
-        g.os_type = "linux"
-        _sync_ota_context()
-        g.os_version = "22.04"
-        _sync_ota_context()
-        g.architecture = "x86_64"
-        _sync_ota_context()
-
-    def tearDown(self):
-        ota._cached_token = None
-        ota._auth_failed = False
-        g.os_type = self._orig_os_type
-        _sync_ota_context()
-        g.os_version = self._orig_os_version
-        _sync_ota_context()
-        g.architecture = self._orig_architecture
-        _sync_ota_context()
-
-    def test_compute_sha256_correct(self):
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(b"hello world")
-            tmp.flush()
-            digest = ota._compute_sha256(Path(tmp.name))
-        os.unlink(tmp.name)
-        expected = hashlib.sha256(b"hello world").hexdigest()
-        self.assertEqual(digest, expected)
-
-    @patch("raisin_ota.client.authenticate", return_value="tok")
-    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
-    @patch("raisin_ota.client.requests.get")
-    @patch("raisin_ota.client.requests.post")
-    @patch("raisin_ota.client._compute_sha256", return_value="aabbcc")
-    def test_upload_package_happy_path(self, _sha, mock_post, mock_get, _ep, _auth):
-        # GET blob exists → False
-        # GET packages → existing package
-        # Server wraps responses in {"data": ...}
-        mock_get.side_effect = [
-            _mock_response(json_data={"data": {"exists": False}}),
-            _mock_response(
-                json_data={
-                    "data": {
-                        "packages": [
-                            {"id": "other", "name": "mypkg_extra"},
-                            {"id": "pkg-1", "name": "mypkg"},
-                        ],
-                        "total": 2,
-                        "page": 1,
-                        "limit": 100,
-                        "totalPages": 1,
-                    }
-                }
-            ),
-        ]
-
-        # POST blob upload, POST manifest, POST tag
-        mock_post.side_effect = [
-            _mock_response(),  # blob upload
-            _mock_response(),  # manifest
-            _mock_response(),  # tag
-        ]
-
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(b"fake-zip")
-            tmp.flush()
-            result = ota.upload_package(Path(tmp.name), "mypkg", "1.0.0", "release")
-        os.unlink(tmp.name)
-
-        self.assertTrue(result)
-        self.assertEqual(mock_post.call_count, 3)
-
-    @patch("raisin_ota.client.authenticate", return_value="tok")
-    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
-    @patch("raisin_ota.client.requests.get")
-    @patch("raisin_ota.client.requests.post")
-    @patch("raisin_ota.client._compute_sha256", return_value="a" * 64)
-    def test_blob_upload_streams_the_body_and_names_the_hash_in_a_header(
-        self, _sha, mock_post, mock_get, _ep, _auth
-    ):
-        """`POST /blobs` takes a raw stream, not a form.
-
-        The server reads the digest from `x-content-sha256` and refuses the
-        request outright without it — a multipart body carrying `sha256` as a
-        field is a 400, so publish never uploaded anything.
-        """
-        mock_get.side_effect = [
-            _mock_response(json_data={"data": {"exists": False}}),
-            self._package_page("mypkg"),
-        ]
-        mock_post.side_effect = [
-            _mock_response(),  # blob
-            _mock_response(),  # manifest
-            _mock_response(),  # tag
-        ]
-
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(b"fake-zip")
-            tmp.flush()
-            ota.upload_package(Path(tmp.name), "mypkg", "1.0.0", "release")
-        os.unlink(tmp.name)
-
-        blob_call = mock_post.call_args_list[0]
-        headers = blob_call.kwargs["headers"]
-        self.assertEqual(headers["x-content-sha256"], "a" * 64)
-        self.assertEqual(headers["Content-Type"], "application/zip")
-        self.assertNotIn("files", blob_call.kwargs)
-        self.assertIn("data", blob_call.kwargs)
-
-    @patch("raisin_ota.client.authenticate", return_value="tok")
-    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
-    @patch("raisin_ota.client.requests.get")
-    @patch("raisin_ota.client.requests.post")
-    @patch("raisin_ota.client._compute_sha256", return_value="aabbcc")
-    def test_upload_package_blob_dedup(self, _sha, mock_post, mock_get, _ep, _auth):
-        # GET blob exists → True (skip upload)
-        # GET packages → existing package
-        mock_get.side_effect = [
-            _mock_response(json_data={"data": {"exists": True}}),
-            _mock_response(
-                json_data={
-                    "data": {
-                        "packages": [
-                            {"id": "other", "name": "mypkg_extra"},
-                            {"id": "pkg-1", "name": "mypkg"},
-                        ],
-                        "total": 2,
-                        "page": 1,
-                        "limit": 100,
-                        "totalPages": 1,
-                    }
-                }
-            ),
-        ]
-
-        # POST manifest, POST tag (no blob upload)
-        mock_post.side_effect = [
-            _mock_response(),  # manifest
-            _mock_response(),  # tag
-        ]
-
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(b"fake-zip")
-            tmp.flush()
-            result = ota.upload_package(Path(tmp.name), "mypkg", "1.0.0", "release")
-        os.unlink(tmp.name)
-
-        self.assertTrue(result)
-        # Only manifest + tag, no blob upload
-        self.assertEqual(mock_post.call_count, 2)
-
-    @patch("raisin_ota.client.authenticate")
-    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
-    @patch("raisin_ota.client.requests.get")
-    @patch("raisin_ota.client.requests.post")
-    @patch("raisin_ota.client._compute_sha256", return_value="aabbcc")
-    def test_upload_package_401_retry(self, _sha, mock_post, mock_get, _ep, mock_auth):
-        # authenticate() is called 3 times:
-        #   1) initial upload_package call
-        #   2) re-auth after 401 in the except block
-        #   3) recursive upload_package call (top of function)
-        mock_auth.side_effect = ["old-tok", "new-tok", "new-tok"]
-
-        # First call: blob-exists check raises 401
-        err_resp = MagicMock()
-        err_resp.status_code = 401
-        http_err = ota.requests.HTTPError(response=err_resp)
-
-        mock_get.side_effect = [
-            MagicMock(
-                raise_for_status=MagicMock(side_effect=http_err),
-                status_code=401,
-            ),
-            # Retry calls (after re-auth):
-            _mock_response(json_data={"data": {"exists": True}}),
-            _mock_response(
-                json_data={
-                    "data": {
-                        "packages": [
-                            {"id": "other", "name": "mypkg_extra"},
-                            {"id": "pkg-1", "name": "mypkg"},
-                        ],
-                        "total": 2,
-                        "page": 1,
-                        "limit": 100,
-                        "totalPages": 1,
-                    }
-                }
-            ),
-        ]
-        mock_post.side_effect = [
-            _mock_response(),  # manifest
-            _mock_response(),  # tag
-        ]
-
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(b"fake-zip")
-            tmp.flush()
-            result = ota.upload_package(Path(tmp.name), "mypkg", "1.0.0", "release")
-        os.unlink(tmp.name)
-
-        self.assertTrue(result)
-        # authenticate() called 3 times: initial + re-auth + recursive call
-        self.assertEqual(mock_auth.call_count, 3)
-
-    @patch("raisin_ota.client.authenticate", return_value=None)
-    @patch("raisin_ota.client.get_ota_endpoint", return_value="https://ota.example.com")
-    def test_upload_package_auth_fails(self, _ep, _auth):
-        result = ota.upload_package(Path("/fake.zip"), "mypkg", "1.0.0", "release")
-        self.assertFalse(result)
-
-
-# ============================================================================
 # 4b. Download Failure Classification
 # ============================================================================
 
@@ -1336,7 +1097,6 @@ class TestHaltStopsTheInstall(unittest.TestCase):
                 side_effect=ota.OtaInstallHalted("halted by tenant"),
             ),
             patch("raisin_ota.client.download_package") as mock_download,
-            patch("commands.install.requests.Session"),
         ):
             result = install_command([], "release")
 
@@ -1510,7 +1270,6 @@ class TestAnUnusableAssignmentReachesTheOperator(unittest.TestCase):
                 ),
             ),
             patch("raisin_ota.client.download_package") as self.download,
-            patch("commands.install.requests.Session"),
             patch("builtins.print") as self.printed,
         ):
             return install_command([], "release")
@@ -1644,7 +1403,6 @@ class TestUnusableTreeStopsTheInstall(unittest.TestCase):
                 ),
             ),
             patch("raisin_ota.client.download_package") as mock_download,
-            patch("commands.install.requests.Session"),
             patch("builtins.print") as mock_print,
         ):
             result = install_command([], "release")
@@ -1699,7 +1457,6 @@ class TestNodeLevelArchivePin(unittest.TestCase):
         with (
             patch("commands.install.download_all_from_archive", return_value={}),
             patch("raisin_ota.client.download_package") as mock_download,
-            patch("commands.install.requests.Session"),
             patch.dict(os.environ, {"RAISIN_ARCHIVE_NAME": "node-archive"}),
         ):
             result = install_command([], "release")
@@ -3625,10 +3382,10 @@ class TestDownload(unittest.TestCase):
 
     @patch("raisin_ota.client._fetch_archive_by_tag")
     def test_download_all_returns_empty_when_tag_unresolvable(self, mock_fetch_by_tag):
-        # When the requested tag can't be resolved (and tag IS 'stable' so
-        # no further fallback), the function should surface an empty result
-        # (and a warning) rather than aborting, so install.py can fall back
-        # to GitHub releases for each repo.
+        # Neither the requested tag nor 'stable' resolves. The function
+        # surfaces an empty result and a warning rather than aborting;
+        # install.py turns that into a failed install, since OTA is the only
+        # source and a tag that resolves to nothing is an answer.
         mock_fetch_by_tag.return_value = None
         with tempfile.TemporaryDirectory() as tmpdir:
             result = ota.download_all_from_archive(
@@ -3912,7 +3669,8 @@ class TestDownload(unittest.TestCase):
     def test_download_package_returns_none_when_tag_unresolvable(self, _by_tag):
         # Per-package install returns None when the tag can't be resolved
         # (and tag is 'stable' so no further fallback). install.py's
-        # per-target loop will then fall back to GitHub releases.
+        # per-target loop then reports the package as unavailable and fails
+        # the install; OTA is the only source.
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
             _sync_ota_context()
@@ -4752,7 +4510,7 @@ class TestInstallCliEventReporting(unittest.TestCase):
             try:
                 # It is a click Command; call the underlying function.
                 install_mod.install_cli_command.callback(
-                    ["mypkg"], "release", None, None, None, False, "stable"
+                    ["mypkg"], "release", None, None, None, "stable"
                 )
             except click.exceptions.Exit:
                 pass
@@ -4909,6 +4667,54 @@ class TestInstallOutcomeDecision(unittest.TestCase):
         self.assertNotIn("detail", terminal)
 
 
+class TestOtaIsTheOnlySource(unittest.TestCase):
+    """A package OTA does not have must end the install, not be passed over.
+
+    While GitHub releases were a fallback, reaching the end of the per-package
+    loop meant "try the next source". With that source gone the same fall-through
+    would have meant "skip it", and `install_command` would have returned True
+    having installed nothing -- the quiet kind of failure this whole retirement
+    is meant to avoid.
+    """
+
+    @patch("commands.install.load_configuration")
+    def test_a_package_missing_from_ota_fails_the_install(self, mock_config):
+        mock_config.return_value = ({}, {}, "devel", None, [])
+        from commands.install import install_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            _sync_ota_context()
+            with patch("raisin_ota.client.download_package", return_value=None):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    result = install_command(["nosuchpkg"], "release")
+                output = buf.getvalue()
+
+        self.assertFalse(result, "an absent package must not report success")
+        self.assertIn("nosuchpkg", output, "the package that could not be had must be named")
+
+    @patch("commands.install.load_configuration")
+    def test_an_ota_error_fails_the_install(self, mock_config):
+        mock_config.return_value = ({}, {}, "devel", None, [])
+        from commands.install import install_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            _sync_ota_context()
+            with patch(
+                "raisin_ota.client.download_package",
+                side_effect=RuntimeError("OTA unreachable"),
+            ):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    result = install_command(["mypkg"], "release")
+                output = buf.getvalue()
+
+        self.assertFalse(result)
+        self.assertIn("OTA unreachable", output)
+
+
 class TestInstallIntegration(unittest.TestCase):
     """Verify OTA is used correctly in install_command."""
 
@@ -4935,15 +4741,9 @@ class TestInstallIntegration(unittest.TestCase):
         )
 
         with patch("raisin_ota.client.download_package", return_value=None) as mock_dl:
-            with patch("commands.install.requests.Session") as MockSession:
-                session = MagicMock()
-                MockSession.return_value = session
-                resp = _mock_response(json_data=[])
-                session.get.return_value = resp
+            from commands.install import install_command
 
-                from commands.install import install_command
-
-                install_command(["mypkg"], "release")
+            install_command(["mypkg"], "release")
 
             # OTA download should have been attempted for 'mypkg'
             call_args_list = [c[0][0] for c in mock_dl.call_args_list]
@@ -4960,14 +4760,9 @@ class TestInstallIntegration(unittest.TestCase):
         )
 
         with patch("raisin_ota.client.download_package", return_value=None) as mock_dl:
-            with patch("commands.install.requests.Session") as MockSession:
-                session = MagicMock()
-                MockSession.return_value = session
-                session.get.return_value = _mock_response(json_data=[])
+            from commands.install import install_command
 
-                from commands.install import install_command
-
-                install_command(["mypkg"], "release", archive_name="team-archive")
+            install_command(["mypkg"], "release", archive_name="team-archive")
 
         self.assertEqual(mock_dl.call_args.kwargs["archive_name"], "team-archive")
 
@@ -5100,35 +4895,88 @@ class TestInstallIntegration(unittest.TestCase):
 # ============================================================================
 
 
-class TestPublishIntegration(unittest.TestCase):
-    """Verify OTA messaging in publish dry-run mode."""
+class TestPublishReportsFailureThroughItsExitCode(unittest.TestCase):
+    """`raisin publish` returned 0 whatever happened.
 
-    @patch("commands.publish.load_configuration")
+    That was survivable while the pipeline treated the command as one of several
+    things it did. It is not now: Create Releases runs `raisin publish --dry-run`
+    and nothing else produces the archives that Upload to OTA consumes, so a
+    publish that quietly produced nothing would leave the upload stage running
+    against whatever was already in release/ -- and the build green.
+    """
+
+    def _invoke(self, *args):
+        from commands.publish import publish_command
+
+        return CliRunner().invoke(publish_command, list(args))
+
+    def test_a_missing_target_exits_non_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            with patch("commands.publish.guard_require_version_bump_for_src_packages"):
+                result = self._invoke("nosuchpkg", "--type", "release", "--dry-run")
+        self.assertEqual(result.exit_code, 1, result.output)
+
+    @patch("commands.publish._create_archive", return_value=Path("/tmp/a.zip"))
+    @patch("commands.publish._build_package", return_value=True)
+    @patch("commands.publish.guard_require_version_bump_for_src_packages")
+    def test_a_failed_build_exits_non_zero(self, _guard, mock_build, _archive):
+        mock_build.return_value = False
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            target = Path(tmpdir) / "src" / "mypkg"
+            target.mkdir(parents=True)
+            (target / "release.yaml").write_text("version: 1.0.0\n")
+            result = self._invoke("mypkg", "--type", "release", "--dry-run")
+        self.assertEqual(result.exit_code, 1, result.output)
+
+    @patch("commands.publish._create_archive", side_effect=OSError("disk full"))
+    @patch("commands.publish._build_package", return_value=True)
+    @patch("commands.publish.guard_require_version_bump_for_src_packages")
+    def test_a_failed_archive_exits_non_zero(self, _guard, _build, _archive):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            target = Path(tmpdir) / "src" / "mypkg"
+            target.mkdir(parents=True)
+            (target / "release.yaml").write_text("version: 1.0.0\n")
+            result = self._invoke("mypkg", "--type", "release")
+        self.assertEqual(result.exit_code, 1, result.output)
+
+    @patch("commands.publish._create_archive", return_value=Path("/tmp/a.zip"))
+    @patch("commands.publish._build_package", return_value=True)
+    @patch("commands.publish.guard_require_version_bump_for_src_packages")
+    def test_a_successful_dry_run_still_exits_zero(self, _guard, _build, _archive):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            target = Path(tmpdir) / "src" / "mypkg"
+            target.mkdir(parents=True)
+            (target / "release.yaml").write_text("version: 1.0.0\n")
+            result = self._invoke("mypkg", "--type", "release", "--dry-run")
+        self.assertEqual(result.exit_code, 0, result.output)
+
+
+class TestPublishIntegration(unittest.TestCase):
+    """`raisin publish` archives and says the upload is not its job.
+
+    The OTA server accepts a manifest only with sourceType 'jenkins', so
+    uploading belongs to ota-upload.groovy. This command stops at the archive,
+    and says so rather than leaving the reader to assume it published.
+    """
+
     @patch("commands.publish.setup")
     @patch("commands.publish.guard_require_version_bump_for_src_packages")
-    @patch("commands.publish.get_commit_hash", return_value="abc123")
     @patch("commands.publish.subprocess.run")
     @patch("commands.publish.shutil.make_archive")
     @patch("commands.publish.shutil.copy")
-    def test_dry_run_prints_ota_message(
+    def test_it_archives_and_says_upload_is_not_its_job(
         self,
         _copy,
         _archive,
         _subproc,
-        _commit,
         _guard,
         _setup,
-        mock_config,
         capsys=None,
     ):
-        mock_config.return_value = (
-            {"mypkg": {"url": "git@github.com:org/mypkg.git"}},
-            {"org": "ghtoken"},
-            "devel",
-            None,
-            [],
-        )
-
         with tempfile.TemporaryDirectory() as tmpdir:
             g.script_directory = tmpdir
             _sync_ota_context()
@@ -5140,16 +4988,14 @@ class TestPublishIntegration(unittest.TestCase):
             from commands.publish import publish
 
             # Capture printed output
-            import io
-            from contextlib import redirect_stdout
-
             buf = io.StringIO()
-            with redirect_stdout(buf):
-                # --upload-ota flag triggers OTA message in dry-run
-                publish("mypkg", "release", dry_run=True, upload_ota=True)
+            with contextlib.redirect_stdout(buf):
+                publish("mypkg", "release")
 
             output = buf.getvalue()
-            self.assertIn("OTA", output)
+            self.assertIn("Archived", output)
+            self.assertIn("ota-upload.groovy", output)
+            self.assertNotIn("Uploading to OTA Server", output)
 
 
 class TestArchiveIdentityIsThisMachines(unittest.TestCase):
@@ -5374,9 +5220,10 @@ class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
     ):
         """Which is what the line it prints promises, and what it did before.
 
-        `{}` is how this tells `install.py` to try GitHub releases per package.
-        A refusal here is raised ahead of that return, so refusing for an
-        absence did not just mislabel the state — it removed the route.
+        `{}` is how this tells `install.py` that no archive resolved, which it
+        reports as a failed install. A refusal here is raised ahead of that
+        return, so refusing for an absence did not just mislabel the state —
+        it replaced a reported failure with a raised one.
         """
         mock_desired.return_value = (False, None, None, None)
 
@@ -5436,10 +5283,10 @@ class TestAnUnusableAssignmentIsNotASubstitution(unittest.TestCase):
     def test_the_tag_route_giving_up_carries_the_reason_too(
         self, mock_desired, _mock_tag
     ):
-        """Otherwise it announces a fall back to GitHub releases per repo.
+        """Otherwise the tag route gives up without saying why.
 
-        Two stacked substitutions, and neither visible as a failure — which is
-        the shape this whole change is about.
+        The reason the assignment was unusable is the signal the fleet most
+        needs, and it is the one a quiet give-up drops.
         """
         mock_desired.side_effect = ota.OtaDesiredStateUnusable("assigned elsewhere")
 

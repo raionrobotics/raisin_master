@@ -90,3 +90,5 @@ vcpkg_installed/*
 .claude
 .codex
 .omc
+# Locally built SDK distributions (not OTA packages)
+/sdk/
