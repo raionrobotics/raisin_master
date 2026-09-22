@@ -290,14 +290,9 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     "--tsan", is_flag=True,
     help="Build tests with ThreadSanitizer (implies --test). Run with 'raisin test --tsan'.",
 )
-@click.option(
-    "--allow-missing-lfs",
-    is_flag=True,
-    help="Continue even when Git LFS assets are still pointer files (they will fail at runtime)",
-)
 @click.argument("targets", nargs=-1)
 def build_cli_command(
-    build_types, install, python_executable, test, asan, tsan, allow_missing_lfs, targets
+    build_types, install, python_executable, test, asan, tsan, targets
 ):
     """
     Compile the project using CMake and Ninja.
@@ -338,7 +333,6 @@ def build_cli_command(
     setup(
         raisin_march=raisin_march,
         build_test_enabled=build_test_enabled,
-        allow_missing_lfs=allow_missing_lfs,
     )
 
     # Then build

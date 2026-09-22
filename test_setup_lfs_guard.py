@@ -42,6 +42,7 @@ def test_guard_stops_and_names_the_repository_holding_pointers(capsys):
     output = capsys.readouterr().out
     assert "raisin_raibo2: 1 file(s) [resource/mesh/TORSO.STL]" in output
     assert "git lfs install --local && git lfs fetch && git lfs checkout" in output
+    assert "install_system_deps.sh" in output
 
 
 def test_guard_stops_when_a_repository_could_not_be_scanned(capsys):
@@ -53,13 +54,18 @@ def test_guard_stops_when_a_repository_could_not_be_scanned(capsys):
     assert "could not be scanned (git ls-files failed)" in capsys.readouterr().out
 
 
-def test_guard_continues_when_the_operator_asks_for_it(capsys):
-    with _guard_result(affected=[("raisin_gui", ["resource/font/NotoSans.ttf"])]):
-        setup_commands.guard_src_repo_lfs_assets(allow_missing_lfs=True)
+def test_no_way_past_the_guard_is_offered_on_the_command_line():
+    """The guard is fail-closed, and nothing on the command line reopens it.
 
-    output = capsys.readouterr().out
-    assert "Continuing without the Git LFS assets" in output
-    assert "raisin_gui: 1 file(s)" in output
+    A pointer stub survives configure, build and install untouched, so a way
+    past the guard does not save the run -- it moves the failure to runtime,
+    hours later and far from the cause.
+    """
+    from commands.build import build_cli_command
+
+    for command in (setup_commands.setup_command, build_cli_command):
+        options = {name for param in command.params for name in param.opts}
+        assert "--allow-missing-lfs" not in options
 
 
 def test_setup_stops_before_it_deletes_anything():

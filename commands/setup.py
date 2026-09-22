@@ -211,13 +211,8 @@ def _build_single_cmake_project(
     is_flag=True,
     help="Enable building unit tests for this setup run",
 )
-@click.option(
-    "--allow-missing-lfs",
-    is_flag=True,
-    help="Continue even when Git LFS assets are still pointer files (they will fail at runtime)",
-)
 @click.argument("targets", nargs=-1)
-def setup_command(test, allow_missing_lfs, targets):
+def setup_command(test, targets):
     """
     Generate interface files (.msg, .srv, .action) and configure CMake.
 
@@ -237,7 +232,7 @@ def setup_command(test, allow_missing_lfs, targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup(build_test_enabled=test, allow_missing_lfs=allow_missing_lfs)
+    setup(build_test_enabled=test)
 
 
 def process_build_targets(targets):
@@ -2408,7 +2403,7 @@ def _print_lfs_repo_lines(affected, unreadable):
         print(f"  - {repo_name}: could not be scanned ({reason})")
 
 
-def guard_src_repo_lfs_assets(allow_missing_lfs=False):
+def guard_src_repo_lfs_assets():
     """Stop before anything is wiped when a source repo still holds LFS pointers.
 
     Every later stage succeeds on a pointer stub -- configure, build and install
@@ -2425,17 +2420,11 @@ def guard_src_repo_lfs_assets(allow_missing_lfs=False):
     if not affected and not unreadable:
         return
 
-    if allow_missing_lfs:
-        print("\u26a0\ufe0f  Continuing without the Git LFS assets, as requested:")
-        _print_lfs_repo_lines(affected, unreadable)
-        print("  Anything that reads those files will fail at runtime.")
-        return
-
     print("\u274c Error: Git LFS assets are not downloaded; they are still pointer files.")
     _print_lfs_repo_lines(affected, unreadable)
-    print("  Install git-lfs, then run in each repository above:")
+    print("  git-lfs comes with 'sudo bash install_system_deps.sh'.")
+    print("  Once it is installed, run in each repository above:")
     print("    git lfs install --local && git lfs fetch && git lfs checkout")
-    print("  To go ahead without them, pass --allow-missing-lfs.")
     sys.exit(1)
 
 
@@ -2445,7 +2434,6 @@ def setup(
     build_dir="",
     build_test_enabled=None,
     raisin_march: Optional[str] = None,
-    allow_missing_lfs=False,
     target: Optional[TargetConfig] = None,
 ):
     """
@@ -2457,7 +2445,6 @@ def setup(
         build_dir: Build directory path
         build_test_enabled: Whether to build tests
         raisin_march: Optional CPU target override for pure-CMake dependencies
-        allow_missing_lfs: Continue even when Git LFS assets are still pointers
         target: Build target (commands.sdk_target_config.TargetConfig). Defaults to
             the build host. SDK targets prepare their own headers and install
             prefix; build_sdk owns their CMake generation.
@@ -2471,7 +2458,7 @@ def setup(
     cross = target.is_cross
 
     check_supported_architecture()  # build host, not the target
-    guard_src_repo_lfs_assets(allow_missing_lfs)
+    guard_src_repo_lfs_assets()
     if raisin_march is None:
         raisin_march = target.march or os.environ.get(
             "RAISIN_MARCH", get_default_portable_march()
