@@ -58,22 +58,18 @@ def parse_version_specifier(spec_str: str) -> Optional[SpecifierSet]:
 
 def load_configuration():
     """
-    Load configuration from configuration_setting.yaml and repositories.yaml.
+    Load configuration from configuration_setting.yaml.
 
     Returns:
-        tuple: (all_repositories, tokens, user_type, packages_to_ignore, repos_to_ignore)
+        tuple: (tokens, user_type, packages_to_ignore, repos_to_ignore)
+
+    `tokens` is `gh_tokens`, which authenticates git over HTTPS in
+    commands/git_commands.py. It no longer reaches release artefacts: packages
+    come from the OTA server, and the repositories.yaml registry that named a
+    <repo>_release for each package is gone with its last reader.
     """
     script_dir_path = Path(g.script_directory)
     config_path = script_dir_path / "configuration_setting.yaml"
-
-    # Load repositories from repositories.yaml
-    all_repositories = {}
-    repo_path = script_dir_path / "repositories.yaml"
-    if repo_path.is_file():
-        with open(repo_path, "r") as f:
-            repo_data = yaml.safe_load(f)
-            if repo_data:
-                all_repositories = repo_data
 
     tokens = {}
     user_type = None
@@ -109,7 +105,6 @@ def load_configuration():
         sys.exit(1)
 
     return (
-        all_repositories,
         tokens,
         user_type,
         packages_to_ignore,
