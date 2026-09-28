@@ -2801,6 +2801,45 @@ def _write_install_metadata(install_dir: Path, metadata: Optional[dict]) -> None
         )
 
 
+#: The widest mode a file may arrive with from a package.
+#:
+#: `extractall` does not apply the mode a zip carries -- long-standing CPython
+#: behaviour -- so every extracted file takes whatever the umask allows and
+#: nothing in `bin/` comes out executable. Measured against a published
+#: package, extracted by this very function with systemd's `0022`:
+#:
+#:     zip stores  bin/raisin_cli   0o100755
+#:     on disk     bin/raisin_cli   0o644      not executable
+#:
+#: `raion-setup` runs `install/bin/rs_multicam` and `install/bin/slaveinfo`
+#: during the wizard, and both ship in `raisin_third_party_robot`, so this is
+#: not a latent defect.
+#:
+#: Restoring the stored mode fixes that, and masking it fixes a second thing:
+#: the result stops depending on the umask of whatever unpacked it, and no
+#: package can hand out a group-writable, world-writable or setuid file however
+#: it was built. A robot's tree is then the same tree wherever it was unpacked.
+PERMITTED_MODE = 0o755
+
+
+def restore_modes(archive: zipfile.ZipFile, into: Path) -> None:
+    """Give back the mode the publisher stored, narrowed to `PERMITTED_MODE`."""
+    for entry in archive.infolist():
+        if entry.is_dir():
+            continue
+        stored = (entry.external_attr >> 16) & 0o7777
+        if not stored:
+            # A zip written where no Unix mode is recorded. Nothing to restore,
+            # and inventing one would be guessing.
+            continue
+        try:
+            (into / entry.filename).chmod(stored & PERMITTED_MODE)
+        except OSError as error:
+            # An unreadable mode is not a reason to fail an install that has
+            # otherwise landed; the file is there and its content is right.
+            print(f"⚠️ Could not set the mode of '{entry.filename}': {error}")
+
+
 def _extract_and_read_deps(
     download_file: Path,
     install_dir: Path,
@@ -2819,6 +2858,7 @@ def _extract_and_read_deps(
     try:
         with zipfile.ZipFile(download_file, "r") as zip_ref:
             zip_ref.extractall(install_dir)
+            restore_modes(zip_ref, install_dir)
         download_file.unlink()
     except (zipfile.BadZipFile, OSError) as e:
         print(f"⚠️ Failed to extract OTA package '{package_name}': {e}")

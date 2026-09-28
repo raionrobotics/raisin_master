@@ -44,7 +44,12 @@ from typing import Optional, Sequence
 
 import requests
 
-from .client import _download_to_path, _unwrap_response, get_ota_endpoint
+from .client import (
+    _download_to_path,
+    _unwrap_response,
+    get_ota_endpoint,
+    restore_modes,
+)
 
 #: Where the key is read from. An argument would put a credential in the process
 #: table, where `ps` shows it to every user on the machine and CI logs show it to
@@ -61,20 +66,6 @@ PACKAGE_KEY_PREFIX = "pk_"
 #: only the base moves and no path below does.
 READ_SURFACE = "archive-read"
 
-#: The widest mode a published file may arrive with.
-#:
-#: `extractall` does not apply the mode a zip carries -- long-standing CPython
-#: behaviour -- so every file lands with whatever the umask allows and nothing
-#: in `bin/` is executable. Measured against a published `raisin` package: the
-#: archive stores `0o100755` for `bin/raisin_cli` and the extracted file is
-#: `rw-rw-r--`.
-#:
-#: Restoring the stored mode fixes that, and masking it fixes a second thing at
-#: the same time: the result no longer depends on the umask of whichever machine
-#: unpacked it, and no archive can hand out a group-writable, world-writable or
-#: setuid file however it was built. A build machine then cannot produce a tree
-#: that the agent's own `ownedFile()` check would refuse.
-PERMITTED_MODE = 0o755
 
 
 class FetchRefused(Exception):
@@ -220,24 +211,11 @@ def _entries_within(archive: zipfile.ZipFile, into: Path) -> None:
             )
 
 
-def _restore_modes(archive: zipfile.ZipFile, into: Path) -> None:
-    """Give back the mode the publisher stored, narrowed to `PERMITTED_MODE`."""
-    for entry in archive.infolist():
-        if entry.is_dir():
-            continue
-        stored = (entry.external_attr >> 16) & 0o7777
-        if not stored:
-            # A zip written on a system that records no Unix mode. Nothing to
-            # restore, and inventing one would be guessing.
-            continue
-        (into / entry.filename).chmod(stored & PERMITTED_MODE)
-
-
 def _unpack(zip_path: Path, into: Path) -> None:
     with zipfile.ZipFile(zip_path, "r") as archive:
         _entries_within(archive, into)
         archive.extractall(into)
-        _restore_modes(archive, into)
+        restore_modes(archive, into)
 
 
 def fetch_archive(

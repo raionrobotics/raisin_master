@@ -827,6 +827,76 @@ class TestDownloadErrorClassification(unittest.TestCase):
         self.assertFalse(ota.is_retryable_error_code("unknown"))
 
 
+class TestExtractedModes(unittest.TestCase):
+    """What a robot's install tree looks like after a package is unpacked.
+
+    `extractall` drops the mode a zip carries, so without restoring it nothing
+    in `bin/` comes out executable. Measured against a published package before
+    this was fixed: the archive stores `0o100755` for `bin/raisin_cli` and the
+    extracted file was `0o644`. `raion-setup` runs `install/bin/rs_multicam`
+    and `install/bin/slaveinfo` during the wizard, and both ship in
+    `raisin_third_party_robot`.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.download = Path(self._tmp.name) / "pkg.zip"
+        self.install_dir = Path(self._tmp.name) / "installed"
+
+    def _package(self, *entries):
+        """`(name, content, mode)` -- a real package records Unix modes."""
+        with zipfile.ZipFile(self.download, "w") as zf:
+            for name, content, mode in entries:
+                info = zipfile.ZipInfo(name)
+                info.create_system = 3
+                info.external_attr = mode << 16
+                zf.writestr(info, content)
+        return ota._extract_and_read_deps(
+            self.download, self.install_dir, "pkg1", "1.0.0"
+        )
+
+    def test_an_executable_stays_executable(self):
+        self._package(("bin/tool", "#!/bin/sh\ntrue\n", 0o100755))
+
+        self.assertTrue(os.access(self.install_dir / "bin" / "tool", os.X_OK))
+
+    def test_a_plain_file_stays_plain(self):
+        # Restoring must not make everything executable: a library is not a
+        # program, and `& 0o755` keeps a stored `0o644` as it was.
+        self._package(("lib/libthing.so", "not an elf", 0o100644))
+
+        self.assertFalse(os.access(self.install_dir / "lib" / "libthing.so", os.X_OK))
+
+    def test_never_leaves_a_group_writable_file(self):
+        # Whatever the package asks for, and whatever the unpacking umask is.
+        # A group-writable file in an install tree is one the data plane's
+        # `ownedFile()` check refuses.
+        previous = os.umask(0o000)
+        self.addCleanup(os.umask, previous)
+
+        self._package(("bin/loose", "x", 0o100777))
+
+        mode = (self.install_dir / "bin" / "loose").stat().st_mode & 0o7777
+        self.assertEqual(0o755, mode)
+
+    def test_a_setuid_bit_does_not_survive(self):
+        self._package(("bin/sharp", "x", 0o104755))
+
+        mode = (self.install_dir / "bin" / "sharp").stat().st_mode & 0o7777
+        self.assertEqual(0o755, mode)
+
+    def test_an_entry_with_no_recorded_mode_is_left_alone(self):
+        with zipfile.ZipFile(self.download, "w") as zf:
+            zf.writestr("lib/plain.so", "x")   # no external_attr
+        result = ota._extract_and_read_deps(
+            self.download, self.install_dir, "pkg1", "1.0.0"
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue((self.install_dir / "lib" / "plain.so").is_file())
+
+
 class TestMalformedReleaseYaml(unittest.TestCase):
     """A package's release.yaml is attacker- or accident-supplied content."""
 
