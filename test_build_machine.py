@@ -36,16 +36,28 @@ GOOD_KEY = "pk_" + "a" * 40
 
 
 def a_package(*files: tuple) -> bytes:
-    """A package archive: a zip rooted at the prefix, as the publisher builds it."""
+    """A package archive: a zip rooted at the prefix, as the publisher builds it.
+
+    Each file is `(name, content)` or `(name, content, mode)`. A published
+    package carries real Unix modes -- measured on `raisin`: `0o100755` for
+    `bin/raisin_cli`, `0o100644` for `lib/libraisin_network.so` -- so a double
+    that stored none would not exercise what happens to them.
+    """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
-        for name, content in files:
-            archive.writestr(name, content)
+        for entry in files:
+            name, content = entry[0], entry[1]
+            info = zipfile.ZipInfo(name)
+            info.create_system = 3  # Unix, which is what makes the mode meaningful
+            if len(entry) > 2:
+                info.external_attr = entry[2] << 16
+            archive.writestr(info, content)
     return buffer.getvalue()
 
 
-SDK_ZIP = a_package(("include/raisin/version.hpp", "#define RAISIN 1\n"),
-                    ("lib/libraisin.so", "not really an elf"))
+SDK_ZIP = a_package(("include/raisin/version.hpp", "#define RAISIN 1\n", 0o100644),
+                    ("lib/libraisin.so", "not really an elf", 0o100644),
+                    ("bin/raisin_cli", "#!/bin/sh\ntrue\n", 0o100755))
 THIRD_PARTY_ZIP = a_package(("include/vendor/json.hpp", "// vendored\n"),
                             ("lib/libvendor.so", "also not an elf"))
 ESCAPING_ZIP = a_package(("../escaped.txt", "should never be written"))
@@ -221,6 +233,57 @@ class BuildMachineFetch(unittest.TestCase):
     def test_takes_every_package_when_none_is_named(self):
         fetched = self.fetch()
         self.assertEqual(sorted(fetched), ["raisin", "raisin_third_party_common"])
+
+    def test_keeps_an_executable_executable(self):
+        """`bin/` is why this matters.
+
+        `extractall` drops the mode a zip carries, so without restoring it every
+        published tool arrives unrunnable. Measured on a real package before
+        this was fixed: `bin/raisin_cli` is stored `0o100755` and landed
+        `rw-rw-r--`.
+        """
+        self.fetch(packages=["raisin"])
+        cli = self.into / "sdk" / "bin" / "raisin_cli"
+        self.assertTrue(os.access(cli, os.X_OK), f"mode {oct(cli.stat().st_mode)}")
+
+    def test_leaves_a_plain_file_plain(self):
+        # Restoring the mode must not make everything executable: a header is
+        # not a program, and `& 0o755` keeps the stored `0o644` as it was.
+        self.fetch(packages=["raisin"])
+        header = self.into / "sdk" / "include" / "raisin" / "version.hpp"
+        self.assertFalse(os.access(header, os.X_OK))
+
+    def test_never_writes_a_group_writable_file(self):
+        """Whatever the archive says, and whatever the unpacking umask is.
+
+        A group-writable file in an install tree is one the agent's own
+        `ownedFile()` check refuses, so an archive that asked for `0o777` must
+        not be able to produce one -- nor may a permissive umask on the machine
+        doing the unpacking.
+        """
+        FakeOta.blobs = {SDK_ID: a_package(("bin/loose", "x", 0o100777))}
+        previous = os.umask(0o000)
+        self.addCleanup(os.umask, previous)
+
+        self.fetch(packages=["raisin"])
+
+        mode = (self.into / "sdk" / "bin" / "loose").stat().st_mode & 0o7777
+        self.assertEqual(mode, 0o755)
+
+    def test_refuses_to_carry_a_setuid_bit_across(self):
+        # `0o104755` is a setuid executable. Publishing one would be a mistake;
+        # reproducing it on every machine that unpacks would be a worse one.
+        FakeOta.blobs = {SDK_ID: a_package(("bin/sharp", "x", 0o104755))}
+        self.fetch(packages=["raisin"])
+        mode = (self.into / "sdk" / "bin" / "sharp").stat().st_mode
+        self.assertEqual(mode & 0o7777, 0o755)
+
+    def test_leaves_a_modeless_entry_alone(self):
+        # A zip written where no Unix mode is recorded. There is nothing to
+        # restore and inventing one would be guessing.
+        FakeOta.blobs = {SDK_ID: a_package(("lib/plain.so", "x"))}
+        self.fetch(packages=["raisin"])
+        self.assertTrue((self.into / "sdk" / "lib" / "plain.so").is_file())
 
     def test_leaves_no_download_file_behind(self):
         self.fetch(packages=["raisin"])
