@@ -44,7 +44,12 @@ from typing import Optional, Sequence
 
 import requests
 
-from .client import _download_to_path, _unwrap_response, get_ota_endpoint
+from .client import (
+    _download_to_path,
+    _unwrap_response,
+    get_ota_endpoint,
+    restore_modes,
+)
 
 #: Where the key is read from. An argument would put a credential in the process
 #: table, where `ps` shows it to every user on the machine and CI logs show it to
@@ -60,6 +65,7 @@ PACKAGE_KEY_PREFIX = "pk_"
 #: one cannot be widened by the same edit. Both hops live under it, which is why
 #: only the base moves and no path below does.
 READ_SURFACE = "archive-read"
+
 
 
 class FetchRefused(Exception):
@@ -209,6 +215,7 @@ def _unpack(zip_path: Path, into: Path) -> None:
     with zipfile.ZipFile(zip_path, "r") as archive:
         _entries_within(archive, into)
         archive.extractall(into)
+        restore_modes(archive, into)
 
 
 def fetch_archive(
