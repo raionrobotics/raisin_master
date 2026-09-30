@@ -2241,19 +2241,41 @@ def _print_lfs_repo_lines(affected, unreadable):
         print(f"  - {repo_name}: could not be scanned ({reason})")
 
 
-def guard_src_repo_lfs_assets():
+def setup_source_repositories(target: TargetConfig, package_name, interface_sources=None):
+    """Return the src/ repositories a setup call reads, or None for all of them.
+
+    An SDK target reads its source repositories, the interface repositories
+    taken from active source, and the repositories its extra headers come from.
+    A per-package setup reads the repository that package lives in.
+    """
+    if target.is_cross:
+        repos = set(target.source_repositories)
+        repos.update(name for name, info in (interface_sources or {}).items()
+                     if info["kind"] == "source")
+        for source in target.extra_headers.values():
+            parts = Path(source).parts
+            if len(parts) > 1 and parts[0] == "src":
+                repos.add(parts[1])
+        return repos
+    if package_name:
+        return {Path(package_name).parts[0]}
+    return None
+
+
+def guard_src_repo_lfs_assets(repos=None):
     """Stop before anything is wiped when a source repo still holds LFS pointers.
 
     Every later stage succeeds on a pointer stub -- configure, build and install
     all copy the 130-byte text file without complaint -- so the first sign of
     trouble is a parser failing at runtime, hours later and far from the cause.
 
-    The scan covers every source repository rather than the build targets alone,
-    because resource, config and scripts directories are copied into the install
-    tree for every package found under src/, whatever is being built.
+    repos names the source repositories this setup reads; None means all of
+    them. A host build needs all of them, because resource, config and scripts
+    directories are copied into the install tree for every package found under
+    src/, whatever is being built.
     """
     affected, unreadable = find_repos_with_lfs_pointers(
-        g.script_directory, get_repos_to_ignore()
+        g.script_directory, get_repos_to_ignore(), repos
     )
     if not affected and not unreadable:
         return
@@ -2296,7 +2318,6 @@ def setup(
     cross = target.is_cross
 
     check_supported_architecture()  # build host, not the target
-    guard_src_repo_lfs_assets()
     if raisin_march is None:
         raisin_march = target.march or os.environ.get(
             "RAISIN_MARCH", get_default_portable_march()
@@ -2323,6 +2344,9 @@ def setup(
         source_packages, interface_sources = resolve_sdk_dependencies(
             target, packages_to_ignore, repos_to_ignore
         )
+    guard_src_repo_lfs_assets(
+        setup_source_repositories(target, package_name, interface_sources if cross else None)
+    )
 
     delete_directory(g.generated_dir)  # Delete the whole 'include' directory
     delete_directory(Path(g.script_directory) / install_dir)

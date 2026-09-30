@@ -422,8 +422,10 @@ def find_lfs_pointer_files(repo_path):
     ]
 
 
-def find_repos_with_lfs_pointers(base_directory=None, repos_to_ignore=None):
+def find_repos_with_lfs_pointers(base_directory=None, repos_to_ignore=None, repos=None):
     """Return (affected, unreadable) for the src/ repositories.
+
+    repos limits the scan to those repository names; None scans all of them.
 
     affected is [(repo_name, pointer_paths)] for repositories whose assets are
     still pointer stubs. unreadable is [(repo_name, reason)] for repositories the
@@ -435,7 +437,7 @@ def find_repos_with_lfs_pointers(base_directory=None, repos_to_ignore=None):
     unreadable = []
     for repo_path in _find_src_git_repos(base_directory):
         repo_name = Path(repo_path).name
-        if repo_name in ignored:
+        if repo_name in ignored or (repos is not None and repo_name not in repos):
             continue
         # None means git could not tell; scan that repository rather than skip it.
         if _repo_uses_lfs(repo_path) is False:

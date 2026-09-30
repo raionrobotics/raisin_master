@@ -372,6 +372,27 @@ def test_repo_scan_reports_and_skips_ignored_repositories(tmp_path):
     assert unreadable == []
 
 
+def test_repo_scan_limited_to_named_repositories(tmp_path):
+    src = tmp_path / "src"
+    for name in ("selected", "other"):
+        _make_src_repo(src, name)
+
+    def run(command, cwd):
+        if command[:3] == ["git", "ls-files", "-z"] and len(command) > 3:
+            return _tracked(".gitattributes")
+        if command == ["git", "ls-files", "-z"]:
+            return _tracked("asset.bin")
+        return None
+
+    with patch.object(git_commands, "_run_git_command", side_effect=run):
+        affected, unreadable = git_commands.find_repos_with_lfs_pointers(
+            str(tmp_path), repos={"selected"}
+        )
+
+    assert affected == [("selected", ["asset.bin"])]
+    assert unreadable == []
+
+
 def test_repo_scan_sees_a_worktree_whose_git_is_a_file(tmp_path):
     src = tmp_path / "src"
     _make_src_repo(src, "worktree", git_as_file=True)
