@@ -385,7 +385,7 @@ raisin_prompt_for_python() {
 
   case "${choice:-${default_choice}}" in
     1|"")
-      raisin_create_env "${DEFAULT_ENV_DIR}"
+      raisin_create_env "${DEFAULT_ENV_DIR}" >&2
       raisin_resolve_python "${DEFAULT_ENV_DIR}"
       return 0
       ;;
