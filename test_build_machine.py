@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -146,6 +147,9 @@ class BuildMachineFetch(unittest.TestCase):
         cls.server.server_close()
 
     def setUp(self):
+        development = patch.dict(os.environ, RAISIN_DEV_ALLOW_LOOPBACK_HTTP='1')
+        development.start()
+        self.addCleanup(development.stop)
         self.into = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.into, ignore_errors=True)
         FakeOta.seen_keys = []

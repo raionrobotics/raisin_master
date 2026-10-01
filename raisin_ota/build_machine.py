@@ -42,7 +42,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional, Sequence
 
-import requests
+from . import transport as requests
 
 from .client import (
     _download_to_path,
