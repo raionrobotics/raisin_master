@@ -1698,6 +1698,131 @@ def find_git_repos(base_dir):
     return git_repos
 
 
+def install_development_tools():
+    """
+    Install development tools (clang-format, pre-commit) if not already installed.
+    """
+    print("Checking and installing development tools...")
+
+    # Check if clang-format is installed
+    try:
+        subprocess.run(["clang-format", "--version"], capture_output=True, check=True)
+        print("✅ clang-format is already installed")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Installing clang-format...")
+        try:
+            # Install clang-format based on the system
+            if platform.system() == "Linux":
+                # Try apt first (Ubuntu/Debian)
+                try:
+                    if is_root():
+                        subprocess.run(["apt", "update"], check=True)
+                        subprocess.run(
+                            ["apt", "install", "-y", "clang-format"], check=True
+                        )
+                    else:
+                        subprocess.run(["sudo", "apt", "update"], check=True)
+                        subprocess.run(
+                            ["sudo", "apt", "install", "-y", "clang-format"], check=True
+                        )
+                    print("✅ clang-format installed via apt")
+                except subprocess.CalledProcessError:
+                    # Try snap as fallback
+                    try:
+                        if is_root():
+                            subprocess.run(
+                                ["snap", "install", "clang-format"], check=True
+                            )
+                        else:
+                            subprocess.run(
+                                ["sudo", "snap", "install", "clang-format"], check=True
+                            )
+                        print("✅ clang-format installed via snap")
+                    except subprocess.CalledProcessError:
+                        print(
+                            "❌ Failed to install clang-format. Please install manually."
+                        )
+            else:
+                print(
+                    "❌ Automatic clang-format installation not supported on this platform. Please install manually."
+                )
+        except Exception as e:
+            print(f"❌ Error installing clang-format: {str(e)}")
+
+        # Check if pre-commit is installed
+    pre_commit_installed = False
+
+    # Try system Python first (for git hooks)
+    try:
+        result = subprocess.run(
+            ["/usr/bin/python3", "-m", "pre_commit", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            print("✅ pre-commit is already installed (system Python)")
+            pre_commit_installed = True
+    except Exception:
+        pass
+
+    # Try direct command if system Python doesn't work
+    if not pre_commit_installed:
+        try:
+            result = subprocess.run(
+                ["pre-commit", "--version"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                print("✅ pre-commit is already installed")
+                pre_commit_installed = True
+        except Exception:
+            pass
+
+    # Try current Python module if direct command failed
+    if not pre_commit_installed:
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pre_commit", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                print("✅ pre-commit is already installed (python module)")
+                pre_commit_installed = True
+        except Exception:
+            pass
+
+    if not pre_commit_installed:
+        print("Installing pre-commit...")
+        try:
+            # Try to install pre-commit to system Python first (for git hooks)
+            # Check if current Python is already system Python3
+            commands = ["/usr/bin/python3", "-m", "pip", "install", "pre-commit"]
+            if not is_root():
+                commands.insert(0, "sudo")
+            if sys.executable == "/usr/bin/python3":
+                commands.append("--break-system-packages")
+            subprocess.run(commands, check=True)
+            print("✅ pre-commit installed to system Python via pip")
+        except subprocess.CalledProcessError:
+            try:
+                # Fallback to current Python environment
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "pre-commit"], check=True
+                )
+                print("✅ pre-commit installed via pip")
+            except subprocess.CalledProcessError:
+                try:
+                    # Try with pip3 as fallback
+                    subprocess.run(["pip3", "install", "pre-commit"], check=True)
+                    print("✅ pre-commit installed via pip3")
+                except subprocess.CalledProcessError:
+                    print(
+                        "❌ Failed to install pre-commit. Please install manually: sudo /usr/bin/python3 -m pip install pre-commit"
+                    )
+
+
 def get_commit_hash(repo_path):
     """
     Returns the current commit hash (HEAD) for the repository at repo_path.
