@@ -49,7 +49,7 @@ cmake-*/*
 generated/*
 build/*
 install/*
-src/*
+/src/
 log/*
 git_pull.sh
 
