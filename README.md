@@ -90,6 +90,20 @@ export RAISIN_ROBOT_API_KEY="rk_..."  # pragma: allowlist secret
 export RAISIN_ROBOT_NODE="jetson"
 ```
 
+#### Local development transport
+
+OTA requires HTTPS with certificate/hostname validation. For a disposable test
+server on the same machine only, set `RAISIN_DEV_ALLOW_LOOPBACK_HTTP=1` and use
+`http://127.0.0.1:PORT/api` (or literal `[::1]`). `localhost`, LAN/DNS HTTP,
+redirects and disabling TLS verification are rejected. HTTP ignores environment
+proxies and `.netrc`. Use a separate development identity and credential cache.
+The setting is process-scoped and never enables an automatic HTTPS downgrade.
+
+For a NUC/fleet connecting to a development host, use the [reusable TLS ingress](https://github.com/raionrobotics/raisin-package-manager/blob/main/docs/development-transport.md)
+and `REQUESTS_CA_BUNDLE=/absolute/path/to/ca.pem`. Keep the generated CA and reuse
+its public certificate across sessions. This does not update an installed
+`raisin-ota-agent` release pin; it must adopt a subsequent core release.
+
 #### SSH Key Authentication
 
 OTA authentication uses SSH key-based challenge-response. The following key types are supported:

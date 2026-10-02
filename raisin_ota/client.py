@@ -26,7 +26,7 @@ import time
 import uuid
 import zipfile
 
-import requests
+from . import transport as requests
 import yaml
 from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from dataclasses import dataclass
