@@ -46,7 +46,7 @@ Follow these steps to configure and build your project.
 
 Run the install command to set up the RAISIN command-line tool. This:
 - Creates a Python virtual environment
-- Installs system dependencies (Python, CMake, Ninja, clang-format, pre-commit, gh)
+- Installs system dependencies (Python, CMake, Ninja, clang-format, gh). pre-commit comes from `requirements.txt` in the virtual environment
 - Adds a shell function for auto-activation
 
 ```bash
