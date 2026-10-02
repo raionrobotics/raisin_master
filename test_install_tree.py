@@ -342,6 +342,39 @@ class TestTamperRecovery(InstallTreeTestCase):
 
         self.assertEqual(it.current_version(self.release), "2.0.0")
 
+    def test_recovery_ignores_a_newer_abandoned_staging_tree(self):
+        self._commit("1.0.0")
+        self._write_pkg(it.stage_version(self.release, "2.0.0"), "pkg1", "partial")
+        (self.release / "install").unlink()
+
+        it.ensure_tree(self.release)
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_first_interrupted_install_is_not_activated_by_recovery(self):
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "partial")
+
+        it.ensure_tree(self.release)
+
+        self.assertFalse((self.release / "install").is_symlink())
+        self.assertIsNone(it.current_version(self.release))
+
+    def test_failed_switch_keeps_the_staging_marker_until_cleanup(self):
+        self._commit("1.0.0")
+        staged = it.stage_version(self.release, "2.0.0")
+        self._write_pkg(staged, "pkg1", "new")
+        with patch.object(
+            it, "_point_current_at", side_effect=OSError("cannot switch")
+        ):
+            with self.assertRaises(OSError):
+                it.commit_version(self.release, "2.0.0")
+        self.assertTrue((staged / ".staging").is_file())
+        (self.release / "install").unlink()
+
+        it.ensure_tree(self.release)
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
     def test_recovery_is_a_noop_when_nothing_was_touched(self):
         self._commit("1.0.0")
         self._commit("2.0.0")

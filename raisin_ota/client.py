@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from . import install_tree
-from .install_tree import safe_component
+from .install_tree import InstallTreeUnusable, safe_component
 
 # Module-level cached auth token (lives for the CLI session)
 _cached_token = None
@@ -2846,6 +2846,7 @@ def _extract_and_read_deps(
     package_name: str,
     version: str,
     install_metadata: Optional[dict] = None,
+    strict: bool = False,
 ) -> Optional[dict]:
     """Extract downloaded package and read dependencies.
 
@@ -2866,14 +2867,12 @@ def _extract_and_read_deps(
             download_file.unlink()
         return None
 
-    print(f"✅ Successfully installed '{package_name}=={version}' from OTA server.")
-    _write_install_metadata(install_dir, install_metadata)
-
     # Read dependencies from release.yaml. The file ships inside the package,
     # so it is not necessarily well formed: `safe_load` happily returns a str
     # or a list, and `or {}` does not catch either — the install then died on
     # AttributeError instead of installing.
     dependencies = []
+    release_info = None
     release_yaml = install_dir / "release.yaml"
     if release_yaml.is_file():
         try:
@@ -2896,6 +2895,37 @@ def _extract_and_read_deps(
             print(
                 f"⚠️ Ignoring release.yaml for '{package_name}': expected a " "mapping."
             )
+
+    if strict:
+        from packaging.version import Version
+
+        try:
+            if not isinstance(release_info, dict):
+                raise ValueError("a readable release.yaml mapping is required")
+            if Version(str(release_info.get("version", ""))) != Version(str(version)):
+                raise ValueError(
+                    "release.yaml version does not match the selected OTA package"
+                )
+            declared = release_info.get("dependencies", [])
+            if not isinstance(declared, list):
+                raise ValueError("dependencies must be a list of package specifiers")
+            for dependency in declared:
+                match = (
+                    re.fullmatch(
+                        r"\s*([a-zA-Z0-9_][a-zA-Z0-9_.-]*)\s*(.*?)\s*", dependency
+                    )
+                    if isinstance(dependency, str)
+                    else None
+                )
+                if match is None or parse_version_specifier(match.group(2)) is None:
+                    raise ValueError(f"invalid dependency specifier: {dependency!r}")
+        except ValueError as error:
+            print(f"❌ Invalid OTA metadata for '{package_name}': {error}.")
+            return None
+
+    action = "Prepared" if strict else "Successfully installed"
+    print(f"✅ {action} '{package_name}=={version}' from OTA server.")
+    _write_install_metadata(install_dir, install_metadata)
 
     result = {"version": version, "dependencies": dependencies}
     if install_metadata:
@@ -3164,6 +3194,117 @@ def _report_snapshot_from_install_metadata(
     return False
 
 
+class PackageInstallTransaction:
+    """One staged tree and one commit for a package dependency closure.
+
+    Staging is lazy: resolving only local sources or installed packages does
+    not create a version. Downloaded ZIPs supply dependency metadata; unpacking
+    them never changes the live tree. Snapshot reports are queued after commit.
+    The caller holds the workspace install-state lock.
+    """
+
+    def __init__(self, install_base_path: Path, *, upgrade: bool = False):
+        # Cache only within this install attempt. A later command must observe
+        # a moved tag or a newly published archive, even in the same process.
+        _archive_cache.clear()
+        self.install_base_path = Path(install_base_path)
+        self.release = install_tree.release_for(self.install_base_path)
+        self.staging = None
+        self.version = None
+        self.committed = False
+        self.packages = {}
+        self.reports = {}
+        self.upgrade = upgrade
+        self.selected_archive = None
+        self.selected_archive_name = None
+        self.archive_roots = set()
+        self.archive_prepared = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _kind, _error, _traceback):
+        if self.staging is not None and not self.committed:
+            install_tree.discard_staging(self.release, self.version)
+        return False
+
+    @property
+    def package_base(self) -> Path:
+        return self.staging if self.staging is not None else self.install_base_path
+
+    def stage(self, version: Optional[str] = None) -> Path:
+        if self.staging is None:
+            if self.install_base_path.name != "install":
+                raise InstallTreeUnusable(
+                    "a package transaction requires a release/install path"
+                )
+            if self.install_base_path.is_symlink() and not install_tree._is_our_link(
+                self.install_base_path
+            ):
+                raise InstallTreeUnusable(
+                    "release/install points outside release/versions; move the "
+                    "whole release directory to use versioned package installs"
+                )
+            repaired = install_tree.ensure_tree(self.release)
+            if repaired:
+                print(f"🔧 {repaired}")
+            self.version = version or "packages"
+            self.staging = install_tree.stage_version(self.release, self.version)
+            print(
+                f"📦 Preparing packages in '{self.staging}'; the live tree is unchanged."
+            )
+        return self.staging
+
+    def record_package(self, name: str, build_type: str) -> None:
+        self.packages.setdefault(build_type, set()).add(name)
+
+    def record_archive(self, **report) -> None:
+        key = (report["archive_id"], report["platform_str"], report["build_type"])
+        previous = self.reports.get(key)
+        if previous:
+            report["manifest_hashes"] = {
+                **previous["manifest_hashes"],
+                **report["manifest_hashes"],
+            }
+        self.reports[key] = report
+
+    def commit(self) -> bool:
+        if self.staging is None:
+            return True
+        for build_type, names in self.packages.items():
+            broken = _unusable_packages(self.staging, names, build_type)
+            if broken:
+                note_install_failure(
+                    "unpack", "unpack_failed", f"unusable packages: {', '.join(broken)}"
+                )
+                print(f"❌ Staged packages are unusable: {', '.join(broken)}.")
+                return False
+        committed = install_tree.commit_version(
+            self.release,
+            self.version,
+            session=get_install_session_id(),
+        )
+        if committed is None:
+            note_install_failure("unpack", ERROR_UNKNOWN, "package tree commit failed")
+            print(
+                "❌ Could not switch release/install; the previous tree remains active."
+            )
+            return False
+        self.committed = True
+        print(
+            f"🔀 Switched release/install to '{committed}'; the previous version is retained."
+        )
+        for report in self.reports.values():
+            _queue_snapshot_report(install_base_path=self.install_base_path, **report)
+        try:
+            install_tree.prune_versions(self.release, keep=_version_retention())
+        except OSError as error:
+            print(
+                f"⚠️ Packages were activated, but old versions could not be pruned: {error}."
+            )
+        return True
+
+
 def download_package(
     package_name: str,
     spec_str: str,
@@ -3172,6 +3313,49 @@ def download_package(
     archive_version: Optional[str] = None,
     archive_name: Optional[str] = None,
     tag: Optional[str] = "stable",
+    *,
+    transaction: Optional[PackageInstallTransaction] = None,
+) -> Optional[dict]:
+    """Fetch a package into a shared transaction, or commit it independently.
+
+    A dependency resolver passes one transaction for the entire closure and
+    commits after every requirement succeeds. Independent callers receive the
+    same versioned-tree protection for the single package they request.
+    """
+    if transaction is not None:
+        return _download_package(
+            package_name,
+            spec_str,
+            build_type,
+            install_base_path,
+            archive_version,
+            archive_name,
+            tag,
+            transaction,
+        )
+    with PackageInstallTransaction(install_base_path) as transaction:
+        result = _download_package(
+            package_name,
+            spec_str,
+            build_type,
+            install_base_path,
+            archive_version,
+            archive_name,
+            tag,
+            transaction,
+        )
+        return result if result and transaction.commit() else None
+
+
+def _download_package(
+    package_name: str,
+    spec_str: str,
+    build_type: str,
+    install_base_path: Path,
+    archive_version: Optional[str],
+    archive_name: Optional[str],
+    tag: Optional[str],
+    transaction: PackageInstallTransaction,
 ) -> Optional[dict]:
     """Download a single package from the OTA server's archive.
 
@@ -3197,11 +3381,15 @@ def download_package(
     from packaging.version import parse as parse_version, InvalidVersion
 
     platform_str = _ctx().platform
-    archive_name = get_archive_name(build_type, archive_name)
+    archive_name = transaction.selected_archive_name or get_archive_name(
+        build_type, archive_name
+    )
 
     # Selection priority mirrors download_all_from_archive:
     # archive_version > tag > legacy latest-by-time.
-    if archive_version:
+    if transaction.selected_archive is not None:
+        manifest = transaction.selected_archive
+    elif archive_version:
         manifest = _fetch_archive_manifest(archive_name, platform_str, archive_version)
     elif tag:
         manifest = _fetch_archive_with_stable_fallback(archive_name, platform_str, tag)
@@ -3223,6 +3411,13 @@ def download_package(
     packages, archive_id, actual_version = manifest
     if not archive_id:
         return None
+    if not isinstance(packages, list) or any(
+        not isinstance(pkg, dict) for pkg in packages
+    ):
+        print("❌ Invalid OTA archive package list; nothing was installed.")
+        return None
+    transaction.selected_archive = manifest
+    transaction.selected_archive_name = archive_name
 
     # Parse version specifier
     spec = parse_version_specifier(spec_str)
@@ -3233,14 +3428,18 @@ def download_package(
     # Manifest entries have tagName (e.g. "v1.0.0") instead of version
     best_pkg = None
     best_version = None
+    available_versions = []
     for pkg in packages:
         name = pkg.get("packageName") or pkg.get("name", "")
         if name != package_name:
             continue
         tag = pkg.get("tagName") or pkg.get("version", "")
+        if not isinstance(tag, str):
+            continue
         pkg_version_str = tag.lstrip("vV") if tag else ""
         try:
             pkg_version = parse_version(pkg_version_str)
+            available_versions.append(pkg_version)
             if spec.contains(pkg_version):
                 if best_version is None or pkg_version > best_version:
                     best_version = pkg_version
@@ -3249,6 +3448,18 @@ def download_package(
             continue
 
     if not best_pkg:
+        if transaction.upgrade and available_versions:
+            installed = _read_compatible_installed_package(
+                _ctx().package_dir(transaction.package_base, package_name, build_type),
+                spec,
+            )
+            if installed is not None:
+                print(
+                    f"✅ Keeping installed '{package_name}=={installed[0]}': "
+                    f"the selected OTA archive has no update satisfying '{spec}'. "
+                    "OTA lookup completed; download skipped."
+                )
+                return {"version": str(installed[0]), "dependencies": installed[1]}
         return None
 
     # Download the package
@@ -3257,19 +3468,50 @@ def download_package(
         return None
     tag = best_pkg.get("tagName") or best_pkg.get("version", "")
     version = tag.lstrip("vV") if tag else "0.0.0"
+    safe_component(package_name, "package name")
 
-    install_dir = _ctx().package_dir(install_base_path, package_name, build_type)
+    if transaction.upgrade:
+        installed = _read_compatible_installed_package(
+            _ctx().package_dir(transaction.package_base, package_name, build_type),
+            spec,
+        )
+        if installed is not None:
+            installed_version, dependencies, metadata = installed
+            same_archive = metadata.get("archiveId") == archive_id
+            same_hashes = bool(best_pkg.get("blobHash")) and (
+                metadata.get("blobHash") == best_pkg.get("blobHash")
+                and metadata.get("manifestHash") == best_pkg.get("manifestHash")
+            )
+            if installed_version > best_version or (
+                installed_version == best_version and same_archive and same_hashes
+            ):
+                reason = (
+                    "already newer than the selected OTA package"
+                    if installed_version > best_version
+                    else "already matches the selected OTA archive and content hashes"
+                )
+                print(
+                    f"✅ Keeping installed '{package_name}=={installed_version}': {reason}. "
+                    "OTA lookup completed; download skipped."
+                )
+                return {"version": str(installed_version), "dependencies": dependencies}
+        else:
+            # A stricter requirement may force a lower candidate than a package
+            # previously chosen in this run. Upgrade never silently downgrades.
+            path = _ctx().package_dir(
+                transaction.package_base, package_name, build_type
+            )
+            current = _read_compatible_installed_package(path, SpecifierSet())
+            if current is not None and current[0] > best_version:
+                print(
+                    f"❌ Upgrading '{package_name}' would downgrade {current[0]} to {best_version} "
+                    f"to satisfy '{spec}'. Use an explicit install to restore an older version."
+                )
+                return None
 
     download_file = _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
 
     install_session_id = get_install_session_id()
-
-    # Keep the live symlink healthy, but note the limitation: this path writes
-    # into the tree that is already live, so a single-package install has no
-    # atomic switch and no rollback. install.py calls it once per package, so
-    # staging here would mint a version per package. Bringing it under the same
-    # transaction as download_all_from_archive is follow-up work.
-    install_tree.ensure_tree(install_tree.release_for(install_base_path))
 
     record_install_event(
         "started",
@@ -3297,6 +3539,10 @@ def download_package(
         )
         return None
 
+    install_dir = _ctx().package_dir(
+        transaction.stage(actual_version), package_name, build_type
+    )
+
     install_metadata = _build_archive_install_metadata(
         package_name=package_name,
         package_id=pkg_id,
@@ -3319,14 +3565,15 @@ def download_package(
         package_name,
         version,
         install_metadata=install_metadata,
+        strict=True,
     )
     if not result:
         note_install_failure(
             "unpack", "unpack_failed", f"could not unpack '{package_name}'"
         )
     if result:
-        _queue_snapshot_report(
-            install_base_path=install_base_path,
+        transaction.record_package(package_name, build_type)
+        transaction.record_archive(
             archive_id=archive_id,
             archive_name=archive_name,
             archive_version=actual_version,
@@ -3336,6 +3583,37 @@ def download_package(
             manifest_hashes=manifest_hashes_by_package_id(packages),
         )
     return result
+
+
+def _read_compatible_installed_package(path: Path, spec: SpecifierSet):
+    """Read a reusable binary's dependency metadata for an upgrade comparison."""
+    from packaging.version import Version
+
+    try:
+        info = yaml.safe_load((path / "release.yaml").read_text(encoding="utf-8"))
+        if not isinstance(info, dict):
+            return None
+        version = Version(str(info.get("version", "")))
+        dependencies = info.get("dependencies", [])
+        if not spec.contains(version) or not isinstance(dependencies, list):
+            return None
+        for dependency in dependencies:
+            match = (
+                re.fullmatch(r"\s*([a-zA-Z0-9_][a-zA-Z0-9_.-]*)\s*(.*?)\s*", dependency)
+                if isinstance(dependency, str)
+                else None
+            )
+            if not match or parse_version_specifier(match.group(2)) is None:
+                return None
+        try:
+            metadata = json.loads(
+                (path / _INSTALL_METADATA_FILE).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            metadata = {}
+        return version, dependencies, metadata if isinstance(metadata, dict) else {}
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
 
 
 def _drop_empty_parents(directory: Path, stop_at: Path) -> None:
@@ -3451,6 +3729,9 @@ def download_all_from_archive(
     archive_name: Optional[str] = None,
     tag: Optional[str] = "stable",
     report_snapshot: bool = True,
+    *,
+    transaction: Optional[PackageInstallTransaction] = None,
+    source_packages: Optional[set] = None,
 ) -> dict:
     """Download all packages from an archive.
 
@@ -3574,6 +3855,58 @@ def download_all_from_archive(
             f"refusing to install an archive that cannot be named."
         )
         return {}
+
+    if transaction is not None:
+        # The developer CLI resolves ZIP-declared dependencies before one
+        # shared commit. The agent's independent full-archive path below keeps
+        # its deployment/health-check lifecycle and pruning policy.
+        if not isinstance(packages, list) or any(
+            not isinstance(pkg, dict) for pkg in packages
+        ):
+            print(
+                "❌ Invalid OTA archive package list; refusing to prepare an incomplete archive."
+            )
+            return {}
+        transaction.selected_archive = manifest
+        transaction.selected_archive_name = archive_name
+        names = [pkg.get("packageName") or pkg.get("name", "") for pkg in packages]
+        if any(
+            not isinstance(name, str)
+            or not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", name)
+            for name in names
+        ):
+            print("❌ Invalid package name in the OTA archive; nothing was installed.")
+            return {}
+        transaction.archive_roots = set(names)
+        if not transaction.archive_roots:
+            print(
+                f"❌ Archive '{archive_name}' v{actual_version} contains no packages."
+            )
+            return {}
+        print(f"📦 Using archive: {archive_name} v{actual_version}")
+        results = {}
+        requested = transaction.archive_roots - set(source_packages or ())
+        for name in sorted(requested):
+            result = download_package(
+                name,
+                "",
+                build_type,
+                install_base_path,
+                archive_version=archive_version,
+                archive_name=archive_name,
+                tag=tag,
+                transaction=transaction,
+            )
+            if result:
+                results[name] = result
+        missing = sorted(requested - set(results))
+        if missing:
+            print(
+                f"❌ Not activating archive '{archive_name}': missing packages {', '.join(missing)}."
+            )
+            return {}
+        transaction.archive_prepared = True
+        return results
 
     print(f"📦 Using archive: {archive_name} v{actual_version}")
     install_session_id = _session_for(archive_id)
@@ -3916,6 +4249,35 @@ def download_package_at_timestamp(
     timestamp: str,
     build_type: str,
     install_base_path: Path,
+    *,
+    transaction: Optional[PackageInstallTransaction] = None,
+) -> Optional[dict]:
+    """Fetch a timestamped package without modifying the live tree until commit."""
+    if transaction is not None:
+        return _download_package_at_timestamp(
+            package_name,
+            timestamp,
+            build_type,
+            install_base_path,
+            transaction,
+        )
+    with PackageInstallTransaction(install_base_path) as transaction:
+        result = _download_package_at_timestamp(
+            package_name,
+            timestamp,
+            build_type,
+            install_base_path,
+            transaction,
+        )
+        return result if result and transaction.commit() else None
+
+
+def _download_package_at_timestamp(
+    package_name: str,
+    timestamp: str,
+    build_type: str,
+    install_base_path: Path,
+    transaction: PackageInstallTransaction,
 ) -> Optional[dict]:
     """Download a package at a specific timestamp (time-travel).
 
@@ -3969,8 +4331,6 @@ def download_package_at_timestamp(
             print(f"⚠️ Manifest for '{package_name}' has no blob hash")
             return None
 
-        install_dir = _ctx().package_dir(install_base_path, package_name, build_type)
-
         download_file = (
             _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
         )
@@ -3978,6 +4338,8 @@ def download_package_at_timestamp(
         print(f"⬇️  Downloading '{package_name}' v{version} (at {timestamp})...")
         if not _download_blob_by_hash(blob_hash, download_file):
             return None
+
+        install_dir = _ctx().package_dir(transaction.stage(), package_name, build_type)
 
         install_metadata = {
             "schemaVersion": 1,
@@ -3997,13 +4359,17 @@ def download_package_at_timestamp(
             "manifestCreatedAt": manifest.get("createdAt"),
         }
 
-        return _extract_and_read_deps(
+        result = _extract_and_read_deps(
             download_file,
             install_dir,
             package_name,
             version,
             install_metadata=install_metadata,
+            strict=True,
         )
+        if result:
+            transaction.record_package(package_name, build_type)
+        return result
 
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:

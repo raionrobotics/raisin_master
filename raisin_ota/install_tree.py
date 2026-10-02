@@ -125,7 +125,9 @@ def _is_our_link(link: Path) -> bool:
 
 
 def _newest_available(release) -> Optional[str]:
-    generations = _generations(release)
+    # A process killed before commit can leave the newest generation behind.
+    # Repairing a missing link must never turn that partial tree into a release.
+    generations = [item for item in _generations(release) if not _is_staging(item[2])]
     return generations[-1][2].name if generations else None
 
 
@@ -395,14 +397,16 @@ def commit_version(
     if target is None:
         return None
 
+    outgoing = _current_dir_name(release)
+    committed_by = _read_commit_session(release)
+    _point_current_at(release, target.name)
+
+    # Keep the marker until the atomic switch succeeds. A crash or refused
+    # rename before that point must not leave a recovery-eligible partial tree.
     try:
         (target / _STAGING_MARKER).unlink()
     except OSError:
         pass
-
-    outgoing = _current_dir_name(release)
-    committed_by = _read_commit_session(release)
-    _point_current_at(release, target.name)
 
     replacing_own_work = bool(session) and session == committed_by
     if outgoing and outgoing != target.name and not replacing_own_work:
