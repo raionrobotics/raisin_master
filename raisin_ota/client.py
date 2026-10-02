@@ -2780,10 +2780,13 @@ def _download_package_blob(
     return _stream_download(url, download_path, package_name)
 
 
-def _write_install_metadata(install_dir: Path, metadata: Optional[dict]) -> None:
+def _write_install_metadata(
+    install_dir: Path, metadata: Optional[dict], *, strict: bool = False
+) -> None:
     """Persist OTA install metadata next to the extracted package.
 
     This is written after extraction, so it does not affect the archive blob hash.
+    Strict transactions require persistence before package activation.
     """
     if not metadata:
         return
@@ -2796,6 +2799,8 @@ def _write_install_metadata(install_dir: Path, metadata: Optional[dict]) -> None
         )
         print(f"📝 Recorded OTA metadata: {metadata_path}")
     except OSError as e:
+        if strict:
+            raise
         print(
             f"⚠️ Failed to write OTA metadata for '{install_dir.absolute().as_posix()}': {e}"
         )
@@ -2923,9 +2928,9 @@ def _extract_and_read_deps(
             print(f"❌ Invalid OTA metadata for '{package_name}': {error}.")
             return None
 
+    _write_install_metadata(install_dir, install_metadata, strict=strict)
     action = "Prepared" if strict else "Successfully installed"
     print(f"✅ {action} '{package_name}=={version}' from OTA server.")
-    _write_install_metadata(install_dir, install_metadata)
 
     result = {"version": version, "dependencies": dependencies}
     if install_metadata:
@@ -3197,9 +3202,9 @@ def _report_snapshot_from_install_metadata(
 class PackageInstallTransaction:
     """One staged tree and one commit for a package dependency closure.
 
-    Staging is lazy: resolving only local sources or installed packages does
-    not create a version. Downloaded ZIPs supply dependency metadata; unpacking
-    them never changes the live tree. Snapshot reports are queued after commit.
+    Staging is lazy: retaining sources or binaries creates no version unless
+    archive metadata needs refreshing. Downloaded ZIPs supply dependencies;
+    unpacking never changes the live tree. Snapshots are queued after commit.
     The caller holds the workspace install-state lock.
     """
 

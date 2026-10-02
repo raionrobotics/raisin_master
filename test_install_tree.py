@@ -359,6 +359,34 @@ class TestTamperRecovery(InstallTreeTestCase):
         self.assertFalse((self.release / "install").is_symlink())
         self.assertIsNone(it.current_version(self.release))
 
+    def test_failed_staging_marker_preserves_the_previous_tree_and_recovery(self):
+        self._commit("1.0.0")
+        previous = (self.release / "install").resolve()
+        write = Path.write_text
+
+        def fail_marker(path, *args, **kwargs):
+            if path.name == it._STAGING_MARKER:
+                raise OSError(errno.ENOSPC, "cannot record staging marker")
+            return write(path, *args, **kwargs)
+
+        with patch.object(Path, "write_text", fail_marker):
+            with self.assertRaises(OSError):
+                it.stage_version(self.release, "2.0.0")
+        self.assertEqual((self.release / "install").resolve(), previous)
+        self.assertEqual(list(it.versions_dir(self.release).iterdir()), [previous])
+        (self.release / "install").unlink()
+        it.ensure_tree(self.release)
+        self.assertEqual((self.release / "install").resolve(), previous)
+
+    def test_first_install_marker_failure_cannot_leave_a_recoverable_tree(self):
+        with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                it.stage_version(self.release, "1.0.0")
+        it.ensure_tree(self.release)
+        self.assertIsNone(it.current_version(self.release))
+        self.assertFalse((self.release / "install").exists())
+        self.assertEqual(list(it.versions_dir(self.release).iterdir()), [])
+
     def test_failed_switch_keeps_the_staging_marker_until_cleanup(self):
         self._commit("1.0.0")
         staged = it.stage_version(self.release, "2.0.0")

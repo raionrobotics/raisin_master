@@ -1340,7 +1340,9 @@ def test_new_archive_reuses_identical_content_and_commits_new_snapshot_reference
     assert reports[0]["archive_id"] == "archive-id"
 
 
-@pytest.mark.parametrize("failure", ["dependency", "metadata-write"])
+@pytest.mark.parametrize(
+    "failure", ["dependency", "metadata-write", "activation", "staging-marker"]
+)
 def test_archive_references_for_reused_content_are_unchanged_on_failed_install(
     workspace, monkeypatch, failure
 ):
@@ -1364,6 +1366,21 @@ def test_archive_references_for_reused_content_are_unchanged_on_failed_install(
             return replace(source, destination)
 
         monkeypatch.setattr(ota.os, "replace", fail_metadata)
+    if failure == "activation":
+
+        def fail_activation(*args):
+            raise OSError("cannot switch the live symlink")
+
+        monkeypatch.setattr(install_tree, "_point_current_at", fail_activation)
+    if failure == "staging-marker":
+        write = Path.write_text
+
+        def fail_marker(path, *args, **kwargs):
+            if path.name == install_tree._STAGING_MARKER:
+                raise OSError("cannot record staging marker")
+            return write(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", fail_marker)
     assert not install.install_command(["gui"], "release", upgrade=True)
     assert not workspace.transfers
     assert (workspace.root / "release/install").resolve() == previous
@@ -1371,4 +1388,63 @@ def test_archive_references_for_reused_content_are_unchanged_on_failed_install(
         json.loads((directory / ota._INSTALL_METADATA_FILE).read_text())["archiveId"]
         == "previous-archive"
     )
+    assert not reports
+    assert list((workspace.root / "release/versions").iterdir()) == [previous]
+
+
+@pytest.mark.parametrize("include_local", [False, True])
+@pytest.mark.parametrize("manifest", [None, "[broken yaml", "- not-a-mapping\n"])
+def test_targeted_install_does_not_validate_unrelated_broken_source(
+    workspace, include_local, manifest
+):
+    previous = prepare_previous_tree(workspace)
+    source = workspace.root / "src/test_plugin"
+    source.mkdir(parents=True)
+    if manifest is not None:
+        (source / "release.yaml").write_text(manifest)
+    workspace.publish("gui", "2.0.0", ["shared"])
+    workspace.publish("shared", "2.0.0")
+
+    assert install.install_command(
+        ["gui"], "release", upgrade=True, include_local=include_local
+    ) == (not include_local)
+    if include_local:
+        assert (workspace.root / "release/install").resolve() == previous
+    else:
+        assert (
+            yaml.safe_load(
+                (workspace.package_dir("shared") / "release.yaml").read_text()
+            )["version"]
+            == "2.0.0"
+        )
+
+
+@pytest.mark.parametrize("all_packages", [False, True])
+def test_downloaded_metadata_write_failure_does_not_activate_packages(
+    workspace, monkeypatch, all_packages
+):
+    previous = prepare_previous_tree(workspace)
+    reports = []
+    monkeypatch.setattr(
+        ota, "_queue_snapshot_report", lambda **kwargs: reports.append(kwargs)
+    )
+    workspace.publish("gui", "2.0.0")
+    write = Path.write_text
+
+    def fail_metadata(path, *args, **kwargs):
+        if path.name == ota._INSTALL_METADATA_FILE:
+            raise OSError("cannot write downloaded package metadata")
+        return write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_metadata)
+
+    assert not install.install_command(
+        [] if all_packages else ["gui"],
+        "release",
+        tag="latest",
+        all_packages=all_packages,
+    )
+    assert (workspace.root / "release/install").resolve() == previous
+    assert (workspace.package_dir("gui") / "payload.txt").read_text() == "old gui"
+    assert list((workspace.root / "release/versions").iterdir()) == [previous]
     assert not reports

@@ -352,7 +352,10 @@ def stage_version(release, version: str) -> Path:
     try:
         (staging / _STAGING_MARKER).write_text("", encoding="utf-8")
     except OSError:
-        pass
+        # An unmarked partial tree is eligible for symlink recovery. Refuse
+        # to prepare packages there if its crash marker could not be written.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return staging
 
 

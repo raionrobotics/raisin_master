@@ -228,6 +228,7 @@ class Verification:
                     "gui": [self.names["core"] + ">=1"],
                     "raibo2": [self.names["core"] + ">=1"],
                     "core": [self.names["leaf"] + ">=1"],
+                    "extra": [self.names["core"] + "<2"] if version == "1.0.0" else [],
                 }.get(label, [])
                 entries[label] = self.publish(
                     ids[label], self.names[label], version, dependencies
@@ -543,6 +544,42 @@ class Verification:
             [n["gui"], "--upgrade", "--include-local"],
             expected=1,
             preserve=True,
+        )
+        binary_consumer = self.workspace("installed-consumer", clone=baseline)
+        self.run(
+            "installed-consumer-baseline",
+            binary_consumer,
+            [n["extra"]],
+            packages={n[label]: "1.0.0" for label in ("gui", "core", "leaf", "extra")},
+        )
+        self.run(
+            "installed-consumer-conflict",
+            binary_consumer,
+            [n["gui"], "--upgrade"],
+            expected=1,
+            preserve=True,
+            log_contains=("Retained package",),
+        )
+        broken_source = self.workspace("broken-unrelated-source", clone=baseline)
+        broken = self.source(broken_source, "test_plugin")
+        (broken / "release.yaml").write_text("[broken yaml")
+        self.run(
+            "unrelated-broken-source-allowed",
+            broken_source,
+            [n["gui"], "--upgrade"],
+            packages=closure("gui", "2.0.0"),
+            log_excludes=(
+                "Cannot verify local source",
+                "Cannot validate retained package",
+            ),
+        )
+        self.run(
+            "selected-broken-source-rejected",
+            broken_source,
+            [n["gui"], "--upgrade", "--include-local"],
+            expected=1,
+            preserve=True,
+            log_contains=("Cannot verify local source",),
         )
         self.run(
             "bare-source-roots",
