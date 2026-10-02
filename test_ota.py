@@ -888,7 +888,7 @@ class TestExtractedModes(unittest.TestCase):
 
     def test_an_entry_with_no_recorded_mode_is_left_alone(self):
         with zipfile.ZipFile(self.download, "w") as zf:
-            zf.writestr("lib/plain.so", "x")   # no external_attr
+            zf.writestr("lib/plain.so", "x")  # no external_attr
         result = ota._extract_and_read_deps(
             self.download, self.install_dir, "pkg1", "1.0.0"
         )
@@ -1145,9 +1145,7 @@ class TestFlushSaysWhyItDidNotDrain(unittest.TestCase):
     def test_a_flush_uses_the_same_machine_denial_vocabulary(self):
         refused = _mock_response(
             status_code=403,
-            json_data={
-                "error": {"code": "ROBOT_CREDENTIAL_NODE_MISMATCH"}
-            },
+            json_data={"error": {"code": "ROBOT_CREDENTIAL_NODE_MISMATCH"}},
         )
         refused.raise_for_status.side_effect = requests.HTTPError(response=refused)
 
@@ -1227,7 +1225,7 @@ class TestHaltStopsTheInstall(unittest.TestCase):
             ),
             patch("raisin_ota.client.download_package") as mock_download,
         ):
-            result = install_command([], "release")
+            result = install_command([], "release", all_packages=True)
 
         self.assertFalse(result)
         mock_download.assert_not_called()
@@ -1400,7 +1398,7 @@ class TestAnUnusableAssignmentReachesTheOperator(unittest.TestCase):
             patch("raisin_ota.client.download_package") as self.download,
             patch("builtins.print") as self.printed,
         ):
-            return install_command([], "release")
+            return install_command([], "release", all_packages=True)
 
     @patch("commands.install.load_configuration")
     def test_it_is_a_failed_install_rather_than_a_traceback(self, mock_config):
@@ -1532,7 +1530,7 @@ class TestUnusableTreeStopsTheInstall(unittest.TestCase):
             patch("raisin_ota.client.download_package") as mock_download,
             patch("builtins.print") as mock_print,
         ):
-            result = install_command([], "release")
+            result = install_command([], "release", all_packages=True)
 
         self.assertFalse(result)
         mock_download.assert_not_called()
@@ -1585,7 +1583,7 @@ class TestNodeLevelArchivePin(unittest.TestCase):
             patch("raisin_ota.client.download_package") as mock_download,
             patch.dict(os.environ, {"RAISIN_ARCHIVE_NAME": "node-archive"}),
         ):
-            result = install_command([], "release")
+            result = install_command([], "release", all_packages=True)
 
         self.assertFalse(result)
         mock_download.assert_not_called()
@@ -4669,7 +4667,9 @@ class TestInstallCliLock(unittest.TestCase):
                     patch.object(install_mod, "install_command") as install,
                     patch.object(install_mod, "report_install_outcome") as outcome,
                     patch.object(install_mod, "flush_install_events") as flush,
-                    patch.object(install_mod, "flush_pending_snapshot_reports") as snapshot,
+                    patch.object(
+                        install_mod, "flush_pending_snapshot_reports"
+                    ) as snapshot,
                     patch.object(install_mod, "clear_install_session") as clear,
                 ):
                     result = runner.invoke(
@@ -4776,9 +4776,7 @@ class TestInstallOutcomeDecision(unittest.TestCase):
 
         terminal = self._events()[-1]
         self.assertEqual(terminal["eventType"], "succeeded")
-        self.assertEqual(
-            terminal["detail"], {"runtimeVerification": "artifact_only"}
-        )
+        self.assertEqual(terminal["detail"], {"runtimeVerification": "artifact_only"})
 
     def test_failure_outranks_and_drops_success_detail(self):
         ota.record_install_event("started")
@@ -4818,7 +4816,9 @@ class TestOtaIsTheOnlySource(unittest.TestCase):
                 output = buf.getvalue()
 
         self.assertFalse(result, "an absent package must not report success")
-        self.assertIn("nosuchpkg", output, "the package that could not be had must be named")
+        self.assertIn(
+            "nosuchpkg", output, "the package that could not be had must be named"
+        )
 
     @patch("commands.install.load_configuration")
     def test_an_ota_error_fails_the_install(self, mock_config):
@@ -4957,7 +4957,7 @@ class TestInstallIntegration(unittest.TestCase):
                     return_value=({}, "user", None, []),
                 ):
                     with patch("commands.install.download_all_from_archive") as mock_dl:
-                        install_command([], "release", tag="none")
+                        install_command([], "release", tag="none", all_packages=True)
             finally:
                 g.script_directory = self._orig_script_directory
                 _sync_ota_context()
@@ -4981,7 +4981,7 @@ class TestInstallIntegration(unittest.TestCase):
         self.assertEqual(_default_tag_for_user_type("anything-else"), "stable")
 
     def _run_install_command_with_user_type(self, user_type):
-        """Run install_command with no packages + no --tag, return the
+        """Run install_command --all with no --tag, return the
         ``tag`` kwarg actually forwarded to download_all_from_archive."""
         from commands.install import install_command
 
@@ -4995,7 +4995,7 @@ class TestInstallIntegration(unittest.TestCase):
                     return_value=({}, user_type, None, []),
                 ):
                     with patch("commands.install.download_all_from_archive") as mock_dl:
-                        install_command([], "release")
+                        install_command([], "release", all_packages=True)
                 return mock_dl.call_args.kwargs["tag"]
             finally:
                 g.script_directory = self._orig_script_directory
@@ -5795,9 +5795,7 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
         self.assertIn("not permitted", message)
 
     def test_a_scope_denial_names_the_scope_correction(self):
-        unusable, _printed = self.resolve(
-            403, "ROBOT_CREDENTIAL_SCOPE_MISSING"
-        )
+        unusable, _printed = self.resolve(403, "ROBOT_CREDENTIAL_SCOPE_MISSING")
 
         message = str(unusable)
         self.assertIn("scope", message)
@@ -5805,9 +5803,7 @@ class TestARefusedCredentialIsNotSilence(unittest.TestCase):
         self.assertNotIn("X-Robot-Node", message)
 
     def test_a_node_mismatch_names_the_node_correction(self):
-        unusable, _printed = self.resolve(
-            403, "ROBOT_CREDENTIAL_NODE_MISMATCH"
-        )
+        unusable, _printed = self.resolve(403, "ROBOT_CREDENTIAL_NODE_MISMATCH")
 
         message = str(unusable)
         self.assertIn("pinned to a different node", message)
@@ -5904,9 +5900,7 @@ class TestASnapshotRefusalIsNotSilent(unittest.TestCase):
             status_code=status,
             json_data={"error": error} if error else {},
             raise_for_status=(
-                requests.HTTPError(f"{status} Server Error")
-                if status >= 400
-                else None
+                requests.HTTPError(f"{status} Server Error") if status >= 400 else None
             ),
         )
         response.raise_for_status.side_effect = (
@@ -6917,7 +6911,7 @@ class TestExchangingLegacyCredential(unittest.TestCase):
                                 "nodeKey": "gimbal",
                                 "nodeId": "node-1",
                                 "type": "api_key",
-                                "secret": "rk_node_secret",
+                                "secret": "rk_node_secret",  # pragma: allowlist secret (test fixture)
                             }
                         ],
                         "legacyCredentialExpiresAt": "2026-10-07T00:00:00.000Z",
@@ -6958,7 +6952,7 @@ class TestExchangingLegacyCredential(unittest.TestCase):
                                 "nodeKey": "somebody-else",
                                 "nodeId": "node-1",
                                 "type": "api_key",
-                                "secret": "rk_node_secret",
+                                "secret": "rk_node_secret",  # pragma: allowlist secret (test fixture)
                             }
                         ]
                     }
@@ -6982,7 +6976,7 @@ class TestExchangingLegacyCredential(unittest.TestCase):
                 "nodeKey": "gimbal",
                 "nodeId": "node-1",
                 "type": "bearer",
-                "secret": "rk_node_secret",
+                "secret": "rk_node_secret",  # pragma: allowlist secret (test fixture)
             },
         ):
             with self.subTest(credential=credential):
@@ -7037,7 +7031,7 @@ class TestExchangingLegacyCredential(unittest.TestCase):
                                     "nodeKey": "primary",
                                     "nodeId": "node-1",
                                     "type": "api_key",
-                                    "secret": "rk_pinned",
+                                    "secret": "rk_pinned",  # pragma: allowlist secret (test fixture)
                                 }
                             ],
                         }
@@ -7072,7 +7066,7 @@ class TestExchangingLegacyCredential(unittest.TestCase):
                                 "nodeKey": "jetson",
                                 "nodeId": "node-2",
                                 "type": "api_key",
-                                "secret": "rk_other",
+                                "secret": "rk_other",  # pragma: allowlist secret (test fixture)
                             }
                         ]
                     }
@@ -7122,9 +7116,7 @@ class TestExchangingLegacyCredential(unittest.TestCase):
     def test_an_already_pinned_credential_is_identified_by_code(self):
         pinned = _mock_response(
             status_code=403,
-            json_data={
-                "error": {"code": "ROBOT_CREDENTIAL_ALREADY_PINNED"}
-            },
+            json_data={"error": {"code": "ROBOT_CREDENTIAL_ALREADY_PINNED"}},
         )
         pinned.raise_for_status.side_effect = requests.HTTPError(response=pinned)
 
@@ -7232,7 +7224,6 @@ class TestTheCallerDecidesWhenInstalledIsTrue(unittest.TestCase):
         result = self._download(report_snapshot=False)
 
         self.assertIn("mypkg", result)
-
 
 
 if __name__ == "__main__":

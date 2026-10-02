@@ -46,9 +46,7 @@ def print_help():
     print(
         f"  {'build_sdk android [--abi <abi>] [--api <n>]':<20} 🤖 Cross-compiles the communication-only core with the Android NDK"
     )
-    print(
-        f"  {'':<22} and packages a relocatable CMake SDK plus a local archive."
-    )
+    print(f"  {'':<22} and packages a relocatable CMake SDK plus a local archive.")
     print(
         f"  {'':<22} Host outputs are untouched. 'build_sdk android --list-profiles' lists the target profiles."
     )
@@ -59,7 +57,25 @@ def print_help():
         f"  {'install [pkg>=1.0 ...] [--type debug|release]':<20} 🚀 Downloads and installs pre-compiled packages and dependencies."
     )
     print(
-        f"  {'':<22} If no packages are listed, it processes/installs all local 'src/' packages."
+        f"  {'':<22} With targets, resolves their dependencies; '--include-local' also adds local 'src/' manifests."
+    )
+    print(
+        f"  {'':<22} Without targets, resolves local source dependencies. '--all' explicitly installs the OTA archive's packages."
+    )
+    print(
+        f"  {'':<22} '--upgrade' queries latest OTA versions and hashes while retaining active sources and newer installed binaries."
+    )
+    print(
+        f"  {'':<22} Active sources take precedence; source version mismatches warn and continue resolving dependencies."
+    )
+    print(
+        f"  {'':<22} '--strict-local-version' makes source version mismatches an error."
+    )
+    print(
+        f"  {'':<22} Logs local reuse; '--tag latest' refreshes binaries while retaining active sources."
+    )
+    print(
+        f"  {'':<22} Downloads are staged in versions/ and activated together through release/install."
     )
     print(f"  {'':<22} Supports version constraints (e.g., 'raisin_core>=1.2.3').")
     print(f"  {'':<22} Build type defaults to 'release' if not specified.")

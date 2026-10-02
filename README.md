@@ -147,13 +147,23 @@ git checkout <branch-name>
 Run the `install` command to download packages from the OTA server.
 
 ```bash
-# Install from the tagged archive (default tag is derived from
-# configuration_setting.yaml's user_type: 'devel' → 'latest',
-# anything else → 'stable')
+# Resolve dependencies of all active local source packages
 raisin install
 
-# Install a specific package
+# Install every package in the selected OTA archive and its dependencies
+raisin install --all
+
+# Install a specific package and its dependencies
 raisin install raisin_network
+
+# Upgrade binaries in this package's dependency closure from the latest tag
+raisin install raisin_network --upgrade
+
+# Upgrade every package in the latest archive
+raisin install --all --upgrade
+
+# Also resolve dependencies of unrelated local source packages
+raisin install raisin_network --include-local
 
 # Install with specific version
 raisin install raisin_network==1.1.0
@@ -161,8 +171,9 @@ raisin install raisin_network==1.1.0
 # Install debug version
 raisin install raisin_network --type debug
 
-# Install both debug and release
-raisin install raisin_network --all
+# Install both debug and release (separate invocations)
+raisin install raisin_network --type debug
+raisin install raisin_network --type release
 
 # Install multiple packages
 raisin install package1 package2 package3
@@ -172,27 +183,35 @@ raisin install package1 package2 package3
 
 ```bash
 # Install from a specific archive version (overrides --tag)
-raisin install --archive-version v2024.01
+raisin install --all --archive-version v2024.01
 
 # Install from the archive tagged with a different name
-raisin install --tag beta            # opt into a non-stable tag
-raisin install --tag rollback        # roll back to a previously-promoted archive
+raisin install --all --tag beta      # opt into a non-stable tag
+raisin install --all --tag rollback  # restore a previously-promoted archive
 
 # Fall back to the legacy latest-by-time selection (no tag required)
-raisin install --tag none
+raisin install --all --tag none
 
 # Install from a specific archive name
-raisin install --archive-name team-robot
+raisin install --all --archive-name team-robot
 
 # Install packages at a specific timestamp (time-travel)
-raisin install --at 2024-01-15
-raisin install --at 2024-01-15T10:00:00Z
+raisin install raisin_network --at 2024-01-15
+raisin install raisin_network --at 2024-01-15T10:00:00Z
 
 # Combine options
 raisin install raisin_network --type debug --archive-name team-robot --archive-version v2024.01
 ```
 
-> **Note:** Packages are downloaded from the OTA server by default. Use `--archive-name` to override `RAISIN_ARCHIVE_NAME` for a single install command. For debug installs, `-debug` is added only when the provided archive name does not already end with `-debug`.
+> **Local packages:** Active `src/` packages always take precedence, matching `setup`/`build`. Their version mismatches warn and continue resolving dependencies; use `--strict-local-version` to fail instead. Compatible installed binaries are reused and logs identify why OTA lookup was skipped. Without targets, `install` resolves source dependencies; if there are no sources it fails with guidance to use `--all`. Explicit targets and `--all` include unrelated sources only with `--include-local`.
+>
+> **Upgrades:** `--upgrade` queries the **`latest`** tag unless `--tag` selects another channel. It retains newer installed binaries, checks immutable content hashes before reusing equal versions, and resolves dependencies of retained packages. It fails if constraints require a downgrade; use an explicit install without `--upgrade` to restore a pinned version. `--upgrade` cannot be combined with `--archive-version` or `--at`. `--all` cannot be combined with package targets or `--at`; it uses the selected build type and retains unrelated installed packages.
+>
+> **Activation:** Downloads and their ZIP-declared dependencies are prepared in `release/versions/`. The `release/install` symlink switches only after successful resolution and validation, preserving the previous package tree on failure. Prior versions follow the existing retention policy.
+>
+> **Package metadata:** When an archive or timestamp manifest omits the package version, it is read from the ZIP's `release.yaml` before checking version constraints. An equal-version upgrade compares the immutable manifest hash (and `blobHash` when supplied). Identical content is reused across archives, with archive references and snapshot metadata updated only after the full dependency closure succeeds. The downloaded ZIP digest is recorded even when the archive response omits `blobHash`.
+>
+> **Archive selection:** Use `--archive-name` to override `RAISIN_ARCHIVE_NAME` for a single install command. For debug installs, `-debug` is added only when the provided archive name does not already end with `-debug`.
 >
 > **Tag selection:** By default `raisin install` resolves the archive through a tag derived from `configuration_setting.yaml`:
 > - `user_type: devel` → defaults to **`latest`** (newest archive available, including pre-releases)
@@ -202,7 +221,7 @@ raisin install raisin_network --type debug --archive-name team-robot --archive-v
 > 1. Try the requested tag (e.g. `latest`).
 > 2. Fall back to **`stable`** on OTA — so a devel user lands on the blessed archive when `latest` hasn't been promoted yet.
 >
-> If neither resolves, the install stops and says so; OTA is the only source. Each step prints a clear warning so operators can spot misconfigured tags in logs. Pass `--tag <name>` to override (e.g. `beta`), or `--tag none` to skip the tag and use the legacy latest-by-time selection on OTA.
+> If neither resolves, required OTA downloads fail and the previous package tree remains active. Each fallback prints a warning. Pass `--tag <name>` to override (e.g. `beta`), or `--tag none` to skip the tag and use the legacy latest-by-time selection on OTA. Explicit tag/archive/timestamp selection refreshes binaries while retaining active sources.
 
 ### 6. Install Package Dependencies
 
@@ -433,8 +452,10 @@ git checkout <branch-name>
 cd ..
 
 # 5. Download release packages
-raisin install                        # All packages from latest archive
-raisin install <package_name>         # Specific package
+raisin install                        # Dependencies of local source packages
+raisin install --all                  # All packages from the selected archive
+raisin install <package_name>         # Specific package and its dependencies
+raisin install <package_name> --upgrade # Query latest and upgrade its binary dependencies
 
 # 6. Install package-specific dependencies
 sudo bash install_dependencies.sh
