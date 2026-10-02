@@ -209,6 +209,8 @@ raisin install raisin_network --type debug --archive-name team-robot --archive-v
 >
 > **Activation:** Downloads and their ZIP-declared dependencies are prepared in `release/versions/`. The `release/install` symlink switches only after successful resolution and validation, preserving the previous package tree on failure. Prior versions follow the existing retention policy.
 >
+> **Package metadata:** When an archive or timestamp manifest omits the package version, it is read from the ZIP's `release.yaml` before checking version constraints. An equal-version upgrade compares the immutable manifest hash and archive identity; the downloaded ZIP digest is recorded even when the archive response omits `blobHash`.
+>
 > **Archive selection:** Use `--archive-name` to override `RAISIN_ARCHIVE_NAME` for a single install command. For debug installs, `-debug` is added only when the provided archive name does not already end with `-debug`.
 >
 > **Tag selection:** By default `raisin install` resolves the archive through a tag derived from `configuration_setting.yaml`:

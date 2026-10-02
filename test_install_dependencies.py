@@ -1172,3 +1172,79 @@ def test_all_with_only_active_source_packages_succeeds_without_creating_a_versio
     assert install.install_command([], "release", all_packages=True, upgrade=True)
     assert not workspace.transfers
     assert not (workspace.root / "release/versions").exists()
+
+
+@pytest.mark.parametrize("all_packages", [False, True])
+@pytest.mark.parametrize("version_tag", [None, "latest"])
+def test_actual_archive_contract_resolves_zip_versions_and_reuses_manifest_identity(
+    workspace,
+    monkeypatch,
+    all_packages,
+    version_tag,
+):
+    workspace.publish("gui", "2.0.0", ["shared>=2"])
+    workspace.publish("shared", "2.0.0")
+    # Actual GET /archives responses have manifestHash but no blobHash, and
+    # tagName is optional. Dependencies are absent from the server manifests.
+    packages = [
+        {
+            "packageName": name,
+            "packageId": name,
+            "manifestHash": character * 64,
+            "tagName": version_tag,
+        }
+        for name, character in (("gui", "a"), ("shared", "b"))
+    ]
+    monkeypatch.setattr(
+        ota,
+        "_fetch_archive_with_stable_fallback",
+        lambda *args: (packages, "archive-id", "1.0.0"),
+    )
+    targets = [] if all_packages else ["gui"]
+    assert install.install_command(targets, "release", all_packages=all_packages)
+    assert workspace.transfers == ["gui", "shared"]
+    previous = (workspace.root / "release/install").resolve()
+    assert (
+        len(
+            json.loads((workspace.package_dir("gui") / "ota-install.json").read_text())[
+                "blobHash"
+            ]
+        )
+        == 64
+    )
+
+    assert install.install_command(
+        targets, "release", all_packages=all_packages, upgrade=True
+    )
+    assert workspace.transfers == ["gui", "shared"]
+    assert (workspace.root / "release/install").resolve() == previous
+
+
+def test_versionless_archive_cannot_bypass_requested_version_conditions(
+    workspace, monkeypatch
+):
+    previous = prepare_previous_tree(workspace)
+    workspace.publish("gui", "2.0.0")
+    monkeypatch.setattr(
+        ota,
+        "_fetch_archive_with_stable_fallback",
+        lambda *args: (
+            [{"packageName": "gui", "packageId": "gui", "manifestHash": "a" * 64}],
+            "archive-id",
+            "1.0.0",
+        ),
+    )
+    assert not install.install_command(["gui<2"], "release", tag="latest")
+    assert (workspace.root / "release/install").resolve() == previous
+    assert (workspace.package_dir("gui") / "payload.txt").read_text() == "old gui"
+
+
+def test_corrupt_provenance_version_does_not_allow_upgrade_to_downgrade(workspace):
+    directory = workspace.installed("gui", "3.0.0")
+    record_archive_metadata(directory, "invalid-version")
+    workspace.publish("gui", "2.0.0")
+    assert install.install_command(["gui"], "release", upgrade=True)
+    assert not workspace.transfers
+    assert (
+        yaml.safe_load((directory / "release.yaml").read_text())["version"] == "3.0.0"
+    )

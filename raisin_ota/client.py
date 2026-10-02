@@ -3424,8 +3424,47 @@ def _download_package(
     if spec is None:
         return None
 
-    # Find best matching package in archive
-    # Manifest entries have tagName (e.g. "v1.0.0") instead of version
+    safe_component(package_name, "package name")
+    install_session_id = get_install_session_id()
+    prefetched = {}
+
+    def fetch_candidate(pkg, label, version=None):
+        package_id = pkg.get("packageId") or pkg.get("id")
+        if not package_id:
+            return None
+        # An archive may omit tagName or use an alias. Its immutable ZIP is
+        # then the version authority; never substitute 0.0.0 for an unknown.
+        key = version or hashlib.sha256(str(pkg).encode()).hexdigest()[:16]
+        path = _ctx().workspace / "install" / f"{package_name}-ota-{key}.zip"
+        record_install_event(
+            "started",
+            archive_id=archive_id,
+            archive_name=archive_name,
+            archive_version=actual_version,
+            platform=platform_str,
+            install_session_id=install_session_id,
+        )
+        print(f"⬇️  Downloading '{package_name}' {label} from OTA server...")
+        ok, error = _download_package_blob(
+            archive_id,
+            package_id,
+            package_name,
+            path,
+            archive_name=archive_name,
+            archive_version=actual_version,
+            platform_str=platform_str,
+            install_session_id=install_session_id,
+        )
+        if not ok:
+            note_install_failure(
+                "download", error, f"download of '{package_name}' failed"
+            )
+            return None
+        prefetched[id(pkg)] = path
+        return path
+
+    # Find the best candidate. Jenkins archives usually record tagName, but
+    # the public archive contract makes it optional and omits blobHash.
     best_pkg = None
     best_version = None
     available_versions = []
@@ -3439,13 +3478,36 @@ def _download_package(
         pkg_version_str = tag.lstrip("vV") if tag else ""
         try:
             pkg_version = parse_version(pkg_version_str)
-            available_versions.append(pkg_version)
-            if spec.contains(pkg_version):
-                if best_version is None or pkg_version > best_version:
-                    best_version = pkg_version
-                    best_pkg = pkg
         except InvalidVersion:
-            continue
+            installed = (
+                _read_compatible_installed_package(
+                    _ctx().package_dir(
+                        transaction.package_base, package_name, build_type
+                    ),
+                    SpecifierSet(),
+                )
+                if transaction.upgrade
+                else None
+            )
+            if installed and _matches_archive_content(installed[2], pkg, archive_id):
+                pkg_version = installed[0]
+            else:
+                path = fetch_candidate(pkg, "to read its ZIP-declared version")
+                if path is None:
+                    return None
+                version = _read_zip_package_version(path, package_name)
+                if version is None:
+                    return None
+                pkg_version = parse_version(version)
+                print(
+                    f"ℹ️ Archive has no version tag for '{package_name}'; "
+                    f"using ZIP release.yaml version '{version}'."
+                )
+        available_versions.append(pkg_version)
+        if spec.contains(pkg_version):
+            if best_version is None or pkg_version > best_version:
+                best_version = pkg_version
+                best_pkg = pkg
 
     if not best_pkg:
         if transaction.upgrade and available_versions:
@@ -3467,8 +3529,7 @@ def _download_package(
     if not pkg_id:
         return None
     tag = best_pkg.get("tagName") or best_pkg.get("version", "")
-    version = tag.lstrip("vV") if tag else "0.0.0"
-    safe_component(package_name, "package name")
+    version = str(best_version)
 
     if transaction.upgrade:
         installed = _read_compatible_installed_package(
@@ -3477,13 +3538,9 @@ def _download_package(
         )
         if installed is not None:
             installed_version, dependencies, metadata = installed
-            same_archive = metadata.get("archiveId") == archive_id
-            same_hashes = bool(best_pkg.get("blobHash")) and (
-                metadata.get("blobHash") == best_pkg.get("blobHash")
-                and metadata.get("manifestHash") == best_pkg.get("manifestHash")
-            )
             if installed_version > best_version or (
-                installed_version == best_version and same_archive and same_hashes
+                installed_version == best_version
+                and _matches_archive_content(metadata, best_pkg, archive_id)
             ):
                 reason = (
                     "already newer than the selected OTA package"
@@ -3509,35 +3566,14 @@ def _download_package(
                 )
                 return None
 
-    download_file = _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
-
-    install_session_id = get_install_session_id()
-
-    record_install_event(
-        "started",
-        archive_id=archive_id,
-        archive_name=archive_name,
-        archive_version=actual_version,
-        platform=platform_str,
-        install_session_id=install_session_id,
+    download_file = prefetched.get(id(best_pkg)) or fetch_candidate(
+        best_pkg, f"v{version}", version
     )
-
-    print(f"⬇️  Downloading '{package_name}' v{version} from OTA server...")
-    download_ok, _download_error = _download_package_blob(
-        archive_id,
-        pkg_id,
-        package_name,
-        download_file,
-        archive_name=archive_name,
-        archive_version=actual_version,
-        platform_str=platform_str,
-        install_session_id=install_session_id,
-    )
-    if not download_ok:
-        note_install_failure(
-            "download", _download_error, f"download of '{package_name}' failed"
-        )
+    if download_file is None:
         return None
+    blob_hash = _digest_of_prefix(
+        download_file, download_file.stat().st_size
+    ).hexdigest()
 
     install_dir = _ctx().package_dir(
         transaction.stage(actual_version), package_name, build_type
@@ -3555,7 +3591,7 @@ def _download_package(
         actual_version=actual_version,
         requested_archive_version=archive_version,
         manifest_hash=best_pkg.get("manifestHash"),
-        blob_hash=best_pkg.get("blobHash"),
+        blob_hash=best_pkg.get("blobHash") or blob_hash,
         install_session_id=install_session_id,
     )
 
@@ -3585,6 +3621,30 @@ def _download_package(
     return result
 
 
+def _matches_archive_content(metadata: dict, package: dict, archive_id: str) -> bool:
+    """A manifest is immutable and includes its blob digest in its content hash."""
+    return bool(package.get("manifestHash")) and (
+        metadata.get("archiveId") == archive_id
+        and metadata.get("manifestHash") == package["manifestHash"]
+        and bool(metadata.get("blobHash"))
+        and (not package.get("blobHash") or metadata["blobHash"] == package["blobHash"])
+    )
+
+
+def _read_zip_package_version(path: Path, package_name: str) -> Optional[str]:
+    from packaging.version import Version
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            info = yaml.safe_load(archive.read("release.yaml"))
+        if not isinstance(info, dict):
+            raise ValueError("release.yaml must contain a mapping")
+        return str(Version(str(info.get("version", ""))))
+    except (OSError, ValueError, KeyError, yaml.YAMLError, zipfile.BadZipFile) as error:
+        print(f"❌ Cannot read the ZIP-declared version of '{package_name}': {error}.")
+        return None
+
+
 def _read_compatible_installed_package(path: Path, spec: SpecifierSet):
     """Read a reusable binary's dependency metadata for an upgrade comparison."""
     from packaging.version import Version
@@ -3611,6 +3671,14 @@ def _read_compatible_installed_package(path: Path, spec: SpecifierSet):
             )
         except (OSError, ValueError):
             metadata = {}
+        if isinstance(metadata, dict) and metadata.get("packageVersion"):
+            try:
+                same_version = Version(str(metadata["packageVersion"])) == version
+            except ValueError:
+                same_version = False
+            if not same_version:
+                # An edited local release.yaml cannot prove archive identity.
+                metadata = {}
         return version, dependencies, metadata if isinstance(metadata, dict) else {}
     except (OSError, ValueError, yaml.YAMLError):
         return None
@@ -4339,6 +4407,15 @@ def _download_package_at_timestamp(
         if not _download_blob_by_hash(blob_hash, download_file):
             return None
 
+        if not manifest.get("version"):
+            version = _read_zip_package_version(download_file, package_name)
+            if version is None:
+                return None
+            print(
+                f"ℹ️ Timestamp manifest has no version for '{package_name}'; "
+                f"using ZIP release.yaml version '{version}'."
+            )
+
         install_dir = _ctx().package_dir(transaction.stage(), package_name, build_type)
 
         install_metadata = {
@@ -4353,7 +4430,7 @@ def _download_package_at_timestamp(
             "packageId": package_id,
             "packageVersion": version,
             "packageTag": f"v{version}",
-            "manifestHash": manifest.get("manifestHash"),
+            "manifestHash": manifest.get("manifestHash") or manifest.get("hash"),
             "blobHash": blob_hash,
             "manifestId": manifest.get("id"),
             "manifestCreatedAt": manifest.get("createdAt"),
