@@ -2,8 +2,10 @@
 # install_system_deps.sh
 # ----------------------
 # Purpose  : Install system-level development tools required for RAISIN.
-#            This includes: Python3, pip, venv, clang-format, ninja, pre-commit,
+#            This includes: Python3, pip, venv, clang-format, ninja,
 #            GitHub CLI (gh), CMake, Git LFS, vcstool, cppcheck, and gcovr.
+#            pre-commit is not installed here: it is pinned in requirements.txt
+#            and installed into the RAISIN virtual environment.
 # Usage    : Called by `./raisin --install` or run manually with sudo.
 # Platform : Linux (apt, dnf, pacman) and macOS (Homebrew)
 
@@ -163,45 +165,7 @@ fi
 
 echo "-------------------------------------------------"
 
-# --- 3. Check and Install pre-commit ---
-echo "Checking for pre-commit..."
-# Check for pre-commit in common locations
-if command -v pre-commit &> /dev/null || /usr/bin/python3 -m pre_commit --version &> /dev/null; then
-    echo -e "${GREEN}✅ pre-commit is already installed.${NC}"
-else
-    echo "pre-commit not found. Attempting installation..."
-    if [[ "$(uname)" == "Darwin" ]]; then
-        if command -v brew &> /dev/null; then
-            echo "Attempting to install with Homebrew..."
-            if brew install pre-commit; then
-                echo -e "${GREEN}✅ pre-commit installed via Homebrew.${NC}"
-            else
-                echo -e "${RED}❌ Failed to install pre-commit with Homebrew.${NC}"
-            fi
-        else
-            echo -e "${RED}❌ Homebrew not found. Please install pre-commit manually ('brew install pre-commit').${NC}"
-        fi
-    elif [[ "$(uname)" == "Linux" ]]; then
-        if command -v apt-get &> /dev/null && $SUDO apt-get install -y pre-commit; then
-            echo -e "${GREEN}✅ pre-commit installed to system via apt.${NC}"
-        elif $SUDO /usr/bin/python3 -m pip install $PIP_FLAGS pre-commit; then
-            echo -e "${GREEN}✅ pre-commit installed to system Python via pip.${NC}"
-        elif python3 -m pip install --user pre-commit; then
-            echo -e "${GREEN}✅ pre-commit installed for the current user via pip.${NC}"
-            echo -e "${YELLOW}NOTE: Make sure '~/.local/bin' is in your shell's PATH.${NC}"
-        elif pip3 install --user pre-commit; then
-            echo -e "${GREEN}✅ pre-commit installed for the current user via pip3.${NC}"
-            echo -e "${YELLOW}NOTE: Make sure '~/.local/bin' is in your shell's PATH.${NC}"
-        else
-            echo -e "${RED}❌ All automatic installation attempts for pre-commit failed.${NC}"
-            echo -e "${RED}Please install it manually, for example:${NC} sudo /usr/bin/python3 -m pip install pre-commit"
-        fi
-    else
-        echo -e "${RED}❌ Automatic pre-commit installation is not supported on this OS. Please install manually.${NC}"
-    fi
-fi
-
-# --- 4. Check and Install GitHub CLI (gh) ---
+# --- 3. Check and Install GitHub CLI (gh) ---
 echo "Checking for GitHub CLI (gh)..."
 if command -v gh &> /dev/null; then
     echo -e "${GREEN}✅ gh is already installed.${NC}"
@@ -240,7 +204,7 @@ fi
 
 echo "-------------------------------------------------"
 
-# --- 5. Check and Install CMake ---
+# --- 4. Check and Install CMake ---
 echo "Checking for CMake..."
 if command -v cmake &> /dev/null; then
     echo -e "${GREEN}✅ CMake is already installed.${NC}"
@@ -279,7 +243,7 @@ fi
 
 echo "-------------------------------------------------"
 
-# --- 6. Check and Install Git LFS ---
+# --- 5. Check and Install Git LFS ---
 echo "Checking for Git LFS..."
 if command -v git-lfs &> /dev/null; then
     echo -e "${GREEN}✅ Git LFS is already installed.${NC}"
@@ -325,7 +289,7 @@ fi
 
 echo "-------------------------------------------------"
 
-# --- 7. Check and Install vcstool ---
+# --- 6. Check and Install vcstool ---
 echo "Checking for vcstool..."
 if command -v vcs &> /dev/null; then
     echo -e "${GREEN}✅ vcstool is already installed.${NC}"
@@ -371,7 +335,7 @@ fi
 
 echo "-------------------------------------------------"
 
-# --- 8. Check and Install cppcheck ---
+# --- 7. Check and Install cppcheck ---
 echo "Checking for cppcheck..."
 if command -v cppcheck &> /dev/null; then
     echo -e "${GREEN}✅ cppcheck is already installed.${NC}"
@@ -419,7 +383,7 @@ fi
 
 echo "-------------------------------------------------"
 
-# --- 9. Check and Install gcovr ---
+# --- 8. Check and Install gcovr ---
 echo "Checking for gcovr..."
 if command -v gcovr &> /dev/null; then
     echo -e "${GREEN}✅ gcovr is already installed.${NC}"
