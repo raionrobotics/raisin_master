@@ -670,7 +670,7 @@ def test_failed_commit_leaves_the_previous_tree_active(workspace, monkeypatch, e
 
 
 @pytest.mark.parametrize("consumer_kind", ["installed", "source"])
-def test_new_dependency_cannot_break_a_retained_consumer(
+def test_targeted_install_checks_installed_but_not_unrelated_source_consumers(
     workspace, consumer_kind, capsys
 ):
     previous = prepare_previous_tree(workspace)
@@ -678,12 +678,19 @@ def test_new_dependency_cannot_break_a_retained_consumer(
     workspace.publish("gui", "2.0.0", ["shared>=2"])
     workspace.publish("shared", "2.0.0")
 
-    assert not install.install_command(["gui"], "release", tag="latest")
-    assert (
-        "Retained package 'old_plugin' requires 'shared<2'" in capsys.readouterr().out
-    )
-    assert (workspace.root / "release/install").resolve() == previous
-    assert (workspace.package_dir("gui") / "payload.txt").read_text() == "old gui"
+    success = install.install_command(["gui"], "release", tag="latest")
+    assert success == (consumer_kind == "source")
+    if consumer_kind == "installed":
+        assert (
+            "Retained package 'old_plugin' requires 'shared<2'"
+            in capsys.readouterr().out
+        )
+        assert (workspace.root / "release/install").resolve() == previous
+        assert (workspace.package_dir("gui") / "payload.txt").read_text() == "old gui"
+    else:
+        assert (
+            workspace.package_dir("gui") / "payload.txt"
+        ).read_text() == "gui==2.0.0"
 
 
 def test_source_is_preferred_over_an_installed_binary_and_uses_its_own_dependencies(
@@ -904,17 +911,20 @@ def test_same_version_upgrade_checks_provenance_before_skipping_download(
 
     assert install.install_command(["gui"], "release", upgrade=True)
 
-    unchanged = (
-        archive_id == "archive-id"
-        and blob_hash == "a" * 64
-        and manifest_hash == "b" * 64
-    )
+    unchanged = blob_hash == "a" * 64 and manifest_hash == "b" * 64
     assert workspace.transfers == ([] if unchanged else ["gui"])
     assert (directory / "payload.txt").read_text() == (
         "previous build" if unchanged else "gui==2.0.0"
     )
-    if unchanged:
+    if unchanged and archive_id == "archive-id":
         assert not (workspace.root / "release/versions").exists()
+    if unchanged and archive_id != "archive-id":
+        assert (
+            json.loads((directory / ota._INSTALL_METADATA_FILE).read_text())[
+                "archiveId"
+            ]
+            == "archive-id"
+        )
 
 
 def test_upgrade_failure_does_not_activate_a_partially_updated_tree(workspace):
@@ -1248,3 +1258,117 @@ def test_corrupt_provenance_version_does_not_allow_upgrade_to_downgrade(workspac
     assert (
         yaml.safe_load((directory / "release.yaml").read_text())["version"] == "3.0.0"
     )
+
+
+@pytest.mark.parametrize("source_mode", ["include-local", "dependency", "bare"])
+def test_source_consumers_in_the_requested_closure_still_enforce_their_dependencies(
+    workspace, source_mode
+):
+    previous = prepare_previous_tree(workspace)
+    workspace.source("old_plugin", dependencies=["shared<2"])
+    workspace.publish(
+        "gui",
+        "2.0.0",
+        ["shared>=2"] + (["old_plugin"] if source_mode == "dependency" else []),
+    )
+    workspace.publish("shared", "2.0.0")
+    targets = [] if source_mode == "bare" else ["gui"]
+    if source_mode == "bare":
+        workspace.source("gui", dependencies=["shared>=2"])
+    assert not install.install_command(
+        targets, "release", upgrade=True, include_local=source_mode == "include-local"
+    )
+    assert (workspace.root / "release/install").resolve() == previous
+
+
+@pytest.mark.parametrize("all_packages", [False, True])
+@pytest.mark.parametrize("versionless", [False, True])
+def test_new_archive_reuses_identical_content_and_commits_new_snapshot_references(
+    workspace,
+    monkeypatch,
+    all_packages,
+    versionless,
+):
+    previous = prepare_previous_tree(workspace)
+    reports = []
+    monkeypatch.setattr(
+        ota, "_queue_snapshot_report", lambda **kwargs: reports.append(kwargs)
+    )
+    for name, dependencies in (("gui", ["shared"]), ("shared", [])):
+        directory = workspace.installed(name, "2.0.0", dependencies)
+        (directory / "payload.txt").write_text("unchanged " + name)
+        record_archive_metadata(directory, "2.0.0", archive_id="previous-archive")
+        workspace.publish(
+            name, "2.0.0", dependencies, blob_hash="a" * 64, manifest_hash="b" * 64
+        )
+    if versionless:
+        monkeypatch.setattr(
+            ota,
+            "_fetch_archive_with_stable_fallback",
+            lambda *args: (
+                [
+                    {"packageName": name, "packageId": name, "manifestHash": "b" * 64}
+                    for name in ("gui", "shared")
+                ],
+                "archive-id",
+                "1.0.0",
+            ),
+        )
+    assert install.install_command(
+        [] if all_packages else ["gui"],
+        "release",
+        upgrade=True,
+        all_packages=all_packages,
+    )
+    assert not workspace.transfers
+    assert (workspace.root / "release/install").resolve() != previous
+    for name in ("gui", "shared"):
+        assert (
+            workspace.package_dir(name) / "payload.txt"
+        ).read_text() == "unchanged " + name
+        metadata = json.loads(
+            (workspace.package_dir(name) / ota._INSTALL_METADATA_FILE).read_text()
+        )
+        assert metadata["archiveId"] == "archive-id"
+        assert metadata["packageId"] == name
+        assert metadata["manifestHash"] == "b" * 64
+        original = (
+            previous / name / "ubuntu/24.04/x86_64/release" / ota._INSTALL_METADATA_FILE
+        )
+        assert json.loads(original.read_text())["archiveId"] == "previous-archive"
+    assert len(reports) == 1
+    assert reports[0]["archive_id"] == "archive-id"
+
+
+@pytest.mark.parametrize("failure", ["dependency", "metadata-write"])
+def test_archive_references_for_reused_content_are_unchanged_on_failed_install(
+    workspace, monkeypatch, failure
+):
+    previous = prepare_previous_tree(workspace)
+    reports = []
+    monkeypatch.setattr(
+        ota, "_queue_snapshot_report", lambda **kwargs: reports.append(kwargs)
+    )
+    directory = workspace.installed(
+        "gui", "2.0.0", ["missing"] if failure == "dependency" else []
+    )
+    record_archive_metadata(directory, "2.0.0", archive_id="previous-archive")
+    workspace.publish("gui", "2.0.0", blob_hash="a" * 64, manifest_hash="b" * 64)
+    if failure == "metadata-write":
+        replace = ota.os.replace
+
+        def fail_metadata(source, destination):
+            path = Path(destination)
+            if path.name == ota._INSTALL_METADATA_FILE and previous not in path.parents:
+                raise OSError("cannot update metadata")
+            return replace(source, destination)
+
+        monkeypatch.setattr(ota.os, "replace", fail_metadata)
+    assert not install.install_command(["gui"], "release", upgrade=True)
+    assert not workspace.transfers
+    assert (workspace.root / "release/install").resolve() == previous
+    assert (
+        json.loads((directory / ota._INSTALL_METADATA_FILE).read_text())["archiveId"]
+        == "previous-archive"
+    )
+    assert not reports

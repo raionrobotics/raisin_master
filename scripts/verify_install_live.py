@@ -239,6 +239,7 @@ class Verification:
         self.archive(
             "versionless", list(self.entries["2.0.0"].values()), omit_versions=True
         )
+        self.archive("same-content", list(self.entries["2.0.0"].values()))
         republished = dict(self.entries["2.0.0"])
         republished["gui"] = self.publish(
             ids["gui"],
@@ -313,8 +314,8 @@ class Verification:
         base = path / "release/install"
         return str(base.resolve()) if base.exists() else None
 
-    def contents(self, path):
-        base = path / "release/install"
+    def contents(self, path, base=None):
+        base = base if base is not None else path / "release/install"
         return (
             {
                 str(file.relative_to(base)): (
@@ -337,12 +338,14 @@ class Verification:
         expected=0,
         packages=None,
         log_contains=(),
+        log_excludes=(),
         preserve=False,
         select_archive=True,
+        reused_archive=None,
     ):
         previous = self.tree(path)
         inventory = self.inventory(path)
-        contents = self.contents(path) if preserve else None
+        contents = self.contents(path) if preserve or reused_archive else None
         if select_archive:
             arguments = [*arguments, "--archive-name", self.prefix]
         started = time.monotonic()
@@ -369,12 +372,39 @@ class Verification:
         for message in log_contains:
             if message not in process.stdout:
                 errors.append("missing log: " + message)
+        for message in log_excludes:
+            if message in process.stdout:
+                errors.append("unexpected log: " + message)
         if preserve and (
             self.tree(path) != previous
             or self.inventory(path) != inventory
             or self.contents(path) != contents
         ):
             errors.append("previous tree changed")
+        if reused_archive:
+            payloads = lambda files: {
+                name: fingerprint
+                for name, fingerprint in files.items()
+                if not name.endswith("/ota-install.json")
+            }
+            if payloads(self.contents(path)) != payloads(contents):
+                errors.append("reused payload changed")
+            if self.contents(path, base=Path(previous)) != contents:
+                errors.append("retained generation changed during metadata refresh")
+            for name in packages:
+                metadata_path = (
+                    path
+                    / "release/install"
+                    / name
+                    / "ubuntu/24.04/x86_64/release/ota-install.json"
+                )
+                metadata = (
+                    json.loads(metadata_path.read_text())
+                    if metadata_path.exists()
+                    else {}
+                )
+                if metadata.get("archiveId") != reused_archive:
+                    errors.append("archive reference not refreshed: " + name)
         self.results.append(
             {
                 "case": label,
@@ -439,6 +469,17 @@ class Verification:
             preserve=True,
             log_contains=("already matches",),
         )
+        self.set_tag("latest", self.archives["same-content"])
+        self.run(
+            "upgrade-identical-content-new-archive",
+            gui,
+            [n["gui"], "--upgrade"],
+            packages=closure("gui", "2.0.0"),
+            log_contains=("Prepared archive metadata", "already matches"),
+            log_excludes=("Downloading",),
+            reused_archive=self.archives["same-content"]["id"],
+        )
+        self.set_tag("latest", self.archives["2.0.0"])
         self.run(
             "upgrade-stable-keeps-newer",
             gui,
@@ -484,15 +525,24 @@ class Verification:
             expected=1,
             preserve=True,
         )
-        consumer = self.workspace("retained-consumer", clone=baseline)
+        consumer = self.workspace("unrelated-source-consumer", clone=baseline)
         self.source(consumer, "other_consumer", dependencies=[n["core"] + "<2"])
         self.run(
-            "retained-consumer-conflict",
+            "unrelated-source-consumer-allowed",
             consumer,
             [n["gui"], "--upgrade"],
+            packages=closure("gui", "2.0.0"),
+        )
+        selected_consumer = self.workspace("selected-source-consumer", clone=baseline)
+        self.source(
+            selected_consumer, "other_consumer", dependencies=[n["core"] + "<2"]
+        )
+        self.run(
+            "selected-source-consumer-conflict",
+            selected_consumer,
+            [n["gui"], "--upgrade", "--include-local"],
             expected=1,
             preserve=True,
-            log_contains=("Retained package",),
         )
         self.run(
             "bare-source-roots",
@@ -549,6 +599,17 @@ class Verification:
             preserve=True,
             log_contains=("already matches",),
         )
+        self.set_tag("latest", self.archives["same-content"])
+        self.run(
+            "all-identical-content-new-archive",
+            all_path,
+            ["--all", "--upgrade"],
+            packages={n[label]: "2.0.0" for label in ("gui", "core", "leaf", "extra")},
+            log_contains=("Prepared archive metadata", "already matches"),
+            log_excludes=("Downloading",),
+            reused_archive=self.archives["same-content"]["id"],
+        )
+        self.set_tag("latest", self.archives["2.0.0"])
         self.source(all_path, "test_plugin", dependencies=[n["missing"]])
         self.run(
             "all-include-local-failure",

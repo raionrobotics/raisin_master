@@ -341,9 +341,9 @@ def _install(
 def _validate_retained_consumers(transaction, build_type, repo_ignore_set):
     """A partial install must also satisfy packages retained in the active tree.
 
-    Only dependencies on changed packages are checked. Unrelated source repos
-    remain outside an explicit install's dependency roots. Providers follow the
-    same source-first rule as setup/build.
+    Only dependencies on changed binaries are checked. Source consumers must
+    have been selected while resolving this install's roots and dependencies.
+    Providers follow the same source-first rule as setup/build.
     """
     changed = transaction.packages.get(build_type, set())
     if not changed:
@@ -355,16 +355,20 @@ def _validate_retained_consumers(transaction, build_type, repo_ignore_set):
         for path in base.iterdir()
         if path.is_dir()
     }
-    if source_dir.is_dir():
-        providers.update(
-            {
-                path.name: path
-                for path in source_dir.iterdir()
-                if path.is_dir() and path.name not in repo_ignore_set
-            }
-        )
+    sources = (
+        {
+            path.name: path
+            for path in source_dir.iterdir()
+            if path.is_dir() and path.name not in repo_ignore_set
+        }
+        if source_dir.is_dir()
+        else {}
+    )
+    providers.update(sources)
     manifests = {}
     for name, directory in providers.items():
+        if name in sources and name not in transaction.resolved_sources:
+            continue
         try:
             info = yaml.safe_load(
                 (directory / "release.yaml").read_text(encoding="utf-8")
@@ -587,6 +591,7 @@ def _resolve_packages(
         )
         local_src_path = script_dir_path / "src" / package_name
         if local_src_path.is_dir() and package_name not in repo_ignore_set:
+            transaction.resolved_sources.add(package_name)
             if not check_local_package(local_src_path, "local source"):
                 print(
                     f"❌ Local source '{package_name}' cannot satisfy '{spec}'; "
@@ -822,8 +827,9 @@ def install_cli_command(
 
     --upgrade queries latest OTA packages unless --tag selects another channel.
     It never silently downgrades installed binaries. The same version is reused
-    only when its archive identity and content hashes match; otherwise it is
+    only when its immutable content hashes match; otherwise it is
     fetched again so republished builds and missing provenance are handled.
+    Identical content in a new archive refreshes metadata without downloading.
     --upgrade cannot be combined with --archive-version or --at. --all cannot
     be combined with package targets or --at. --all retains unrelated packages.
 

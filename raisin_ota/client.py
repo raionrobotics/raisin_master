@@ -3213,6 +3213,8 @@ class PackageInstallTransaction:
         self.version = None
         self.committed = False
         self.packages = {}
+        self.metadata_packages = {}
+        self.resolved_sources = set()
         self.reports = {}
         self.upgrade = upgrade
         self.selected_archive = None
@@ -3271,7 +3273,10 @@ class PackageInstallTransaction:
     def commit(self) -> bool:
         if self.staging is None:
             return True
-        for build_type, names in self.packages.items():
+        for build_type in self.packages.keys() | self.metadata_packages.keys():
+            names = self.packages.get(build_type, set()) | self.metadata_packages.get(
+                build_type, set()
+            )
             broken = _unusable_packages(self.staging, names, build_type)
             if broken:
                 note_install_failure(
@@ -3489,7 +3494,7 @@ def _download_package(
                 if transaction.upgrade
                 else None
             )
-            if installed and _matches_archive_content(installed[2], pkg, archive_id):
+            if installed and _matches_archive_content(installed[2], pkg):
                 pkg_version = installed[0]
             else:
                 path = fetch_candidate(pkg, "to read its ZIP-declared version")
@@ -3540,13 +3545,67 @@ def _download_package(
             installed_version, dependencies, metadata = installed
             if installed_version > best_version or (
                 installed_version == best_version
-                and _matches_archive_content(metadata, best_pkg, archive_id)
+                and _matches_archive_content(metadata, best_pkg)
             ):
                 reason = (
                     "already newer than the selected OTA package"
                     if installed_version > best_version
-                    else "already matches the selected OTA archive and content hashes"
+                    else "already matches the selected OTA content hashes"
                 )
+                if (
+                    installed_version == best_version
+                    and metadata.get("archiveId") != archive_id
+                ):
+                    refreshed = _build_archive_install_metadata(
+                        package_name=package_name,
+                        package_id=pkg_id,
+                        package_tag=tag,
+                        version=version,
+                        build_type=build_type,
+                        platform_str=platform_str,
+                        archive_name=archive_name,
+                        archive_id=archive_id,
+                        actual_version=actual_version,
+                        requested_archive_version=archive_version,
+                        manifest_hash=best_pkg.get("manifestHash"),
+                        blob_hash=metadata["blobHash"],
+                        install_session_id=install_session_id,
+                    )
+                    if metadata.get("installedAt"):
+                        refreshed["installedAt"] = metadata["installedAt"]
+                    directory = _ctx().package_dir(
+                        transaction.stage(actual_version), package_name, build_type
+                    )
+                    # Staging hardlinks unchanged files to the previous tree.
+                    # Replace the metadata inode so a failed closure cannot
+                    # mutate the active or retained generation.
+                    temporary = directory / (
+                        ".ota-install-" + uuid.uuid4().hex + ".tmp"
+                    )
+                    try:
+                        temporary.write_text(
+                            json.dumps(refreshed, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8",
+                        )
+                        os.replace(temporary, directory / _INSTALL_METADATA_FILE)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                    transaction.metadata_packages.setdefault(build_type, set()).add(
+                        package_name
+                    )
+                    transaction.record_archive(
+                        archive_id=archive_id,
+                        archive_name=archive_name,
+                        archive_version=actual_version,
+                        platform_str=platform_str,
+                        build_type=build_type,
+                        install_session_id=install_session_id,
+                        manifest_hashes=manifest_hashes_by_package_id(packages),
+                    )
+                    print(
+                        f"📝 Prepared archive metadata for reused '{package_name}': "
+                        f"'{archive_name}' v{actual_version}; content unchanged."
+                    )
                 print(
                     f"✅ Keeping installed '{package_name}=={installed_version}': {reason}. "
                     "OTA lookup completed; download skipped."
@@ -3621,11 +3680,10 @@ def _download_package(
     return result
 
 
-def _matches_archive_content(metadata: dict, package: dict, archive_id: str) -> bool:
+def _matches_archive_content(metadata: dict, package: dict) -> bool:
     """A manifest is immutable and includes its blob digest in its content hash."""
     return bool(package.get("manifestHash")) and (
-        metadata.get("archiveId") == archive_id
-        and metadata.get("manifestHash") == package["manifestHash"]
+        metadata.get("manifestHash") == package["manifestHash"]
         and bool(metadata.get("blobHash"))
         and (not package.get("blobHash") or metadata["blobHash"] == package["blobHash"])
     )
