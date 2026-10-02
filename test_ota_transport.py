@@ -46,6 +46,8 @@ def test_explicit_loopback_ignores_environment_proxy_and_delivers_test_key():
             RAISIN_DEV_ALLOW_LOOPBACK_HTTP='1', HTTP_PROXY=proxy, http_proxy=proxy, NO_PROXY='', no_proxy=''):
         reply = transport.get(url, headers={'X-Robot-Api-Key': 'rk_fixture_only'}, timeout=2)
         assert reply.status_code == 200 and len(seen) == 1 and intercepted == []
+        assert transport.get(url.replace('http:', 'HtTp:', 1), timeout=2).status_code == 200
+        assert len(seen) == 2 and intercepted == []
 
 
 @pytest.mark.parametrize('url', ['http://192.168.10.100', 'http://example.com', 'http://localhost',
@@ -86,7 +88,16 @@ def test_https_still_requires_a_trusted_ca_with_development_flag(tmp_path):
     with peer(tls=(cert,key)) as (url,seen), patch.dict(os.environ, RAISIN_DEV_ALLOW_LOOPBACK_HTTP='1'):
         with pytest.raises(transport.RequestException): transport.get(url, timeout=2)
         assert seen == []
-        assert transport.get(url, verify=str(cert), timeout=2).status_code == 200
+        request = transport._requests.Request('GET',url).prepare()
+        with transport._Session() as session:
+            session.verify = False
+            with pytest.raises(transport.RequestException, match='verification'): session.send(request,timeout=2)
+            session.verify = True
+            # Explicit None reaches the adapter unchanged in Session.send;
+            # falling back to session.verify here would accidentally allow it.
+            with pytest.raises(transport.RequestException, match='verification'): session.send(request,verify=None,timeout=2)
+        assert seen == []
+        assert transport.get(url.replace('https:','HTTPS:',1), verify=str(cert), timeout=2).status_code == 200
 
 
 @pytest.mark.parametrize('verify', [False, '', 0])

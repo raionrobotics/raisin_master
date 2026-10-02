@@ -20,13 +20,13 @@ def validate_url(url):
             raise ValueError
         if port is not None and not 0 < port <= 65535:
             raise ValueError
-        if url.startswith("https://"):
+        if parsed.scheme == "https":
             return "https"
         authority = parsed.netloc
         loopback = authority in ("127.0.0.1", "[::1]") or (
             authority.startswith("127.0.0.1:") and len(authority) > 10
         ) or (authority.startswith("[::1]:") and len(authority) > 6)
-        if url.startswith("http://") and loopback and os.environ.get("RAISIN_DEV_ALLOW_LOOPBACK_HTTP") == "1":
+        if parsed.scheme == "http" and loopback and os.environ.get("RAISIN_DEV_ALLOW_LOOPBACK_HTTP") == "1":
             return "http"
     except (ValueError, TypeError):
         pass
@@ -37,7 +37,7 @@ def validate_url(url):
 class _Session(_requests.Session):
     def send(self, request, **kwargs):
         protocol = validate_url(request.url)
-        if not kwargs.get("verify", True):
+        if not kwargs.get("verify", self.verify):
             raise RequestException("TLS certificate verification must remain enabled")
         if protocol == "http":
             # A local credential must not reach an environment/configured proxy.
