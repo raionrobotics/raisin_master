@@ -60,10 +60,15 @@ TARGET_INTERFACE_SOURCES: Dict[str, Dict[str, str]] = {}
 
 
 def _compute_source_hash(source_dir: Path) -> str:
-    """Compute hash of all source files in directory based on file names and content."""
+    """Compute hash of all source files in directory based on file names and content.
+
+    Hidden files and everything under hidden directories (.git, download caches such as
+    raisim/.download) are not sources and are left out.
+    """
     hasher = hashlib.sha256()
     for filepath in sorted(source_dir.rglob("*")):
-        if filepath.is_file() and not filepath.name.startswith("."):
+        relative_parts = filepath.relative_to(source_dir).parts
+        if filepath.is_file() and not any(part.startswith(".") for part in relative_parts):
             hasher.update(str(filepath.relative_to(source_dir)).encode())
             hasher.update(filepath.read_bytes())
     return hasher.hexdigest()
