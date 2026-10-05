@@ -46,6 +46,11 @@ class TestPureCmakeSourceHash(unittest.TestCase):
         (self.project / ".gitignore").write_text("/.download/\n")
         self.assertEqual(before, self.hash())
 
+    def test_broken_symlinks_are_skipped(self):
+        before = self.hash()
+        (self.project / "src" / "dangling.cpp").symlink_to(self.project / "missing.cpp")
+        self.assertEqual(before, self.hash())
+
     def test_sources_are_hashed(self):
         before = self.hash()
         (self.project / "src" / "a.cpp").write_text("int a = 1;\n")
