@@ -1,0 +1,43 @@
+# raisin_bridge parameters for the ReasonNav <-> raisin (hospital sim) setup.
+# @PEER_ID@ is replaced by run_reasonnav_sim.sh with the sim node's robot_nickname.
+#
+# Direction "raisin_to_ros2": raisin topic  -> same-named ROS 2 topic.
+# Direction "ros2_to_raisin": ROS 2 service -> same-named raisin service.
+# Every "$pkg/msg/$Type" needs the matching "$pkg_conversion" package built in raisin_bridge_ws.
+bridge_node:
+  ros__parameters:
+    id: "raisin_bridge"
+    network_type: 0            # 0 = TCP (raisin_network discovery on the interface below)
+    network_interface: ["lo"]
+    peer_id: "@PEER_ID@"
+    peer_ip: "127.0.0.1"       # WEBSOCKET only
+    topics_ros2_to_raisin:
+      [""]
+    topics_raisin_to_ros2:
+      ["sensor_msgs/msg/Image, oak_front/rgb",               # 3 x OAK-D Pro W on the mast: colour bgr8 960x720
+       "sensor_msgs/msg/Image, oak_front/depth",             #   depth 32FC1 metres 480x360, aligned to colour
+       "sensor_msgs/msg/Image, oak_left/rgb",
+       "sensor_msgs/msg/Image, oak_left/depth",
+       "sensor_msgs/msg/Image, oak_right/rgb",
+       "sensor_msgs/msg/Image, oak_right/depth",
+       "nav_msgs/msg/Odometry, /Odometry/state_estimator",   # state-estimator pose (frame odom)
+       "nav_msgs/msg/Odometry, /Odometry/base",              # lidar_slam pose in raisin's navigation frame (= robot network id)
+       "sensor_msgs/msg/PointCloud2, navigation/vis/global_costmap", # costmap relay (the navigation process's own
+       "sensor_msgs/msg/PointCloud2, navigation/vis/global_plan",    #  navigation/* topics are not visible on this peer)
+       "sensor_msgs/msg/PointCloud2, cloud_registered",              # lidar_slam registered scan (SLAM health check)
+       "raisin_interfaces/msg/VelocityCommand, navigation/vis/mppi_cmd"]  # what the MPPI controller commands (diagnostics)
+    services_ros2_to_raisin:
+      ["raisin_interfaces/srv/SetWaypoints, planning/set_waypoints",   # goal points go in here
+       "raisin_interfaces/srv/GetWaypoints, planning/get_waypoints",
+       "std_srvs/srv/Trigger, turn_on",       # robot bring-up from ROS: ros2 service call /turn_on std_srvs/srv/Trigger
+       "std_srvs/srv/Trigger, init_motor",
+       "std_srvs/srv/Trigger, joint_test",
+       "std_srvs/srv/Trigger, stand_up",
+       "std_srvs/srv/Trigger, sit_down",
+       "raisin_interfaces/srv/String, transition_to_state",          # state chain: data = "stand_up" | "sit_down"
+       "raisin_interfaces/srv/StringAndBool, confirm_state_chain",   # confirm/cancel the joint-test step
+       "raisin_interfaces/srv/String, set_listen",                   # data = "vel_cmd/autonomy": let navigation drive
+       "std_srvs/srv/Trigger, start_mapping",  # lidar_slam idles until this (GUI "start mapping"); navigation needs its /Odometry/base
+       "std_srvs/srv/Trigger, stop_mapping"]
+    services_raisin_to_ros2:
+      [""]

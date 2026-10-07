@@ -1,0 +1,309 @@
+Panels:
+- Class: rviz_common/Displays
+  Help Height: 78
+  Name: Displays
+  Property Tree Widget:
+    Expanded:
+    - /Global Options1
+    - /Status1
+    Splitter Ratio: 0.5
+  Tree Height: 700
+Visualization Manager:
+  Class: ''
+  Displays:
+  - Alpha: 0.5
+    Cell Size: 1
+    Class: rviz_default_plugins/Grid
+    Color: 160; 160; 164
+    Enabled: true
+    Line Style:
+      Line Width: 0.029999999329447746
+      Value: Lines
+    Name: Grid
+    Normal Cell Count: 0
+    Offset:
+      X: 0
+      Y: 0
+      Z: 0
+    Plane: XY
+    Plane Cell Count: 40
+    Reference Frame: <Fixed Frame>
+    Value: true
+  - Class: rviz_default_plugins/TF
+    Enabled: true
+    Frame Timeout: 15
+    Frames:
+      All Enabled: false
+      body:
+        Value: true
+      camera_init:
+        Value: true
+      map:
+        Value: true
+      base_link:
+        Value: true
+    Marker Scale: 1
+    Name: TF
+    Show Arrows: false
+    Show Axes: true
+    Show Names: true
+    Tree:
+      map:
+        odom:
+          camera_init:
+            body:
+              base_link: {}
+              realsense_link: {}
+    Update Interval: 0
+    Value: true
+  - Alpha: 1
+    Class: rviz_default_plugins/Map
+    Color Scheme: costmap
+    Draw Behind: true
+    Enabled: true
+    Name: OccupancyCostmap
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      Filter size: 10
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /global_costmap/costmap
+    Use Timestamp: false
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Finder markers (frontiers, goal, doors, signs)
+    Namespaces: {}
+    Topic:
+      Depth: 10
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /room_finder/markers
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Landmark map (plates, doors, signs, frontiers)
+    Namespaces: {}
+    Topic:
+      Depth: 2
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /room_finder/landmarks
+    Value: true
+  - Class: rviz_default_plugins/PointCloud2
+    Name: RaisinCostmapCloud
+    Enabled: true
+    Size (m): 0.05
+    Style: Flat Squares
+    Color Transformer: RGB8
+    Position Transformer: XYZ
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Best Effort
+      Value: /navigation/vis/global_costmap
+    Use Fixed Frame: true
+    Decay Time: 0
+    Queue Size: 10
+    Selectable: true
+    Invert Rainbow: false
+    Max Color:
+    - 255
+    - 255
+    - 255
+    Min Color:
+    - 0
+    - 0
+    - 0
+    Autocompute Intensity Bounds: true
+    Use rainbow: true
+    Alpha: 1.0
+    Channel Name: intensity
+  - Class: rviz_default_plugins/PointCloud2
+    Name: RaisinGlobalPlan
+    Enabled: true
+    Size (m): 0.08
+    Style: Flat Squares
+    Color Transformer: RGB8
+    Position Transformer: XYZ
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Best Effort
+      Value: /navigation/vis/global_plan
+    Use Fixed Frame: true
+    Decay Time: 0
+    Queue Size: 10
+    Selectable: true
+    Invert Rainbow: false
+    Max Color:
+    - 255
+    - 255
+    - 255
+    Min Color:
+    - 0
+    - 0
+    - 0
+    Autocompute Intensity Bounds: true
+    Use rainbow: true
+    Alpha: 1.0
+    Channel Name: intensity
+  - Class: rviz_default_plugins/Pose
+    Enabled: true
+    Name: Current goal
+    Color: 255; 25; 0
+    Head Length: 0.4
+    Head Radius: 0.25
+    Shaft Length: 0.8
+    Shaft Radius: 0.1
+    Shape: Arrow
+    Alpha: 1
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /room_finder/goal
+    Value: true
+  - Alpha: 1
+    Autocompute Intensity Bounds: true
+    Autocompute Value Bounds:
+      Max Value: 10
+      Min Value: -10
+      Value: true
+    Axis: Z
+    Channel Name: intensity
+    Class: rviz_default_plugins/PointCloud2
+    Color: 255; 255; 255
+    Color Transformer: AxisColor
+    Decay Time: 0
+    Enabled: false
+    Invert Rainbow: false
+    Max Color: 255; 255; 255
+    Max Intensity: 4096
+    Min Color: 0; 0; 0
+    Min Intensity: 0
+    Name: CloudRegistered
+    Position Transformer: XYZ
+    Selectable: true
+    Size (Pixels): 2
+    Size (m): 0.05
+    Style: Flat Squares
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      Filter size: 10
+      History Policy: Keep Last
+      Reliability Policy: Best Effort
+      Value: /cloud_registered
+    Use Fixed Frame: true
+    Use rainbow: true
+    Value: true
+  - Angle Tolerance: 0.10000000149011612
+    Class: rviz_default_plugins/Odometry
+    Covariance:
+      Orientation:
+        Alpha: 0.5
+        Color: 255; 255; 127
+        Color Style: Unique
+        Frame: Local
+        Offset: 1
+        Scale: 1
+        Value: false
+      Position:
+        Alpha: 0.30000001192092896
+        Color: 204; 51; 204
+        Scale: 1
+        Value: false
+      Value: false
+    Enabled: true
+    Keep: 1
+    Name: Odometry
+    Position Tolerance: 0.10000000149011612
+    Shape:
+      Alpha: 1
+      Axes Length: 1
+      Axes Radius: 0.10000000149011612
+      Color: 255; 25; 0
+      Head Length: 0.30000001192092896
+      Head Radius: 0.10000000149011612
+      Shaft Length: 1
+      Shaft Radius: 0.05000000074505806
+      Value: Axes
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      Filter size: 10
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /Odometry/base
+    Value: true
+  - Class: rviz_default_plugins/Image
+    Enabled: true
+    Name: Detections (left | front | right)
+    Max Value: 1.0
+    Min Value: 0.0
+    Median window: 5
+    Normalize Range: true
+    Value: true
+    Topic:
+      Depth: 1
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Best Effort
+      Value: /room_finder/debug_image
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+  - Class: rviz_default_plugins/Interact
+    Hide Inactive Objects: true
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/FocusCamera
+  - Class: rviz_default_plugins/Measure
+    Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 30
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 1.2
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz_default_plugins)
+      Yaw: 3.14
+    Saved: null
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: true
+  Width: 1600
+  X: 100
+  Y: 60
