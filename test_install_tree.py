@@ -482,6 +482,65 @@ class TestRollback(InstallTreeTestCase):
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
 
+class TestWithdraw(InstallTreeTestCase):
+    """A first install that failed goes back to having nothing."""
+
+    def _commit(self, version):
+        self._write_pkg(it.stage_version(self.release, version), "pkg1", version)
+        it.commit_version(self.release, version)
+
+    def test_a_first_install_is_taken_back_to_nothing(self):
+        self._commit("1.0.0")
+
+        self.assertEqual(it.withdraw(self.release), "1.0.0")
+        self.assertIsNone(it.current_version(self.release))
+        self.assertFalse((self.release / "install").is_symlink())
+
+    def test_the_next_repair_does_not_relink_what_was_taken_back(self):
+        """Left committed, `ensure_tree` would restore the link a poll later."""
+        self._commit("1.0.0")
+        it.withdraw(self.release)
+
+        it.ensure_tree(self.release)
+
+        self.assertIsNone(it.current_version(self.release))
+
+    def test_what_was_taken_back_is_pruned(self):
+        self._commit("1.0.0")
+        it.withdraw(self.release)
+
+        it.prune_versions(self.release)
+
+        self.assertEqual(list((self.release / "versions").iterdir()), [])
+
+    def test_a_retry_installs_from_nothing(self):
+        self._commit("1.0.0")
+        it.withdraw(self.release)
+
+        self._commit("1.0.0")
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertIsNone(it.previous_version(self.release))
+
+    def test_a_version_with_one_before_it_is_left_for_rollback(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+
+        self.assertIsNone(it.withdraw(self.release))
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+
+    def test_nothing_live_is_nothing_to_take_back(self):
+        self.assertIsNone(it.withdraw(self.release))
+
+    def test_someone_elses_link_is_left_alone(self):
+        elsewhere = self.release.parent / "elsewhere"
+        elsewhere.mkdir()
+        (self.release / "install").symlink_to(elsewhere)
+
+        self.assertIsNone(it.withdraw(self.release))
+        self.assertTrue((self.release / "install").is_symlink())
+
+
 class TestMultiCommitAttempt(InstallTreeTestCase):
     """`raisin install --install-all` commits once per build type.
 

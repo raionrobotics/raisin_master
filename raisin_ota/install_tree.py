@@ -439,6 +439,37 @@ def rollback(release) -> Optional[str]:
     return parsed[1] if parsed else previous
 
 
+def withdraw(release) -> Optional[str]:
+    """Take back the live version when nothing came before it.
+
+    `rollback` for a first install: the state before it is no version at all.
+    Returns the version taken back, or None when this is not that case -- there
+    is a previous version to roll back to, nothing is live, or the link is
+    someone else's.
+
+    The version goes back to being uncommitted rather than only losing its link.
+    `ensure_tree` restores a missing link to the newest committed version, so a
+    tree left committed would be relinked by the next install and the robot read
+    as having it again. Marked first, then unlinked: a crash between the two
+    leaves the link in place, which is the state before this call, instead of an
+    unlinked committed tree that the next repair would put back.
+    """
+    link = current_link(release)
+    if not _is_our_link(link):
+        return None
+    current = _current_dir_name(release)
+    if not current or _previous_dir_name(release):
+        return None
+
+    (versions_dir(release) / current / _STAGING_MARKER).write_text("", encoding="utf-8")
+    link.unlink()
+    _write_previous(release, None)
+    _write_commit_session(release, None)
+
+    parsed = _split_generation(current)
+    return parsed[1] if parsed else current
+
+
 def discard_staging(release, version: str) -> None:
     """Remove an uncommitted staged tree."""
     target = _resolve_version_dir(release, version)
