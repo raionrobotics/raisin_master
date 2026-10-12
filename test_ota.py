@@ -2542,11 +2542,12 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
 
         self.last_snapshot.assert_not_called()
 
-    def test_broken_first_install_rolls_back_to_no_version(self):
+    def test_broken_first_install_goes_back_to_no_version_and_says_failed(self):
         """Before a first install there was no version, so that is where it goes back.
 
         Left on the broken version, the next install reads it as installed and
-        never tries again.
+        never tries again. Reported as `failed`, not `rolled_back`: there was no
+        previous version to restore.
         """
         ota._install_session_id = "session-tx-first"
 
@@ -2559,7 +2560,7 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
             if e["installSessionId"] == "session-tx-first"
             and e["eventType"] in ("failed", "rolled_back")
         ]
-        self.assertEqual([e["eventType"] for e in terminal], ["rolled_back"])
+        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
         self.last_snapshot.assert_not_called()
 
     def test_a_legacy_directory_is_adopted_before_installing(self):
