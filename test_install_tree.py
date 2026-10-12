@@ -475,7 +475,12 @@ class TestRollback(InstallTreeTestCase):
         self.assertIn("old", content)
 
     def test_rollback_without_a_previous_version_goes_back_to_nothing(self):
-        """A first install: before it there was no version, so none is live."""
+        """A first install: before it there was no version, so none is live.
+
+        Replaces `test_rollback_without_a_previous_version_reports_it`
+        (raisin_master#123), which asserted the version stayed live -- the
+        pointer left on a failed first install that this PR fixes.
+        """
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
 

@@ -2542,6 +2542,20 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
 
         self.last_snapshot.assert_not_called()
 
+    def test_broken_first_install_cannot_roll_back_and_says_so(self):
+        """With no previous version there is nothing to restore — that is `failed`."""
+        ota._install_session_id = "session-tx-first"
+
+        self._run_with_hollow_extract("2026.2.0")
+
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-first"
+            and e["eventType"] in ("failed", "rolled_back")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
+
     def test_broken_first_install_goes_back_to_no_version_and_says_failed(self):
         """Before a first install there was no version, so that is where it goes back.
 
