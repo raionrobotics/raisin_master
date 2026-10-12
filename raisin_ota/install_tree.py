@@ -196,6 +196,22 @@ def previous_version(release) -> Optional[str]:
     return parsed[1] if parsed else name
 
 
+def rolls_back_to_none(release) -> bool:
+    """Whether `rollback` would take the tree back to no version at all.
+
+    True when the commit it would undo had nothing live before it -- a first
+    install. Asked before rolling back by a caller with something of its own to
+    remove first, so that a stop between the two leaves the commit in place for
+    the next rollback to find.
+    """
+    record = _read_rollback(release)
+    return (
+        record is not None
+        and record["to"] is None
+        and _current_dir_name(release) in (record["from"], None)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rollback record
 # ---------------------------------------------------------------------------

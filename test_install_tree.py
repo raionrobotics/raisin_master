@@ -690,6 +690,16 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self.assertIsNone(it.rollback(self.release))
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
+    def test_it_says_beforehand_when_a_rollback_goes_back_to_none(self):
+        self._commit("1.0.0")
+        self.assertTrue(it.rolls_back_to_none(self.release))
+
+        self._commit("2.0.0")
+        self.assertFalse(it.rolls_back_to_none(self.release))
+
+        it.rollback(self.release)
+        self.assertFalse(it.rolls_back_to_none(self.release))
+
     def test_a_commit_clears_what_an_earlier_release_recorded(self):
         (self.release / ".previous-version").write_text("0009-gone")
         (self.release / ".current-session").write_text("s1")
