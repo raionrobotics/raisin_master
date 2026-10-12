@@ -9,12 +9,16 @@ directory to a symlink. Nothing a run produces is live until the symlink moves,
 so a failed install needs no compensation — it simply never commits — and a
 rollback is one atomic operation rather than a sequence of undo steps.
 
+Each commit records what it replaced in `release/.rollback`, and `rollback`
+consumes that record: it undoes the last commit, once, and only that.
+
 Directories carry a generation prefix so that re-installing the version that is
 already live still stages into a fresh directory instead of mutating the tree
 underneath a running system.
 """
 
 import errno
+import json
 import os
 import re
 import shutil
@@ -36,8 +40,12 @@ class InstallTreeUnusable(Exception):
 
 _VERSIONS_DIR = "versions"
 _CURRENT_LINK = "install"
-_PREVIOUS_FILE = ".previous-version"
-_SESSION_FILE = ".current-session"
+_ROLLBACK_FILE = ".rollback"
+# Written by earlier releases: the rollback target, and the install session that
+# committed last. Read once, for a robot that committed before upgrading, and
+# removed by the first commit after it.
+_LEGACY_PREVIOUS_FILE = ".previous-version"
+_LEGACY_SESSION_FILE = ".current-session"
 _STAGING_MARKER = ".staging"
 _LEGACY_VERSION = "legacy"
 
@@ -62,8 +70,8 @@ def current_link(release) -> Path:
     return Path(release) / _CURRENT_LINK
 
 
-def _previous_file(release) -> Path:
-    return Path(release) / _PREVIOUS_FILE
+def _rollback_file(release) -> Path:
+    return Path(release) / _ROLLBACK_FILE
 
 
 def _split_generation(name: str) -> Optional[Tuple[int, str]]:
@@ -179,67 +187,87 @@ def current_version(release) -> Optional[str]:
 
 
 def previous_version(release) -> Optional[str]:
-    """Version a rollback would restore."""
-    name = _previous_dir_name(release)
-    if not name:
+    """Version a rollback would restore, or None when it would restore none."""
+    record = _read_rollback(release)
+    name = record.get("to") if record else None
+    if not name or not (versions_dir(release) / name).is_dir():
         return None
     parsed = _split_generation(name)
     return parsed[1] if parsed else name
 
 
-def _previous_dir_name(release) -> Optional[str]:
-    try:
-        name = _previous_file(release).read_text(encoding="utf-8").strip()
-    except (OSError, ValueError):
-        return None
-    if not name or not (versions_dir(release) / name).is_dir():
-        return None
-    return name
+# ---------------------------------------------------------------------------
+# Rollback record
+# ---------------------------------------------------------------------------
+#
+# `release/.rollback` is what undoes the last commit, and nothing else:
+#
+#     {"from": "<gen committed>", "to": "<gen live before it>" | null}
+#
+# Written before the link moves and consumed by the rollback that undoes it,
+# so it exists exactly while there is a commit to undo. `to` is null for a
+# commit with nothing live before it -- a first install -- said rather than
+# inferred from a file being absent: absent means there is nothing to undo.
 
 
-def _previous_recorded(release) -> bool:
-    """Whether a commit recorded a version before the live one, still on disk or not."""
+def _read_rollback(release) -> Optional[dict]:
+    """The record of the last commit, or None when there is none to undo.
+
+    Unreadable is None too. A rollback that cannot tell where to go does
+    nothing, which leaves the robot where it is rather than somewhere a guess
+    put it.
+    """
     try:
-        return bool(_previous_file(release).read_text(encoding="utf-8").strip())
+        record = json.loads(_rollback_file(release).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return False
+        return _legacy_rollback(release)
     except (OSError, ValueError):
-        # Unreadable or not text is not "none": assume there was one.
-        return True
-
-
-def _read_commit_session(release) -> Optional[str]:
-    try:
-        value = (Path(release) / _SESSION_FILE).read_text(encoding="utf-8").strip()
-    except OSError:
         return None
-    return value or None
+    if not isinstance(record, dict):
+        return None
+    source, target = record.get("from"), record.get("to")
+    if not isinstance(source, str) or not source:
+        return None
+    if target is not None and (not isinstance(target, str) or not target):
+        return None
+    return {"from": source, "to": target}
 
 
-def _write_commit_session(release, session: Optional[str]) -> None:
-    path = Path(release) / _SESSION_FILE
+def _legacy_rollback(release) -> Optional[dict]:
+    """A robot that last committed before this record existed.
+
+    Its `.previous-version` named the target and nothing named what it undid,
+    so the live version stands in for it. An absent file is not read as a first
+    install -- that guess is what this record replaces -- so with none there is
+    nothing to undo.
+    """
     try:
-        if session is None:
-            if path.exists():
-                path.unlink()
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(session, encoding="utf-8")
-    except OSError:
-        pass
+        target = (
+            (Path(release) / _LEGACY_PREVIOUS_FILE).read_text(encoding="utf-8").strip()
+        )
+    except (OSError, ValueError):
+        return None
+    current = _current_dir_name(release)
+    if not target or not current or target == current:
+        return None
+    return {"from": current, "to": target}
 
 
-def _write_previous(release, dir_name: Optional[str]) -> None:
-    path = _previous_file(release)
-    try:
-        if dir_name is None:
-            if path.exists():
-                path.unlink()
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(dir_name, encoding="utf-8")
-    except OSError:
-        pass
+def _write_rollback(release, source: str, target: Optional[str]) -> None:
+    """Record the commit about to happen. Raises rather than leave it unrecorded.
+
+    A link moved with no record behind it is a commit nothing can undo, so a
+    failure here stops the commit before the link moves.
+    """
+    path = _rollback_file(release)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"from": source, "to": target}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _clear_rollback(release) -> None:
+    for name in (_ROLLBACK_FILE, _LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
+        (Path(release) / name).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -395,24 +423,22 @@ def _resolve_version_dir(release, version: str) -> Optional[Path]:
     return matches[-1] if matches else None
 
 
-def commit_version(
-    release, version: str, session: Optional[str] = None
-) -> Optional[str]:
+def commit_version(release, version: str) -> Optional[str]:
     """Make a staged version live. Returns the directory now current.
 
-    `session` identifies the install attempt. One attempt can commit more than
-    once — `raisin install --install-all` runs the whole flow per build type —
-    and the rollback target must stay the state that existed *before* the
-    attempt, not the intermediate one the attempt itself produced. Rolling back
-    to that intermediate state would restore a tree that was never good: after
-    the debug pass it holds the new debug binaries and the old release ones.
+    What was live before it is recorded first, so `rollback` can undo exactly
+    this commit -- and when nothing was live, that is recorded too.
     """
     target = _resolve_version_dir(release, version)
     if target is None:
         return None
 
     outgoing = _current_dir_name(release)
-    committed_by = _read_commit_session(release)
+    if outgoing == target.name:
+        # Already live, so this commit changes nothing and there is nothing new
+        # to undo. Recording it would read as a first install.
+        return target.name
+    _write_rollback(release, target.name, outgoing)
     _point_current_at(release, target.name)
 
     # Keep the marker until the atomic switch succeeds. A crash or refused
@@ -422,59 +448,59 @@ def commit_version(
     except OSError:
         pass
 
-    replacing_own_work = bool(session) and session == committed_by
-    if outgoing and outgoing != target.name and not replacing_own_work:
-        _write_previous(release, outgoing)
-    _write_commit_session(release, session)
+    for name in (_LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
+        try:
+            (Path(release) / name).unlink(missing_ok=True)
+        except OSError:
+            pass
     return target.name
 
 
 def rollback(release) -> Optional[str]:
-    """Put the tree back to how it was before the last commit.
+    """Undo the last commit. Returns the version restored, or None.
 
-    Returns the version restored, or None when there was no version before it --
-    a first install. Then the state to go back to is no version at all, so the
-    live link goes and its version becomes uncommitted again. Left committed, it
-    would be relinked by `ensure_tree` and read as installed by the next install.
+    The tree goes back to what was live before that commit -- no version at
+    all, for a first install -- and the version it undid is marked abandoned,
+    so `ensure_tree` never relinks it and pruning removes it. The record is
+    consumed: a second rollback with no commit between does nothing.
+
+    Nothing is done when there is no record, or when the link is no longer on
+    either end of it -- someone else moved it, and putting it back would undo
+    their change rather than this commit.
+
+    Safe to repeat after a crash part way through: each step is the same
+    whether or not it already ran.
     """
-    previous = _previous_dir_name(release)
-    if not previous:
-        # Only when no version was ever recorded before it. One recorded and
-        # since deleted is not a first install: the live version is the one
-        # the robot has, and taking it away would leave it with nothing.
-        if not _previous_recorded(release):
-            _uncommit_current(release)
+    record = _read_rollback(release)
+    if record is None:
+        return None
+    source, target = record["from"], record["to"]
+
+    link = current_link(release)
+    if link.is_symlink() and not _is_our_link(link):
+        return None
+    current = _current_dir_name(release)
+    if target is None:
+        if current not in (source, None):
+            return None
+    elif current not in (source, target):
+        return None
+    if target is not None and not (versions_dir(release) / target).is_dir():
         return None
 
-    _point_current_at(release, previous)
+    abandoned = versions_dir(release) / source
+    if abandoned.is_dir():
+        (abandoned / _STAGING_MARKER).write_text("", encoding="utf-8")
+    if target is None:
+        link.unlink(missing_ok=True)
+    else:
+        _point_current_at(release, target)
+    _clear_rollback(release)
 
-    # The version before the restored one becomes the next rollback target, so
-    # a second failure does not bounce back onto the version just rejected.
-    ordered = [name for _, _, entry in _generations(release) for name in (entry.name,)]
-    try:
-        index = ordered.index(previous)
-    except ValueError:
-        index = 0
-    _write_previous(release, ordered[index - 1] if index > 0 else None)
-
-    parsed = _split_generation(previous)
-    return parsed[1] if parsed else previous
-
-
-def _uncommit_current(release) -> None:
-    """Take the live version back to uncommitted, for a rollback with nothing before it.
-
-    Marked first, then unlinked: a crash between the two leaves the link in
-    place, the state before the rollback, rather than an unlinked committed tree
-    that the next repair would relink. Someone else's link is left alone.
-    """
-    link = current_link(release)
-    current = _current_dir_name(release)
-    if not current or not _is_our_link(link):
-        return
-    (versions_dir(release) / current / _STAGING_MARKER).write_text("", encoding="utf-8")
-    link.unlink(missing_ok=True)
-    _write_commit_session(release, None)
+    if target is None:
+        return None
+    parsed = _split_generation(target)
+    return parsed[1] if parsed else target
 
 
 def discard_staging(release, version: str) -> None:
@@ -494,7 +520,8 @@ def prune_versions(release, keep: int = 2) -> List[str]:
     meaning two versions.
     """
     generations = _generations(release)
-    protected = {_current_dir_name(release), _previous_dir_name(release)}
+    record = _read_rollback(release)
+    protected = {_current_dir_name(release), record and record["to"]}
     keep = max(1, keep)
 
     removed = []

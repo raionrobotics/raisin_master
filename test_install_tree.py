@@ -513,11 +513,11 @@ class TestRollback(InstallTreeTestCase):
         self.assertEqual(it.current_version(self.release), "1.0.0")
         self.assertIsNone(it.previous_version(self.release))
 
-    def test_a_rollback_record_that_is_not_text_is_not_read_as_none(self):
-        """Corrupted bytes are not "no version before": the live one stays."""
+    def test_a_rollback_record_that_cannot_be_read_changes_nothing(self):
+        """Not knowing where to go is not "no version before": the live one stays."""
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
-        (self.release / ".previous-version").write_bytes(b"\xff\xfe\x00")
+        (self.release / ".rollback").write_bytes(b"\xff\xfe\x00")
 
         self.assertIsNone(it.rollback(self.release))
         self.assertEqual(it.current_version(self.release), "1.0.0")
@@ -535,36 +535,24 @@ class TestRollback(InstallTreeTestCase):
         self.assertTrue((self.release / "install").is_symlink())
 
 
-class TestMultiCommitAttempt(InstallTreeTestCase):
-    """`raisin install --install-all` commits once per build type.
+class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
+    """A rollback undoes the commit before it, and only that one, once.
 
-    Both commits belong to one attempt, so the rollback target must stay the
-    state that existed before the attempt began — not the intermediate state
-    the attempt itself produced.
+    It used to be inferred: `.previous-version` moved on every commit and
+    rollback, a commit under the session that committed last skipped it, and a
+    missing file was read as a first install. A failed install keeps its
+    session so the retry can resume, so the retry's commit recorded nothing --
+    and the rollback after it took a robot with a version back to none.
     """
 
-    def _commit(self, version, session=None, marker=None):
+    def _commit(self, version, marker=None):
         self._write_pkg(
             it.stage_version(self.release, version), "pkg1", marker or version
         )
-        return it.commit_version(self.release, version, session=session)
+        return it.commit_version(self.release, version)
 
-    def test_second_commit_of_one_attempt_keeps_the_original_rollback_target(self):
-        self._commit("1.0.0", marker="good")  # the state to return to
-        self._commit("2.0.0-debug", session="s1", marker="debug")
-        self._commit("2.0.0", session="s1", marker="release")
-
-        self.assertEqual(it.current_version(self.release), "2.0.0")
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
-
-    def test_rollback_after_a_two_stage_attempt_restores_the_pre_attempt_tree(self):
-        self._commit("1.0.0", marker="good")
-        self._commit("2.0.0-debug", session="s1", marker="debug")
-        self._commit("2.0.0", session="s1", marker="release")
-
-        it.rollback(self.release)
-
-        content = (
+    def _live_marker(self):
+        return (
             self.release
             / "install"
             / "pkg1"
@@ -574,19 +562,142 @@ class TestMultiCommitAttempt(InstallTreeTestCase):
             / "release"
             / "release.yaml"
         ).read_text()
-        self.assertIn("good", content)
 
-    def test_a_later_attempt_moves_the_rollback_target_forward(self):
-        self._commit("1.0.0", session="s1", marker="first")
-        self._commit("2.0.0", session="s2", marker="second")
+    def test_every_retry_of_a_failing_install_goes_back_to_the_version_before(self):
+        """Found in review: the second retry went to none, the third to the failure."""
+        self._commit("1.0.0", marker="good")
+        for _ in range(3):
+            it.ensure_tree(self.release)
+            self._commit("2.0.0", marker="bad")
 
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+            self.assertEqual(it.rollback(self.release), "1.0.0")
+            self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertIn("good", self._live_marker())
 
-    def test_commits_without_a_session_behave_as_before(self):
+    def test_a_second_rollback_with_no_commit_between_changes_nothing(self):
+        """Found in review: it took the restored version away, and pruning deleted it."""
         self._commit("1.0.0")
         self._commit("2.0.0")
+        it.rollback(self.release)
 
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertIsNone(it.rollback(self.release))
+        it.ensure_tree(self.release)
+        it.prune_versions(self.release, keep=1)
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_two_commits_in_a_row_are_undone_one_at_a_time(self):
+        """Nothing commits twice for one install any more (`--all` went in 46a940c)."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        self._commit("3.0.0")
+
+        self.assertEqual(it.rollback(self.release), "2.0.0")
+        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+
+    def test_the_version_rolled_back_from_is_never_relinked(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        it.rollback(self.release)
+        (self.release / "install").unlink()
+
+        it.ensure_tree(self.release)
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_the_version_rolled_back_from_is_pruned(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        it.rollback(self.release)
+
+        it.prune_versions(self.release)
+
+        kept = [p.name for p in (self.release / "versions").iterdir()]
+        self.assertEqual(kept, ["0001-1.0.0"])
+
+    def test_a_rollback_stopped_part_way_finishes_when_repeated(self):
+        """Killed after the link moved and before the record went."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        with patch.object(it, "_clear_rollback", side_effect=OSError("killed")):
+            with self.assertRaises(OSError):
+                it.rollback(self.release)
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+        self.assertEqual(it.rollback(self.release), "1.0.0")
+        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_first_install_rollback_stopped_part_way_finishes_when_repeated(self):
+        self._commit("1.0.0")
+        with patch.object(it, "_clear_rollback", side_effect=OSError("killed")):
+            with self.assertRaises(OSError):
+                it.rollback(self.release)
+        self.assertIsNone(it.current_version(self.release))
+
+        self.assertIsNone(it.rollback(self.release))
+        it.ensure_tree(self.release)
+        self.assertIsNone(it.current_version(self.release))
+        self.assertFalse((self.release / ".rollback").exists())
+
+    def test_a_commit_whose_switch_failed_is_undone_without_moving_anything(self):
+        """The record is written before the link moves, so it may name a switch
+        that never happened."""
+        self._commit("1.0.0")
+        it.stage_version(self.release, "2.0.0")
+        with patch.object(it, "_point_current_at", side_effect=OSError("refused")):
+            with self.assertRaises(OSError):
+                it.commit_version(self.release, "2.0.0")
+
+        self.assertEqual(it.rollback(self.release), "1.0.0")
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_commit_that_cannot_be_recorded_does_not_switch(self):
+        """A link moved with nothing to undo it is the failure this record ends."""
+        self._commit("1.0.0")
+        it.stage_version(self.release, "2.0.0")
+        with patch.object(it, "_write_rollback", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                it.commit_version(self.release, "2.0.0")
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_link_moved_by_someone_else_is_left_where_they_put_it(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        self._commit("3.0.0")
+        os.remove(self.release / "install")
+        (self.release / "install").symlink_to(Path("versions") / "0001-1.0.0")
+
+        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_robot_that_committed_before_this_record_still_rolls_back(self):
+        """What an earlier release left: `.previous-version` and no record."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".rollback").unlink()
+        (self.release / ".previous-version").write_text("0001-1.0.0")
+
+        self.assertEqual(it.rollback(self.release), "1.0.0")
+        self.assertFalse((self.release / ".previous-version").exists())
+
+    def test_no_record_at_all_is_not_read_as_a_first_install(self):
+        self._commit("1.0.0")
+        (self.release / ".rollback").unlink()
+
+        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_commit_clears_what_an_earlier_release_recorded(self):
+        (self.release / ".previous-version").write_text("0009-gone")
+        (self.release / ".current-session").write_text("s1")
+
+        self._commit("1.0.0")
+
+        self.assertFalse((self.release / ".previous-version").exists())
+        self.assertFalse((self.release / ".current-session").exists())
 
 
 class TestRetention(InstallTreeTestCase):
