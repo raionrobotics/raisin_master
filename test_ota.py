@@ -2542,19 +2542,25 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
 
         self.last_snapshot.assert_not_called()
 
-    def test_broken_first_install_cannot_roll_back_and_says_so(self):
-        """With no previous version there is nothing to restore — that is `failed`."""
+    def test_broken_first_install_rolls_back_to_no_version(self):
+        """Before a first install there was no version, so that is where it goes back.
+
+        Left on the broken version, the next install reads it as installed and
+        never tries again.
+        """
         ota._install_session_id = "session-tx-first"
 
         self._run_with_hollow_extract("2026.2.0")
 
+        self.assertIsNone(install_tree.current_version(self.release))
         terminal = [
             e
             for e in ota._read_install_event_queue()
             if e["installSessionId"] == "session-tx-first"
             and e["eventType"] in ("failed", "rolled_back")
         ]
-        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
+        self.assertEqual([e["eventType"] for e in terminal], ["rolled_back"])
+        self.last_snapshot.assert_not_called()
 
     def test_a_legacy_directory_is_adopted_before_installing(self):
         legacy_pkg = self.live / "old_pkg" / "linux" / "22.04" / "x86_64" / "release"

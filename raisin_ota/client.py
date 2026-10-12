@@ -4183,33 +4183,28 @@ def download_all_from_archive(
             "health_check_failed",
             f"unusable after switch: {', '.join(broken)}",
         )
+        # `rolled_back` is an attempt that came back to where it started. For a
+        # first install that is no version at all: `rollback` took the tree
+        # back to nothing, and there is nothing to report as running.
         if restored:
             print(
                 f"↩️  Rolled back to v{restored}: {len(broken)} package(s) "
                 "unusable after the switch."
             )
-            record_install_event(
-                "rolled_back",
-                stage="health_check",
-                error_code="health_check_failed",
-                error_message=f"unusable after switch: {', '.join(broken)}",
-                **event_context,
-            )
-            _report_restored_snapshot(install_base_path, build_type, install_session_id)
         else:
-            # Nothing to restore, so this is not a rollback — the contract
-            # reserves `rolled_back` for an attempt that came back.
             print(
-                f"⚠️ {len(broken)} package(s) unusable after the switch and no "
-                "previous version to restore."
+                f"↩️  Rolled back to no version: {len(broken)} package(s) "
+                "unusable after the switch, and none was installed before."
             )
-            record_install_event(
-                "failed",
-                stage="health_check",
-                error_code="health_check_failed",
-                error_message=f"unusable after switch: {', '.join(broken)}",
-                **event_context,
-            )
+        record_install_event(
+            "rolled_back",
+            stage="health_check",
+            error_code="health_check_failed",
+            error_message=f"unusable after switch: {', '.join(broken)}",
+            **event_context,
+        )
+        if restored:
+            _report_restored_snapshot(install_base_path, build_type, install_session_id)
         return {}
 
     # The caller decides when "installed" is true, because the callers do not

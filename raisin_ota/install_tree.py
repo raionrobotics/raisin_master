@@ -197,6 +197,17 @@ def _previous_dir_name(release) -> Optional[str]:
     return name
 
 
+def _previous_recorded(release) -> bool:
+    """Whether a commit recorded a version before the live one, still on disk or not."""
+    try:
+        return bool(_previous_file(release).read_text(encoding="utf-8").strip())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Unreadable is not "none": assume there was one.
+        return True
+
+
 def _read_commit_session(release) -> Optional[str]:
     try:
         value = (Path(release) / _SESSION_FILE).read_text(encoding="utf-8").strip()
@@ -419,9 +430,20 @@ def commit_version(
 
 
 def rollback(release) -> Optional[str]:
-    """Restore the previous version. Returns its version, or None if there is none."""
+    """Put the tree back to how it was before the last commit.
+
+    Returns the version restored, or None when there was no version before it --
+    a first install. Then the state to go back to is no version at all, so the
+    live link goes and its version becomes uncommitted again. Left committed, it
+    would be relinked by `ensure_tree` and read as installed by the next install.
+    """
     previous = _previous_dir_name(release)
     if not previous:
+        # Only when no version was ever recorded before it. One recorded and
+        # since deleted is not a first install: the live version is the one
+        # the robot has, and taking it away would leave it with nothing.
+        if not _previous_recorded(release):
+            _uncommit_current(release)
         return None
 
     _point_current_at(release, previous)
@@ -437,6 +459,22 @@ def rollback(release) -> Optional[str]:
 
     parsed = _split_generation(previous)
     return parsed[1] if parsed else previous
+
+
+def _uncommit_current(release) -> None:
+    """Take the live version back to uncommitted, for a rollback with nothing before it.
+
+    Marked first, then unlinked: a crash between the two leaves the link in
+    place, the state before the rollback, rather than an unlinked committed tree
+    that the next repair would relink. Someone else's link is left alone.
+    """
+    link = current_link(release)
+    current = _current_dir_name(release)
+    if not current or not _is_our_link(link):
+        return
+    (versions_dir(release) / current / _STAGING_MARKER).write_text("", encoding="utf-8")
+    link.unlink()
+    _write_commit_session(release, None)
 
 
 def discard_staging(release, version: str) -> None:

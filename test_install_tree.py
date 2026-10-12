@@ -474,12 +474,56 @@ class TestRollback(InstallTreeTestCase):
         ).read_text()
         self.assertIn("old", content)
 
-    def test_rollback_without_a_previous_version_reports_it(self):
+    def test_rollback_without_a_previous_version_goes_back_to_nothing(self):
+        """A first install: before it there was no version, so none is live."""
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
 
         self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.current_version(self.release))
+        self.assertFalse((self.release / "install").is_symlink())
+
+    def test_the_next_repair_does_not_relink_a_first_install_rolled_back(self):
+        """Left committed, `ensure_tree` would put the link back a poll later."""
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+        it.rollback(self.release)
+
+        it.ensure_tree(self.release)
+
+        self.assertIsNone(it.current_version(self.release))
+
+    def test_a_first_install_rolled_back_is_pruned(self):
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+        it.rollback(self.release)
+
+        it.prune_versions(self.release)
+
+        self.assertEqual(list((self.release / "versions").iterdir()), [])
+
+    def test_the_next_install_after_it_starts_from_nothing(self):
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+        it.rollback(self.release)
+
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+
         self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertIsNone(it.previous_version(self.release))
+
+    def test_rollback_with_nothing_live_changes_nothing(self):
+        self.assertIsNone(it.rollback(self.release))
+        self.assertFalse((self.release / "install").exists())
+
+    def test_rollback_leaves_someone_elses_link_alone(self):
+        elsewhere = self.release.parent / "elsewhere"
+        elsewhere.mkdir()
+        (self.release / "install").symlink_to(elsewhere)
+
+        self.assertIsNone(it.rollback(self.release))
+        self.assertTrue((self.release / "install").is_symlink())
 
 
 class TestMultiCommitAttempt(InstallTreeTestCase):
