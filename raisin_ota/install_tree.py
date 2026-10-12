@@ -233,16 +233,13 @@ def _read_rollback(release) -> Optional[dict]:
     nothing, which leaves the robot where it is rather than somewhere a guess
     put it.
 
-    An earlier release's `.previous-version` wins when there is one. A commit
-    here removes it before writing this record, so one still on disk was
-    written since -- by that release committing after this one, or before this
-    one ever committed -- and this record, if any, is older than it.
+    With no record, an earlier release's `.previous-version` is read: a robot
+    that last committed before this record existed.
     """
-    legacy = Path(release) / _LEGACY_PREVIOUS_FILE
-    if legacy.exists() or legacy.is_symlink():
-        return _legacy_rollback(release)
     try:
         record = json.loads(_rollback_file(release).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _legacy_rollback(release)
     except (OSError, ValueError):
         return None
     if not isinstance(record, dict):
@@ -280,7 +277,7 @@ def _write_rollback(release, source: str, target: Optional[str]) -> None:
 
     A link moved with no record behind it is a commit nothing can undo, so a
     failure here stops the commit before the link moves. An earlier release's
-    files go first: left, they would outrank this record (`_read_rollback`).
+    files go too: they describe a commit before this one.
     """
     for name in (_LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
         (Path(release) / name).unlink(missing_ok=True)

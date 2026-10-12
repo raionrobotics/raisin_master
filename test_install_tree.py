@@ -519,9 +519,14 @@ class TestRollback(InstallTreeTestCase):
         self.assertIsNone(it.previous_version(self.release))
 
     def test_a_rollback_record_that_is_not_text_is_not_read_as_none(self):
-        """Corrupted bytes are not "no version before": the live one stays."""
+        """Corrupted bytes are not "no version before": the live one stays.
+
+        The earlier release's `.previous-version` is read only when this
+        release's record is absent -- a robot that last committed before it.
+        """
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
+        (self.release / ".rollback").unlink()
         (self.release / ".previous-version").write_bytes(b"\xff\xfe\x00")
 
         self.assertIsNone(it.rollback(self.release))
@@ -922,8 +927,13 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self.assertEqual(it.rollback(self.release), "1.0.0")
         self.assertFalse((self.release / ".previous-version").exists())
 
-    def test_an_earlier_release_committing_after_this_one_is_followed(self):
-        """A downgrade: its `.previous-version` is newer than this record."""
+    def test_a_record_left_behind_by_a_downgrade_changes_nothing(self):
+        """An earlier release committed after this record and left it stale.
+
+        Its `.previous-version` is not taken to outrank the record -- that
+        would be guessing which file is newer. The record no longer names the
+        live version, so the rollback does nothing.
+        """
         self._commit("1.0.0")
         self._commit("2.0.0")
         (self.release / ".previous-version").write_text("0002-2.0.0")
@@ -932,7 +942,8 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         (self.release / "versions" / "0003-3.0.0" / ".staging").unlink()
         (self.release / "install").symlink_to(Path("versions") / "0003-3.0.0")
 
-        self.assertEqual(it.rollback(self.release), "2.0.0")
+        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(it.current_version(self.release), "3.0.0")
 
     def test_a_commit_clears_what_an_earlier_release_recorded(self):
         (self.release / ".previous-version").write_text("0009-gone")
