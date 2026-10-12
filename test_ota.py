@@ -2491,23 +2491,6 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
             (self.live / "pkg2" / "linux" / "22.04" / "x86_64" / "release").is_dir()
         )
 
-    def test_a_retry_under_the_same_session_rolls_back_to_the_previous_version(self):
-        """A failed install keeps its session so the retry resumes it.
-
-        Found in review: the retry's commit was taken for the same install
-        committing twice and recorded nothing to go back to, so its rollback
-        took a robot with a version back to none, and the one after that put
-        the failed version back.
-        """
-        self._run({"pkg1", "pkg2"})
-        for _ in range(3):
-            ota.clear_pending_install_failure()
-            ota._install_session_id = "session-tx-retry"
-
-            self._run_with_hollow_extract("2026.3.0")
-
-            self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
-
     def test_rollback_is_reported_as_rolled_back_not_failed(self):
         """The contract separates the two: one switched and came back, one never did."""
         self._run({"pkg1", "pkg2"})
@@ -7248,6 +7231,33 @@ class TestTheCallerDecidesWhenInstalledIsTrue(unittest.TestCase):
         result = self._download(report_snapshot=False)
 
         self.assertIn("mypkg", result)
+
+
+class TestARetryUnderTheSameSessionRollsBack(unittest.TestCase):
+    """A failed install keeps its session so the retry resumes it.
+
+    Found in review: the retry's commit was taken for the same install
+    committing twice and recorded nothing to go back to, so its rollback took a
+    robot with a version back to none, and the one after that put the failed
+    version back. `install_tree` no longer reads the session it is passed.
+    """
+
+    setUp = TestTransactionalArchiveInstall.setUp
+    tearDown = TestTransactionalArchiveInstall.tearDown
+    MANIFEST = TestTransactionalArchiveInstall.MANIFEST
+    _extract_into = TestTransactionalArchiveInstall._extract_into
+    _run = TestTransactionalArchiveInstall._run
+    _run_with_hollow_extract = TestTransactionalArchiveInstall._run_with_hollow_extract
+
+    def test_every_retry_goes_back_to_the_previous_version(self):
+        self._run({"pkg1", "pkg2"})
+        for _ in range(3):
+            ota.clear_pending_install_failure()
+            ota._install_session_id = "session-tx-retry"
+
+            self._run_with_hollow_extract("2026.3.0")
+
+            self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
 
 
 if __name__ == "__main__":

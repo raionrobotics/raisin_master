@@ -232,11 +232,17 @@ def _read_rollback(release) -> Optional[dict]:
     Unreadable is None too. A rollback that cannot tell where to go does
     nothing, which leaves the robot where it is rather than somewhere a guess
     put it.
+
+    An earlier release's `.previous-version` wins when there is one. A commit
+    here removes it before writing this record, so one still on disk was
+    written since -- by that release committing after this one, or before this
+    one ever committed -- and this record, if any, is older than it.
     """
+    legacy = Path(release) / _LEGACY_PREVIOUS_FILE
+    if legacy.exists() or legacy.is_symlink():
+        return _legacy_rollback(release)
     try:
         record = json.loads(_rollback_file(release).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return _legacy_rollback(release)
     except (OSError, ValueError):
         return None
     if not isinstance(record, dict):
@@ -253,9 +259,9 @@ def _legacy_rollback(release) -> Optional[dict]:
     """A robot that last committed before this record existed.
 
     Its `.previous-version` named the target and nothing named what it undid,
-    so the live version stands in for it. An absent file is not read as a first
-    install -- that guess is what this record replaces -- so with none there is
-    nothing to undo.
+    so the live version stands in for it. Empty or unreadable is nothing to
+    undo: it is not read as a first install -- that guess is what this record
+    replaces.
     """
     try:
         target = (
@@ -273,8 +279,11 @@ def _write_rollback(release, source: str, target: Optional[str]) -> None:
     """Record the commit about to happen. Raises rather than leave it unrecorded.
 
     A link moved with no record behind it is a commit nothing can undo, so a
-    failure here stops the commit before the link moves.
+    failure here stops the commit before the link moves. An earlier release's
+    files go first: left, they would outrank this record (`_read_rollback`).
     """
+    for name in (_LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
+        (Path(release) / name).unlink(missing_ok=True)
     path = _rollback_file(release)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps({"from": source, "to": target}), encoding="utf-8")
@@ -439,11 +448,21 @@ def _resolve_version_dir(release, version: str) -> Optional[Path]:
     return matches[-1] if matches else None
 
 
-def commit_version(release, version: str) -> Optional[str]:
+def commit_version(
+    release, version: str, session: Optional[str] = None
+) -> Optional[str]:
     """Make a staged version live. Returns the directory now current.
 
     What was live before it is recorded first, so `rollback` can undo exactly
     this commit -- and when nothing was live, that is recorded too.
+
+    `session` is accepted for the callers that pass it and is not used. It used
+    to mark commits of one install, so that a second kept the first's rollback
+    target; but a failed install keeps its session so the retry can resume it,
+    and the retry's commit was taken for the same install committing twice --
+    it recorded nothing, and its rollback took a robot with a version back to
+    none. The only caller that committed twice for one install was `--all`,
+    removed in 46a940c.
     """
     target = _resolve_version_dir(release, version)
     if target is None:
@@ -464,11 +483,6 @@ def commit_version(release, version: str) -> Optional[str]:
     except OSError:
         pass
 
-    for name in (_LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
-        try:
-            (Path(release) / name).unlink(missing_ok=True)
-        except OSError:
-            pass
     return target.name
 
 
