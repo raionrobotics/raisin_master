@@ -190,7 +190,7 @@ def previous_version(release) -> Optional[str]:
 def _previous_dir_name(release) -> Optional[str]:
     try:
         name = _previous_file(release).read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, ValueError):
         return None
     if not name or not (versions_dir(release) / name).is_dir():
         return None
@@ -203,8 +203,8 @@ def _previous_recorded(release) -> bool:
         return bool(_previous_file(release).read_text(encoding="utf-8").strip())
     except FileNotFoundError:
         return False
-    except OSError:
-        # Unreadable is not "none": assume there was one.
+    except (OSError, ValueError):
+        # Unreadable or not text is not "none": assume there was one.
         return True
 
 
@@ -473,7 +473,7 @@ def _uncommit_current(release) -> None:
     if not current or not _is_our_link(link):
         return
     (versions_dir(release) / current / _STAGING_MARKER).write_text("", encoding="utf-8")
-    link.unlink()
+    link.unlink(missing_ok=True)
     _write_commit_session(release, None)
 
 

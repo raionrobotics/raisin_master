@@ -513,6 +513,15 @@ class TestRollback(InstallTreeTestCase):
         self.assertEqual(it.current_version(self.release), "1.0.0")
         self.assertIsNone(it.previous_version(self.release))
 
+    def test_a_rollback_record_that_is_not_text_is_not_read_as_none(self):
+        """Corrupted bytes are not "no version before": the live one stays."""
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+        (self.release / ".previous-version").write_bytes(b"\xff\xfe\x00")
+
+        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
     def test_rollback_with_nothing_live_changes_nothing(self):
         self.assertIsNone(it.rollback(self.release))
         self.assertFalse((self.release / "install").exists())
