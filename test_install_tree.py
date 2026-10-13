@@ -10,6 +10,7 @@ index) are unaffected; only its type changes, from directory to symlink.
 """
 
 import errno
+import json
 import os
 import shutil
 import sys
@@ -21,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from raisin_ota import install_tree as it  # noqa: E402
+from raisin_ota import durable  # noqa: E402
 
 
 class InstallTreeTestCase(unittest.TestCase):
@@ -447,7 +449,9 @@ class TestTamperRecovery(InstallTreeTestCase):
         shutil.rmtree(self.release / "versions" / "0001-1.0.0")
 
         self.assertIsNone(it.previous_version(self.release))
-        self.assertIsNone(it.rollback(self.release))
+        # `rollback` was removed (raisin_master#123); `undo_last_commit` returns
+        # what it did and the version restored, and the version is what this reads.
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(it.current_version(self.release), "2.0.0")
 
 
@@ -458,7 +462,9 @@ class TestRollback(InstallTreeTestCase):
         self._write_pkg(it.stage_version(self.release, "2.0.0"), "pkg1", "new")
         it.commit_version(self.release, "2.0.0")
 
-        restored = it.rollback(self.release)
+        # `rollback` was removed (raisin_master#123); `undo_last_commit` returns
+        # what it did and the version restored, and the version is what this reads.
+        restored = it.undo_last_commit(self.release)[1]
 
         self.assertEqual(restored, "1.0.0")
         self.assertEqual(it.current_version(self.release), "1.0.0")
@@ -474,12 +480,75 @@ class TestRollback(InstallTreeTestCase):
         ).read_text()
         self.assertIn("old", content)
 
-    def test_rollback_without_a_previous_version_reports_it(self):
+    def test_rollback_without_a_previous_version_goes_back_to_nothing(self):
+        """A first install: before it there was no version, so none is live.
+
+        Replaces `test_rollback_without_a_previous_version_reports_it`
+        (raisin_master#123), which asserted the version stayed live -- the
+        pointer left on a failed first install that this PR fixes.
+        """
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertIsNone(it.current_version(self.release))
+        self.assertFalse((self.release / "install").is_symlink())
+
+    def test_the_next_repair_does_not_relink_a_first_install_rolled_back(self):
+        """Left committed, `ensure_tree` would put the link back a poll later."""
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+        it.undo_last_commit(self.release)[1]
+
+        it.ensure_tree(self.release)
+
+        self.assertIsNone(it.current_version(self.release))
+
+    def test_a_first_install_rolled_back_is_pruned(self):
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+        it.undo_last_commit(self.release)[1]
+
+        it.prune_versions(self.release)
+
+        self.assertEqual(list((self.release / "versions").iterdir()), [])
+
+    def test_the_next_install_after_it_starts_from_nothing(self):
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+        it.undo_last_commit(self.release)[1]
+
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+
         self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertIsNone(it.previous_version(self.release))
+
+    def test_a_rollback_record_that_is_not_text_is_not_read_as_none(self):
+        """Corrupted bytes are not "no version before": the live one stays.
+
+        The earlier release's `.previous-version` is read only when this
+        release's record is absent -- a robot that last committed before it.
+        """
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
+        it.commit_version(self.release, "1.0.0")
+        (self.release / ".rollback").unlink()
+        (self.release / ".previous-version").write_bytes(b"\xff\xfe\x00")
+
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_rollback_with_nothing_live_changes_nothing(self):
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertFalse((self.release / "install").exists())
+
+    def test_rollback_leaves_someone_elses_link_alone(self):
+        elsewhere = self.release.parent / "elsewhere"
+        elsewhere.mkdir()
+        (self.release / "install").symlink_to(elsewhere)
+
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertTrue((self.release / "install").is_symlink())
 
 
 class TestMultiCommitAttempt(InstallTreeTestCase):
@@ -496,20 +565,33 @@ class TestMultiCommitAttempt(InstallTreeTestCase):
         )
         return it.commit_version(self.release, version, session=session)
 
-    def test_second_commit_of_one_attempt_keeps_the_original_rollback_target(self):
-        self._commit("1.0.0", marker="good")  # the state to return to
-        self._commit("2.0.0-debug", session="s1", marker="debug")
-        self._commit("2.0.0", session="s1", marker="release")
+    def test_second_commit_under_one_session_is_undone_on_its_own(self):
+        """Changed from "keeps the original rollback target" (raisin_master#123).
 
-        self.assertEqual(it.current_version(self.release), "2.0.0")
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
-
-    def test_rollback_after_a_two_stage_attempt_restores_the_pre_attempt_tree(self):
+        `--install-all` was removed in 46a940c, and it was the only caller that
+        committed twice for one install. `session` is now accepted and ignored:
+        a failed install keeps its session so the retry can resume it, and the
+        retry's commit was taken for the same install committing twice -- see
+        `TestRollbackUndoesTheLastCommitOnce`.
+        """
         self._commit("1.0.0", marker="good")
         self._commit("2.0.0-debug", session="s1", marker="debug")
         self._commit("2.0.0", session="s1", marker="release")
 
-        it.rollback(self.release)
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+        self.assertEqual(it.previous_version(self.release), "2.0.0-debug")
+
+    def test_rollback_after_two_commits_under_one_session_undoes_the_last(self):
+        """Changed from "restores the pre-attempt tree" (raisin_master#123).
+
+        Same reason as the test above: `--install-all` was removed in 46a940c,
+        and `session` is accepted and ignored.
+        """
+        self._commit("1.0.0", marker="good")
+        self._commit("2.0.0-debug", session="s1", marker="debug")
+        self._commit("2.0.0", session="s1", marker="release")
+
+        it.undo_last_commit(self.release)[1]
 
         content = (
             self.release
@@ -521,7 +603,7 @@ class TestMultiCommitAttempt(InstallTreeTestCase):
             / "release"
             / "release.yaml"
         ).read_text()
-        self.assertIn("good", content)
+        self.assertIn("debug", content)
 
     def test_a_later_attempt_moves_the_rollback_target_forward(self):
         self._commit("1.0.0", session="s1", marker="first")
@@ -669,6 +751,539 @@ class TestAVersionCannotLeaveTheTree(InstallTreeTestCase):
             it.stage_version(self.release, "1.0/../x")
 
         self.assertIn("1.0/../x", str(caught.exception))
+
+
+class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
+    """A rollback undoes the commit before it, and only that one, once.
+
+    It used to be inferred: `.previous-version` moved on every commit and
+    rollback, a commit under the session that committed last skipped it, and a
+    missing file was read as a first install. A failed install keeps its
+    session so the retry can resume it, so the retry's commit recorded nothing
+    -- and the rollback after it took a robot with a version back to none.
+
+    Now each commit writes `release/.rollback` before the link moves, and a
+    rollback consumes it.
+    """
+
+    def _commit(self, version, marker=None, session=None):
+        self._write_pkg(
+            it.stage_version(self.release, version), "pkg1", marker or version
+        )
+        return it.commit_version(self.release, version, session=session)
+
+    def _live_marker(self):
+        return (
+            self.release
+            / "install"
+            / "pkg1"
+            / "linux"
+            / "22.04"
+            / "x86_64"
+            / "release"
+            / "release.yaml"
+        ).read_text()
+
+    def test_every_retry_under_the_same_session_goes_back_to_the_version_before(
+        self,
+    ):
+        """Found in review: the second retry went to none, the third to the failure."""
+        self._commit("1.0.0", marker="good")
+        for _ in range(3):
+            it.ensure_tree(self.release)
+            self._commit("2.0.0", marker="bad", session="S")
+
+            self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
+            self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertIn("good", self._live_marker())
+
+    def test_a_session_is_accepted_and_ignored(self):
+        """`session` stays in the signature for the callers that pass it, and
+        nothing reads it.
+
+        It marked commits of one install, so that a second kept the first's
+        rollback target. A failed install keeps its session so the retry can
+        resume it, so the retry's commit was taken for the same install
+        committing twice and recorded nothing to go back to -- the defect above.
+        Telling one install from the next is not something a session can do,
+        and the only caller that committed twice for one install, `--all`, was
+        removed in 46a940c. So each commit is undone on its own, whatever
+        session it carries. `TestMultiCommitAttempt` above was changed to say
+        the same.
+        """
+        self._commit("1.0.0")
+        self._commit("2.0.0-debug", session="s1")
+        self._commit("2.0.0", session="s1")
+
+        self.assertEqual(it.previous_version(self.release), "2.0.0-debug")
+        self.assertEqual(it.undo_last_commit(self.release)[1], "2.0.0-debug")
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+
+    def test_a_second_rollback_with_no_commit_between_changes_nothing(self):
+        """Found in review: it took the restored version away, and pruning deleted it."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        it.undo_last_commit(self.release)[1]
+
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        it.ensure_tree(self.release)
+        it.prune_versions(self.release, keep=1)
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_the_version_rolled_back_from_is_never_relinked(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        it.undo_last_commit(self.release)[1]
+        (self.release / "install").unlink()
+
+        it.ensure_tree(self.release)
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_the_version_rolled_back_from_is_pruned(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        it.undo_last_commit(self.release)[1]
+
+        it.prune_versions(self.release)
+
+        kept = [p.name for p in (self.release / "versions").iterdir()]
+        self.assertEqual(kept, ["0001-1.0.0"])
+
+    def test_a_rollback_stopped_part_way_finishes_when_repeated(self):
+        """Killed after the link moved and before the record went."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        with patch.object(it, "_clear_rollback", side_effect=OSError("killed")):
+            with self.assertRaises(OSError):
+                it.undo_last_commit(self.release)[1]
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_first_install_rollback_stopped_part_way_finishes_when_repeated(self):
+        self._commit("1.0.0")
+        with patch.object(it, "_clear_rollback", side_effect=OSError("killed")):
+            with self.assertRaises(OSError):
+                it.undo_last_commit(self.release)[1]
+        self.assertIsNone(it.current_version(self.release))
+
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        it.ensure_tree(self.release)
+        self.assertIsNone(it.current_version(self.release))
+        self.assertFalse((self.release / ".rollback").exists())
+
+    def test_a_commit_whose_switch_failed_is_undone_without_moving_anything(self):
+        """The record is written before the link moves, so it may name a switch
+        that never happened."""
+        self._commit("1.0.0")
+        it.stage_version(self.release, "2.0.0")
+        with patch.object(it, "_point_current_at", side_effect=OSError("refused")):
+            with self.assertRaises(OSError):
+                it.commit_version(self.release, "2.0.0")
+
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_commit_that_cannot_be_recorded_does_not_switch(self):
+        """A link moved with nothing to undo it is the failure this record ends."""
+        self._commit("1.0.0")
+        it.stage_version(self.release, "2.0.0")
+        with patch.object(it, "_write_rollback", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                it.commit_version(self.release, "2.0.0")
+
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_record_that_cannot_be_read_changes_nothing(self):
+        """Not knowing where to go is not "no version before": the live one stays."""
+        self._commit("1.0.0")
+        (self.release / ".rollback").write_bytes(b"\xff\xfe\x00")
+
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_link_moved_by_someone_else_is_left_where_they_put_it(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        self._commit("3.0.0")
+        os.remove(self.release / "install")
+        (self.release / "install").symlink_to(Path("versions") / "0001-1.0.0")
+
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_no_record_at_all_is_not_read_as_a_first_install(self):
+        self._commit("1.0.0")
+        (self.release / ".rollback").unlink()
+
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+
+    def test_a_robot_that_committed_before_this_record_still_rolls_back(self):
+        """What an earlier release left: `.previous-version` and no record."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".rollback").unlink()
+        (self.release / ".previous-version").write_text("0001-1.0.0")
+
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
+        self.assertFalse((self.release / ".previous-version").exists())
+
+    def test_an_earlier_release_file_after_its_own_rollback_changes_nothing(self):
+        """From review: an earlier release's rollback put the link back on 1.0.0
+        and rewrote the file to 0.9.0, one further down. Read after the upgrade
+        as a commit of 1.0.0 to undo, it marked the good version abandoned and
+        took the robot to 0.9.0.
+        """
+        for version in ("0.9.0", "1.0.0", "2.0.0"):
+            self._commit(version)
+        (self.release / ".rollback").unlink()
+        os.remove(self.release / "install")
+        (self.release / "install").symlink_to(Path("versions") / "0002-1.0.0")
+        (self.release / ".previous-version").write_text("0001-0.9.0", encoding="utf-8")
+
+        self.assertEqual(
+            it.undo_last_commit(self.release),
+            (it.RollbackOutcome.NOTHING_TO_UNDO, None),
+        )
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertFalse(
+            (self.release / "versions" / "0002-1.0.0" / ".staging").exists()
+        )
+
+    def test_a_record_left_behind_by_a_downgrade_changes_nothing(self):
+        """An earlier release committed after this record and left it stale.
+
+        Its `.previous-version` is not taken to outrank the record -- that
+        would be guessing which file is newer. The record no longer names the
+        live version, so the rollback does nothing.
+        """
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".previous-version").write_text("0002-2.0.0")
+        os.remove(self.release / "install")
+        self._write_pkg(it.stage_version(self.release, "3.0.0"), "pkg1", "3.0.0")
+        (self.release / "versions" / "0003-3.0.0" / ".staging").unlink()
+        (self.release / "install").symlink_to(Path("versions") / "0003-3.0.0")
+
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertEqual(it.current_version(self.release), "3.0.0")
+
+    def test_a_rollback_with_the_link_removed_goes_back_to_the_version_before(self):
+        """Found in review: with no link the rollback did nothing, and the next
+        `ensure_tree` relinked the version it was asked to undo."""
+        self._commit("1.0.0", marker="good")
+        self._commit("2.0.0", marker="bad")
+        os.remove(self.release / "install")
+
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
+        it.ensure_tree(self.release)
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertIn("good", self._live_marker())
+
+    def test_a_commit_clears_what_an_earlier_release_recorded(self):
+        (self.release / ".previous-version").write_text("0009-gone")
+        (self.release / ".current-session").write_text("s1")
+
+        self._commit("1.0.0")
+
+        self.assertFalse((self.release / ".previous-version").exists())
+        self.assertFalse((self.release / ".current-session").exists())
+
+    def test_it_says_beforehand_when_a_rollback_goes_back_to_none(self):
+        self._commit("1.0.0")
+        self.assertTrue(it.rolls_back_to_none(self.release))
+
+        self._commit("2.0.0")
+        self.assertFalse(it.rolls_back_to_none(self.release))
+
+        it.undo_last_commit(self.release)[1]
+        self.assertFalse(it.rolls_back_to_none(self.release))
+
+    def test_it_does_not_say_none_for_a_rollback_it_would_refuse(self):
+        """Found in review: with the link moved to another disk after a first
+        install, it said none while `rollback` refused the foreign link -- and
+        the agent removed the runtime tree on its word."""
+        self._commit("1.0.0")
+        elsewhere = Path(self._tmp.name) / "other-disk" / "0001-1.0.0"
+        elsewhere.mkdir(parents=True)
+        os.remove(self.release / "install")
+        (self.release / "install").symlink_to(elsewhere)
+
+        self.assertFalse(it.rolls_back_to_none(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
+        self.assertEqual(os.readlink(self.release / "install"), str(elsewhere))
+
+    def test_it_says_what_a_rollback_did_when_no_version_comes_back(self):
+        """Found in review: None from `rollback` was a first install taken back
+        to none, nothing to undo, and a refusal alike."""
+        self._commit("1.0.0")
+        self.assertEqual(
+            it.undo_last_commit(self.release), (it.RollbackOutcome.TO_NONE, None)
+        )
+        self.assertEqual(
+            it.undo_last_commit(self.release),
+            (it.RollbackOutcome.NOTHING_TO_UNDO, None),
+        )
+
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        live = self.release / "install"
+        moved_to = live.resolve()
+        os.remove(live)
+        live.symlink_to(moved_to)
+        self.assertEqual(
+            it.undo_last_commit(self.release), (it.RollbackOutcome.REFUSED, None)
+        )
+
+        os.remove(live)
+        live.symlink_to(Path("versions") / moved_to.name)
+        self.assertEqual(
+            it.undo_last_commit(self.release), (it.RollbackOutcome.RESTORED, "1.0.0")
+        )
+
+    def test_a_directory_where_the_link_was_is_refused(self):
+        """Found in review: read as no link, the rollback went ahead and raised
+        IsADirectoryError -- after the agent, told it went back to none, had
+        removed the runtime tree."""
+        for versions in (["1.0.0"], ["1.0.0", "2.0.0"]):
+            with self.subTest(versions=versions):
+                shutil.rmtree(self.release)
+                self.release.mkdir()
+                for version in versions:
+                    self._commit(version)
+                live = self.release / "install"
+                os.remove(live)
+                live.mkdir()
+                (live / "restored-by-hand").write_text("x", encoding="utf-8")
+
+                self.assertFalse(it.rolls_back_to_none(self.release))
+                self.assertEqual(
+                    it.undo_last_commit(self.release),
+                    (it.RollbackOutcome.REFUSED, None),
+                )
+                self.assertTrue((live / "restored-by-hand").is_file())
+
+    def test_a_record_that_cannot_be_read_is_not_nothing_to_undo(self):
+        """Found in review: a record torn by a power cut was "no record", and
+        the health check said there was no previous version while 1.0.0 was
+        there and the failed one stayed live."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        for torn in (b"", b"\xff\xfe\x00", b'{"from": ""}', b"[]"):
+            with self.subTest(torn=torn):
+                (self.release / ".rollback").write_bytes(torn)
+
+                self.assertEqual(
+                    it.undo_last_commit(self.release),
+                    (it.RollbackOutcome.UNUSABLE, None),
+                )
+                self.assertFalse(it.rolls_back_to_none(self.release))
+                self.assertEqual(it.current_version(self.release), "2.0.0")
+
+    def test_a_record_naming_something_outside_versions_is_unreadable(self):
+        """From review: `..` or a separator in either end became a path -- the
+        link pointed at `release` itself, or a marker was written outside
+        `versions/`."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        outside = Path(self._tmp.name) / "x"
+        outside.mkdir()
+        for name in ("..", "../../x", "0001-a/b", str(outside), "x"):
+            for record in (
+                {"from": name, "to": "0001-1.0.0"},
+                {"from": "0002-2.0.0", "to": name},
+            ):
+                with self.subTest(record=record):
+                    (self.release / ".rollback").write_text(
+                        json.dumps(record), encoding="utf-8"
+                    )
+
+                    self.assertEqual(
+                        it.undo_last_commit(self.release),
+                        (it.RollbackOutcome.UNUSABLE, None),
+                    )
+                    self.assertEqual(it.current_version(self.release), "2.0.0")
+                    self.assertEqual(list(outside.iterdir()), [])
+                    self.assertFalse((self.release / ".staging").exists())
+
+    def test_a_record_that_cannot_be_written_keeps_an_earlier_releases_file(self):
+        """From review: the earlier release's `.previous-version` was removed
+        before the record was written, so a write that failed left nothing to
+        go back with."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".rollback").unlink()
+        (self.release / ".previous-version").write_text("0001-1.0.0", encoding="utf-8")
+        self._write_pkg(it.stage_version(self.release, "3.0.0"), "pkg1", "3.0.0")
+
+        with patch.object(durable, "write_durably", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                it.commit_version(self.release, "3.0.0")
+
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+        self.assertTrue((self.release / ".previous-version").exists())
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
+
+    def test_a_record_naming_one_version_on_both_ends_is_unusable(self):
+        """Never written by a commit, which records nothing for the live
+        version; carried out, it marked the live version abandoned and said it
+        was restored."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".rollback").write_text(
+            json.dumps({"from": "0002-2.0.0", "to": "0002-2.0.0"}), encoding="utf-8"
+        )
+
+        self.assertEqual(
+            it.undo_last_commit(self.release), (it.RollbackOutcome.UNUSABLE, None)
+        )
+        self.assertFalse(
+            (self.release / "versions" / "0002-2.0.0" / ".staging").exists()
+        )
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+
+    def test_committing_the_live_version_keeps_the_last_commits_record(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+
+        it.commit_version(self.release, "2.0.0")
+
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
+
+    def test_an_earlier_release_file_naming_something_outside_is_ignored(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".rollback").unlink()
+        (self.release / ".previous-version").write_text("..", encoding="utf-8")
+
+        self.assertEqual(
+            it.undo_last_commit(self.release),
+            (it.RollbackOutcome.NOTHING_TO_UNDO, None),
+        )
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+
+    def _steps(self):
+        """Record, in order, the flushes and the moves of the link."""
+        steps = []
+        write_durably, mark_staging = durable.write_durably, it._mark_staging
+        point_current_at = it._point_current_at
+
+        def durably(path, text):
+            write_durably(path, text)
+            steps.append(("durable", path.name))
+
+        def marked(version_dir):
+            mark_staging(version_dir)
+            steps.append(("marked", version_dir.name))
+
+        def pointed(release, dir_name):
+            steps.append(("link", dir_name))
+            point_current_at(release, dir_name)
+
+        for module, name, fake in (
+            (durable, "write_durably", durably),
+            (it, "_mark_staging", marked),
+            (it, "_point_current_at", pointed),
+        ):
+            patcher = patch.object(module, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(it.os, "sync", lambda: steps.append(("sync",)))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return steps
+
+    def test_a_commit_is_on_disk_before_the_link_names_it(self):
+        """From review: a rename is atomic, not durable. A power cut after the
+        switch could leave the record empty, or the link on a tree whose files
+        never reached the disk."""
+        self._commit("1.0.0")
+        self._write_pkg(it.stage_version(self.release, "2.0.0"), "pkg1", "2.0.0")
+        steps = self._steps()
+
+        it.commit_version(self.release, "2.0.0")
+
+        self.assertEqual(
+            steps,
+            [("sync",), ("durable", ".rollback"), ("link", "0002-2.0.0")],
+        )
+
+    def test_a_rollback_marks_what_it_undid_on_disk_before_moving_the_link(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        steps = self._steps()
+
+        it.undo_last_commit(self.release)[1]
+
+        self.assertEqual(steps, [("marked", "0002-2.0.0"), ("link", "0001-1.0.0")])
+
+
+class TestDurableWrites(unittest.TestCase):
+    """`durable` is public for the OTA agent, so what it promises is tested
+    here and not only through the tree."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.directory = Path(self._tmp.name)
+
+    def test_it_replaces_the_file_whole_and_leaves_nothing_beside_it(self):
+        path = self.directory / "state.json"
+        path.write_text("old", encoding="utf-8")
+
+        durable.write_durably(path, "new")
+
+        self.assertEqual(path.read_text(encoding="utf-8"), "new")
+        self.assertEqual([p.name for p in self.directory.iterdir()], ["state.json"])
+
+    def test_it_flushes_the_file_and_then_its_directory(self):
+        synced = []
+        real_fsync = os.fsync
+
+        def fsync(descriptor):
+            synced.append(os.path.isdir(f"/proc/self/fd/{descriptor}"))
+            real_fsync(descriptor)
+
+        with patch.object(durable.os, "fsync", fsync):
+            durable.write_durably(self.directory / "state.json", "x")
+
+        self.assertEqual(synced, [False, True])
+
+    def test_a_directory_that_cannot_be_flushed_is_not_an_error(self):
+        durable.fsync_directory(self.directory / "missing")
+
+    def test_a_failed_write_raises_and_leaves_the_file_and_nothing_else(self):
+        """From review: the temporary file stayed behind after a failure, and
+        its fixed name was safe only for a caller holding a lock."""
+        path = self.directory / "state.json"
+        path.write_text("old", encoding="utf-8")
+
+        with patch.object(durable.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                durable.write_durably(path, "new")
+
+        self.assertEqual(path.read_text(encoding="utf-8"), "old")
+        self.assertEqual([p.name for p in self.directory.iterdir()], ["state.json"])
+
+    def test_each_write_has_a_temporary_file_of_its_own(self):
+        names = []
+        real_replace = os.replace
+
+        def replace(source, destination):
+            names.append(Path(source).name)
+            real_replace(source, destination)
+
+        with patch.object(durable.os, "replace", replace):
+            durable.write_durably(self.directory / "state.json", "1")
+            durable.write_durably(self.directory / "state.json", "2")
+
+        self.assertEqual(len(set(names)), 2)
+        self.assertTrue(all(name.startswith(".state.json.") for name in names))
 
 
 if __name__ == "__main__":

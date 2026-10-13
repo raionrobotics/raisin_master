@@ -2556,6 +2556,94 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         ]
         self.assertEqual([e["eventType"] for e in terminal], ["failed"])
 
+    def test_broken_first_install_goes_back_to_no_version_and_says_failed(self):
+        """Before a first install there was no version, so that is where it goes back.
+
+        Left on the broken version, the next install reads it as installed and
+        never tries again. Reported as `failed`, not `rolled_back`: there was no
+        previous version to restore.
+        """
+        ota._install_session_id = "session-tx-first"
+
+        self._run_with_hollow_extract("2026.2.0")
+
+        self.assertIsNone(install_tree.current_version(self.release))
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-first"
+            and e["eventType"] in ("failed", "rolled_back")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
+        self.last_snapshot.assert_not_called()
+
+    def test_a_refused_rollback_is_not_reported_as_no_previous_version(self):
+        """Found in review: a refused rollback printed "no previous version to
+        restore" while 2026.2.0 was there to go back to, and the failed version
+        stayed live."""
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-refused"
+        unusable = ota._unusable_packages
+
+        def link_moved_elsewhere(*args, **kwargs):
+            live = self.release / "install"
+            moved_to = live.resolve()
+            live.unlink()
+            live.symlink_to(moved_to)  # absolute: not a link the tree made
+            return unusable(*args, **kwargs)
+
+        with (
+            patch(
+                "raisin_ota.client._unusable_packages",
+                side_effect=link_moved_elsewhere,
+            ),
+            patch("builtins.print") as printed,
+        ):
+            self._run_with_hollow_extract("2026.3.0")
+
+        said = " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
+        self.assertNotIn("no previous version", said)
+        self.assertIn("release/install changed", said)
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-refused"
+            and e["eventType"] in ("failed", "rolled_back", "succeeded")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
+
+    def test_an_unreadable_record_is_not_reported_as_no_previous_version(self):
+        """Found in review: a torn rollback record printed "no previous version
+        to restore" while 2026.2.0 was there, and the failed version stayed
+        live."""
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-torn"
+        unusable = ota._unusable_packages
+
+        def record_torn(*args, **kwargs):
+            (self.release / ".rollback").write_bytes(b"")
+            return unusable(*args, **kwargs)
+
+        with (
+            patch("raisin_ota.client._unusable_packages", side_effect=record_torn),
+            patch("builtins.print") as printed,
+        ):
+            self._run_with_hollow_extract("2026.3.0")
+
+        said = " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
+        self.assertNotIn("no previous version", said)
+        self.assertIn("rollback record could not be used", said)
+        self.assertEqual(install_tree.current_version(self.release), "2026.3.0")
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-torn"
+            and e["eventType"] in ("failed", "rolled_back", "succeeded")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
+
     def test_a_legacy_directory_is_adopted_before_installing(self):
         legacy_pkg = self.live / "old_pkg" / "linux" / "22.04" / "x86_64" / "release"
         legacy_pkg.mkdir(parents=True)
@@ -7224,6 +7312,33 @@ class TestTheCallerDecidesWhenInstalledIsTrue(unittest.TestCase):
         result = self._download(report_snapshot=False)
 
         self.assertIn("mypkg", result)
+
+
+class TestARetryUnderTheSameSessionRollsBack(unittest.TestCase):
+    """A failed install keeps its session so the retry resumes it.
+
+    Found in review: the retry's commit was taken for the same install
+    committing twice and recorded nothing to go back to, so its rollback took a
+    robot with a version back to none, and the one after that put the failed
+    version back. `install_tree` no longer reads the session it is passed.
+    """
+
+    setUp = TestTransactionalArchiveInstall.setUp
+    tearDown = TestTransactionalArchiveInstall.tearDown
+    MANIFEST = TestTransactionalArchiveInstall.MANIFEST
+    _extract_into = TestTransactionalArchiveInstall._extract_into
+    _run = TestTransactionalArchiveInstall._run
+    _run_with_hollow_extract = TestTransactionalArchiveInstall._run_with_hollow_extract
+
+    def test_every_retry_goes_back_to_the_previous_version(self):
+        self._run({"pkg1", "pkg2"})
+        for _ in range(3):
+            ota.clear_pending_install_failure()
+            ota._install_session_id = "session-tx-retry"
+
+            self._run_with_hollow_extract("2026.3.0")
+
+            self.assertEqual(install_tree.current_version(self.release), "2026.2.0")
 
 
 if __name__ == "__main__":
