@@ -47,6 +47,9 @@ _ROLLBACK_FILE = ".rollback"
 # Written by earlier releases: the rollback target, and the install session that
 # committed last. Read once, for a robot that committed before upgrading, and
 # removed by the first commit after it.
+#
+# Deprecated, with `_legacy_rollback`: remove once every robot has committed
+# at least once with this release, after which no robot has these files.
 _LEGACY_PREVIOUS_FILE = ".previous-version"
 _LEGACY_SESSION_FILE = ".current-session"
 _STAGING_MARKER = ".staging"
@@ -190,7 +193,11 @@ def current_version(release) -> Optional[str]:
 
 
 def previous_version(release) -> Optional[str]:
-    """Version a rollback would restore, or None when it would restore none."""
+    """Version a rollback would restore, or None when it would restore none.
+
+    Deprecated: nothing outside tests calls it, and nothing has since before
+    the rollback record. Remove with the tests that read it.
+    """
     record = _read_rollback(release)
     name = record.get("to") if record else None
     if not name or not (versions_dir(release) / name).is_dir():
@@ -292,6 +299,9 @@ def _legacy_rollback(release) -> Optional[dict]:
     so the live version stands in for it. Empty or unreadable is nothing to
     undo: it is not read as a first install -- that guess is what this record
     replaces.
+
+    Deprecated: remove once every robot has committed at least once with this
+    release, after which no robot has a `.previous-version` without a record.
     """
     try:
         target = (
@@ -517,6 +527,9 @@ def commit_version(
     it recorded nothing, and its rollback took a robot with a version back to
     none. The only caller that committed twice for one install was `--all`,
     removed in 46a940c.
+
+    Deprecated: `session`. Remove once no caller passes it -- the two commits in
+    `client.py` and the tests that pass one.
     """
     target = _resolve_version_dir(release, version)
     if target is None:
@@ -607,6 +620,10 @@ def rollback(release) -> Optional[str]:
     """Undo the last commit. Returns the version restored, or None.
 
     None does not say why; `undo_last_commit` does.
+
+    Deprecated: new code calls `undo_last_commit`. Kept for the OTA agent's
+    startup repairs, which ignore the outcome; remove once they call
+    `undo_last_commit`, with the tests that read this return value.
     """
     return undo_last_commit(release)[1]
 
