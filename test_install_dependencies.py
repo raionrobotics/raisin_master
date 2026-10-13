@@ -552,7 +552,9 @@ def test_dependency_closure_activates_once_and_preserves_previous_files(
     assert (workspace.package_dir("untouched") / "payload.txt").read_text() == "keep me"
     assert (workspace.root / "release/install").is_symlink()
     assert (workspace.root / "release/install").resolve() != previous
-    assert install_tree.rollback(workspace.root / "release") is not None
+    # `rollback` was removed (raisin_master#123); `undo_last_commit` returns
+    # what it did and the version restored, and the version is what this reads.
+    assert install_tree.undo_last_commit(workspace.root / "release")[1] is not None
     assert (workspace.root / "release/install").resolve() == previous
     assert (workspace.package_dir("gui") / "payload.txt").read_text() == "old gui"
     assert not workspace.package_dir("shared").exists()

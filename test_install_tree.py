@@ -449,7 +449,9 @@ class TestTamperRecovery(InstallTreeTestCase):
         shutil.rmtree(self.release / "versions" / "0001-1.0.0")
 
         self.assertIsNone(it.previous_version(self.release))
-        self.assertIsNone(it.rollback(self.release))
+        # `rollback` was removed (raisin_master#123); `undo_last_commit` returns
+        # what it did and the version restored, and the version is what this reads.
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(it.current_version(self.release), "2.0.0")
 
 
@@ -460,7 +462,9 @@ class TestRollback(InstallTreeTestCase):
         self._write_pkg(it.stage_version(self.release, "2.0.0"), "pkg1", "new")
         it.commit_version(self.release, "2.0.0")
 
-        restored = it.rollback(self.release)
+        # `rollback` was removed (raisin_master#123); `undo_last_commit` returns
+        # what it did and the version restored, and the version is what this reads.
+        restored = it.undo_last_commit(self.release)[1]
 
         self.assertEqual(restored, "1.0.0")
         self.assertEqual(it.current_version(self.release), "1.0.0")
@@ -486,7 +490,7 @@ class TestRollback(InstallTreeTestCase):
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertIsNone(it.current_version(self.release))
         self.assertFalse((self.release / "install").is_symlink())
 
@@ -494,7 +498,7 @@ class TestRollback(InstallTreeTestCase):
         """Left committed, `ensure_tree` would put the link back a poll later."""
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
 
         it.ensure_tree(self.release)
 
@@ -503,7 +507,7 @@ class TestRollback(InstallTreeTestCase):
     def test_a_first_install_rolled_back_is_pruned(self):
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
 
         it.prune_versions(self.release)
 
@@ -512,7 +516,7 @@ class TestRollback(InstallTreeTestCase):
     def test_the_next_install_after_it_starts_from_nothing(self):
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
 
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1")
         it.commit_version(self.release, "1.0.0")
@@ -531,11 +535,11 @@ class TestRollback(InstallTreeTestCase):
         (self.release / ".rollback").unlink()
         (self.release / ".previous-version").write_bytes(b"\xff\xfe\x00")
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
     def test_rollback_with_nothing_live_changes_nothing(self):
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertFalse((self.release / "install").exists())
 
     def test_rollback_leaves_someone_elses_link_alone(self):
@@ -543,7 +547,7 @@ class TestRollback(InstallTreeTestCase):
         elsewhere.mkdir()
         (self.release / "install").symlink_to(elsewhere)
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertTrue((self.release / "install").is_symlink())
 
 
@@ -587,7 +591,7 @@ class TestMultiCommitAttempt(InstallTreeTestCase):
         self._commit("2.0.0-debug", session="s1", marker="debug")
         self._commit("2.0.0", session="s1", marker="release")
 
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
 
         content = (
             self.release
@@ -789,7 +793,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
             it.ensure_tree(self.release)
             self._commit("2.0.0", marker="bad", session="S")
 
-            self.assertEqual(it.rollback(self.release), "1.0.0")
+            self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
             self.assertEqual(it.current_version(self.release), "1.0.0")
         self.assertIn("good", self._live_marker())
 
@@ -812,16 +816,16 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self._commit("2.0.0", session="s1")
 
         self.assertEqual(it.previous_version(self.release), "2.0.0-debug")
-        self.assertEqual(it.rollback(self.release), "2.0.0-debug")
-        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(it.undo_last_commit(self.release)[1], "2.0.0-debug")
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
 
     def test_a_second_rollback_with_no_commit_between_changes_nothing(self):
         """Found in review: it took the restored version away, and pruning deleted it."""
         self._commit("1.0.0")
         self._commit("2.0.0")
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         it.ensure_tree(self.release)
         it.prune_versions(self.release, keep=1)
 
@@ -830,7 +834,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
     def test_the_version_rolled_back_from_is_never_relinked(self):
         self._commit("1.0.0")
         self._commit("2.0.0")
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
         (self.release / "install").unlink()
 
         it.ensure_tree(self.release)
@@ -840,7 +844,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
     def test_the_version_rolled_back_from_is_pruned(self):
         self._commit("1.0.0")
         self._commit("2.0.0")
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
 
         it.prune_versions(self.release)
 
@@ -853,21 +857,21 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self._commit("2.0.0")
         with patch.object(it, "_clear_rollback", side_effect=OSError("killed")):
             with self.assertRaises(OSError):
-                it.rollback(self.release)
+                it.undo_last_commit(self.release)[1]
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
-        self.assertEqual(it.rollback(self.release), "1.0.0")
-        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
     def test_a_first_install_rollback_stopped_part_way_finishes_when_repeated(self):
         self._commit("1.0.0")
         with patch.object(it, "_clear_rollback", side_effect=OSError("killed")):
             with self.assertRaises(OSError):
-                it.rollback(self.release)
+                it.undo_last_commit(self.release)[1]
         self.assertIsNone(it.current_version(self.release))
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         it.ensure_tree(self.release)
         self.assertIsNone(it.current_version(self.release))
         self.assertFalse((self.release / ".rollback").exists())
@@ -881,7 +885,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
             with self.assertRaises(OSError):
                 it.commit_version(self.release, "2.0.0")
 
-        self.assertEqual(it.rollback(self.release), "1.0.0")
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
     def test_a_commit_that_cannot_be_recorded_does_not_switch(self):
@@ -899,7 +903,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self._commit("1.0.0")
         (self.release / ".rollback").write_bytes(b"\xff\xfe\x00")
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
     def test_a_link_moved_by_someone_else_is_left_where_they_put_it(self):
@@ -909,14 +913,14 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         os.remove(self.release / "install")
         (self.release / "install").symlink_to(Path("versions") / "0001-1.0.0")
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
     def test_no_record_at_all_is_not_read_as_a_first_install(self):
         self._commit("1.0.0")
         (self.release / ".rollback").unlink()
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(it.current_version(self.release), "1.0.0")
 
     def test_a_robot_that_committed_before_this_record_still_rolls_back(self):
@@ -926,7 +930,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         (self.release / ".rollback").unlink()
         (self.release / ".previous-version").write_text("0001-1.0.0")
 
-        self.assertEqual(it.rollback(self.release), "1.0.0")
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
         self.assertFalse((self.release / ".previous-version").exists())
 
     def test_a_record_left_behind_by_a_downgrade_changes_nothing(self):
@@ -944,7 +948,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         (self.release / "versions" / "0003-3.0.0" / ".staging").unlink()
         (self.release / "install").symlink_to(Path("versions") / "0003-3.0.0")
 
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(it.current_version(self.release), "3.0.0")
 
     def test_a_rollback_with_the_link_removed_goes_back_to_the_version_before(self):
@@ -954,7 +958,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self._commit("2.0.0", marker="bad")
         os.remove(self.release / "install")
 
-        self.assertEqual(it.rollback(self.release), "1.0.0")
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
         it.ensure_tree(self.release)
         self.assertEqual(it.current_version(self.release), "1.0.0")
         self.assertIn("good", self._live_marker())
@@ -975,7 +979,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self._commit("2.0.0")
         self.assertFalse(it.rolls_back_to_none(self.release))
 
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
         self.assertFalse(it.rolls_back_to_none(self.release))
 
     def test_it_does_not_say_none_for_a_rollback_it_would_refuse(self):
@@ -989,7 +993,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         (self.release / "install").symlink_to(elsewhere)
 
         self.assertFalse(it.rolls_back_to_none(self.release))
-        self.assertIsNone(it.rollback(self.release))
+        self.assertIsNone(it.undo_last_commit(self.release)[1])
         self.assertEqual(os.readlink(self.release / "install"), str(elsewhere))
 
     def test_it_says_what_a_rollback_did_when_no_version_comes_back(self):
@@ -1101,7 +1105,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
 
         self.assertEqual(it.current_version(self.release), "2.0.0")
         self.assertTrue((self.release / ".previous-version").exists())
-        self.assertEqual(it.rollback(self.release), "1.0.0")
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
 
     def test_a_record_naming_one_version_on_both_ends_is_unusable(self):
         """Never written by a commit, which records nothing for the live
@@ -1127,7 +1131,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
 
         it.commit_version(self.release, "2.0.0")
 
-        self.assertEqual(it.rollback(self.release), "1.0.0")
+        self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
 
     def test_an_earlier_release_file_naming_something_outside_is_ignored(self):
         self._commit("1.0.0")
@@ -1192,7 +1196,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self._commit("2.0.0")
         steps = self._steps()
 
-        it.rollback(self.release)
+        it.undo_last_commit(self.release)[1]
 
         self.assertEqual(steps, [("marked", "0002-2.0.0"), ("link", "0001-1.0.0")])
 

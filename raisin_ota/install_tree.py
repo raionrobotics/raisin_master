@@ -9,7 +9,7 @@ directory to a symlink. Nothing a run produces is live until the symlink moves,
 so a failed install needs no compensation — it simply never commits — and a
 rollback is one atomic operation rather than a sequence of undo steps.
 
-Each commit records what it replaced in `release/.rollback`, and `rollback`
+Each commit records what it replaced in `release/.rollback`, and `undo_last_commit`
 consumes that record: it undoes the last commit, once, and only that.
 
 Directories carry a generation prefix so that re-installing the version that is
@@ -207,14 +207,14 @@ def previous_version(release) -> Optional[str]:
 
 
 def rolls_back_to_none(release) -> bool:
-    """Whether `rollback` would take the tree back to no version at all.
+    """Whether `undo_last_commit` would take the tree back to no version at all.
 
     True when the commit it would undo had nothing live before it -- a first
     install. Asked before rolling back by a caller with something of its own to
     remove first, so that a stop between the two leaves the commit in place for
     the next rollback to find.
 
-    Read from the same plan `rollback` carries out, so a rollback it refuses is
+    Read from the same plan `undo_last_commit` carries out, so a rollback it refuses is
     never announced as one to none.
     """
     return _plan_rollback(release)[0] is RollbackOutcome.TO_NONE
@@ -517,7 +517,7 @@ def commit_version(
 ) -> Optional[str]:
     """Make a staged version live. Returns the directory now current.
 
-    What was live before it is recorded first, so `rollback` can undo exactly
+    What was live before it is recorded first, so `undo_last_commit` can undo exactly
     this commit -- and when nothing was live, that is recorded too.
 
     `session` is accepted for the callers that pass it and is not used. It used
@@ -614,18 +614,6 @@ def _plan_rollback(release) -> Tuple[RollbackOutcome, Optional[dict]]:
     if not (versions_dir(release) / target).is_dir():
         return RollbackOutcome.REFUSED, None
     return RollbackOutcome.RESTORED, record
-
-
-def rollback(release) -> Optional[str]:
-    """Undo the last commit. Returns the version restored, or None.
-
-    None does not say why; `undo_last_commit` does.
-
-    Deprecated: new code calls `undo_last_commit`. Kept for the OTA agent's
-    startup repairs, which ignore the outcome; remove once they call
-    `undo_last_commit`, with the tests that read this return value.
-    """
-    return undo_last_commit(release)[1]
 
 
 def undo_last_commit(release) -> Tuple[RollbackOutcome, Optional[str]]:
