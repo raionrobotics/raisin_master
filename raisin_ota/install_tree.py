@@ -235,19 +235,30 @@ def _read_rollback(release) -> Optional[dict]:
     With no record, an earlier release's `.previous-version` is read: a robot
     that last committed before this record existed.
     """
+    record = _load_rollback(release)
+    return None if record is _UNREADABLE else record
+
+
+#: A record that is there and cannot be read: a commit to undo, with nothing
+#: saying where to. Kept apart from no record, which has nothing to undo.
+_UNREADABLE = object()
+
+
+def _load_rollback(release):
+    """The record, None when there is none, or `_UNREADABLE`."""
     try:
         record = json.loads(_rollback_file(release).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return _legacy_rollback(release)
     except (OSError, ValueError):
-        return None
+        return _UNREADABLE
     if not isinstance(record, dict):
-        return None
+        return _UNREADABLE
     source, target = record.get("from"), record.get("to")
     if not isinstance(source, str) or not source:
-        return None
+        return _UNREADABLE
     if target is not None and (not isinstance(target, str) or not target):
-        return None
+        return _UNREADABLE
     return {"from": source, "to": target}
 
 
@@ -485,16 +496,17 @@ def commit_version(
 class RollbackOutcome(enum.Enum):
     """What a rollback did, which its version alone cannot say.
 
-    No version came back from three different things: a first install taken
-    back to none, nothing to undo, and a rollback refused with the failed
-    version still live. A caller told only None reported the last as the
-    first.
+    No version came back from four different things: a first install taken
+    back to none, nothing to undo, a rollback refused, and a record that could
+    not be read -- the last two with the failed version still live. A caller
+    told only None reported them all as the first.
     """
 
     RESTORED = "restored"  # back on the version live before the commit
     TO_NONE = "to_none"  # a first install, taken back to no version
     NOTHING_TO_UNDO = "nothing_to_undo"  # no record of a commit to undo
     REFUSED = "refused"  # the link moved, or the target went; nothing changed
+    UNREADABLE = "unreadable"  # a record there but unreadable; nothing changed
 
 
 def _plan_rollback(release) -> Tuple[RollbackOutcome, Optional[dict]]:
@@ -504,7 +516,11 @@ def _plan_rollback(release) -> Tuple[RollbackOutcome, Optional[dict]]:
     cannot answer differently: one checking less than the other announced a
     rollback to none that the rollback then refused.
     """
-    record = _read_rollback(release)
+    record = _load_rollback(release)
+    if record is _UNREADABLE:
+        # Torn by a power cut, or edited by hand: there is a commit to undo
+        # and nothing to say where to, so the robot stays where it is.
+        return RollbackOutcome.UNREADABLE, None
     if record is None:
         return RollbackOutcome.NOTHING_TO_UNDO, None
     source, target = record["from"], record["to"]

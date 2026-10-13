@@ -1040,6 +1040,23 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
                 )
                 self.assertTrue((live / "restored-by-hand").is_file())
 
+    def test_a_record_that_cannot_be_read_is_not_nothing_to_undo(self):
+        """Found in review: a record torn by a power cut was "no record", and
+        the health check said there was no previous version while 1.0.0 was
+        there and the failed one stayed live."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        for torn in (b"", b"\xff\xfe\x00", b'{"from": ""}', b"[]"):
+            with self.subTest(torn=torn):
+                (self.release / ".rollback").write_bytes(torn)
+
+                self.assertEqual(
+                    it.undo_last_commit(self.release),
+                    (it.RollbackOutcome.UNREADABLE, None),
+                )
+                self.assertFalse(it.rolls_back_to_none(self.release))
+                self.assertEqual(it.current_version(self.release), "2.0.0")
+
 
 if __name__ == "__main__":
     unittest.main()

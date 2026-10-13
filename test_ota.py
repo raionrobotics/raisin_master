@@ -2613,6 +2613,37 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
         ]
         self.assertEqual([e["eventType"] for e in terminal], ["failed"])
 
+    def test_an_unreadable_record_is_not_reported_as_no_previous_version(self):
+        """Found in review: a torn rollback record printed "no previous version
+        to restore" while 2026.2.0 was there, and the failed version stayed
+        live."""
+        self._run({"pkg1", "pkg2"})
+        ota.clear_pending_install_failure()
+        ota._install_session_id = "session-tx-torn"
+        unusable = ota._unusable_packages
+
+        def record_torn(*args, **kwargs):
+            (self.release / ".rollback").write_bytes(b"")
+            return unusable(*args, **kwargs)
+
+        with (
+            patch("raisin_ota.client._unusable_packages", side_effect=record_torn),
+            patch("builtins.print") as printed,
+        ):
+            self._run_with_hollow_extract("2026.3.0")
+
+        said = " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
+        self.assertNotIn("no previous version", said)
+        self.assertIn("rollback record could not be read", said)
+        self.assertEqual(install_tree.current_version(self.release), "2026.3.0")
+        terminal = [
+            e
+            for e in ota._read_install_event_queue()
+            if e["installSessionId"] == "session-tx-torn"
+            and e["eventType"] in ("failed", "rolled_back", "succeeded")
+        ]
+        self.assertEqual([e["eventType"] for e in terminal], ["failed"])
+
     def test_a_legacy_directory_is_adopted_before_installing(self):
         legacy_pkg = self.live / "old_pkg" / "linux" / "22.04" / "x86_64" / "release"
         legacy_pkg.mkdir(parents=True)
