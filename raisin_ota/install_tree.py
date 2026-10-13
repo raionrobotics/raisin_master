@@ -261,7 +261,22 @@ def _load_rollback(release):
         return _UNREADABLE
     if target is not None and (not isinstance(target, str) or not target):
         return _UNREADABLE
+    if not _is_generation_name(source) or (
+        target is not None and not _is_generation_name(target)
+    ):
+        return _UNREADABLE
     return {"from": source, "to": target}
+
+
+def _is_generation_name(name: str) -> bool:
+    """Whether `name` can only be a directory directly under `versions/`.
+
+    Checked where a record is read, so nothing after it handles a name from
+    disk unchecked: both ends become paths, and `..` or a separator in either
+    would point the link, or write a marker, outside the tree. The pattern alone
+    is not enough -- it lets a separator through after the prefix.
+    """
+    return Path(name).name == name and _split_generation(name) is not None
 
 
 def _legacy_rollback(release) -> Optional[dict]:
@@ -280,6 +295,8 @@ def _legacy_rollback(release) -> Optional[dict]:
         return None
     current = _current_dir_name(release)
     if not target or not current or target == current:
+        return None
+    if not _is_generation_name(target):
         return None
     return {"from": current, "to": target}
 

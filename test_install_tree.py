@@ -10,6 +10,7 @@ index) are unaffected; only its type changes, from directory to symlink.
 """
 
 import errno
+import json
 import os
 import shutil
 import sys
@@ -1057,6 +1058,44 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
                 )
                 self.assertFalse(it.rolls_back_to_none(self.release))
                 self.assertEqual(it.current_version(self.release), "2.0.0")
+
+    def test_a_record_naming_something_outside_versions_is_unreadable(self):
+        """From review: `..` or a separator in either end became a path -- the
+        link pointed at `release` itself, or a marker was written outside
+        `versions/`."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        outside = Path(self._tmp.name) / "x"
+        outside.mkdir()
+        for name in ("..", "../../x", "0001-a/b", str(outside), "x"):
+            for record in (
+                {"from": name, "to": "0001-1.0.0"},
+                {"from": "0002-2.0.0", "to": name},
+            ):
+                with self.subTest(record=record):
+                    (self.release / ".rollback").write_text(
+                        json.dumps(record), encoding="utf-8"
+                    )
+
+                    self.assertEqual(
+                        it.undo_last_commit(self.release),
+                        (it.RollbackOutcome.UNREADABLE, None),
+                    )
+                    self.assertEqual(it.current_version(self.release), "2.0.0")
+                    self.assertEqual(list(outside.iterdir()), [])
+                    self.assertFalse((self.release / ".staging").exists())
+
+    def test_an_earlier_release_file_naming_something_outside_is_ignored(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".rollback").unlink()
+        (self.release / ".previous-version").write_text("..", encoding="utf-8")
+
+        self.assertEqual(
+            it.undo_last_commit(self.release),
+            (it.RollbackOutcome.NOTHING_TO_UNDO, None),
+        )
+        self.assertEqual(it.current_version(self.release), "2.0.0")
 
     def _steps(self):
         """Record, in order, the flushes and the moves of the link."""
