@@ -4177,7 +4177,7 @@ def download_all_from_archive(
 
     broken = _unusable_packages(install_base_path, requested, build_type)
     if broken:
-        restored = install_tree.rollback(release)
+        outcome, restored = install_tree.undo_last_commit(release)
         note_install_failure(
             "health_check",
             "health_check_failed",
@@ -4197,12 +4197,19 @@ def download_all_from_archive(
             )
             _report_restored_snapshot(install_base_path, build_type, install_session_id)
         else:
-            # Nothing to restore, so this is not a rollback — the contract
+            # Nothing restored, so this is not a rollback — the contract
             # reserves `rolled_back` for an attempt that came back.
-            print(
-                f"⚠️ {len(broken)} package(s) unusable after the switch and no "
-                "previous version to restore."
-            )
+            if outcome is install_tree.RollbackOutcome.REFUSED:
+                print(
+                    f"⚠️ {len(broken)} package(s) unusable after the switch, and "
+                    "release/install changed since the commit, so it was left as "
+                    "it is: the failed version may still be live."
+                )
+            else:
+                print(
+                    f"⚠️ {len(broken)} package(s) unusable after the switch and no "
+                    "previous version to restore."
+                )
             record_install_event(
                 "failed",
                 stage="health_check",

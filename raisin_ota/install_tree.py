@@ -17,6 +17,7 @@ already live still stages into a fresh directory instead of mutating the tree
 underneath a running system.
 """
 
+import enum
 import errno
 import json
 import os
@@ -207,8 +208,7 @@ def rolls_back_to_none(release) -> bool:
     Read from the same plan `rollback` carries out, so a rollback it refuses is
     never announced as one to none.
     """
-    plan = _plan_rollback(release)
-    return plan is not None and plan["to"] is None
+    return _plan_rollback(release)[0] is RollbackOutcome.TO_NONE
 
 
 # ---------------------------------------------------------------------------
@@ -482,34 +482,58 @@ def commit_version(
     return target.name
 
 
-def _plan_rollback(release) -> Optional[dict]:
-    """The record `rollback` would carry out, or None when it would refuse.
+class RollbackOutcome(enum.Enum):
+    """What a rollback did, which its version alone cannot say.
 
-    The one place that decides, so `rollback` and `rolls_back_to_none` cannot
-    answer differently: one checking less than the other announced a rollback
-    to none that the rollback then refused.
+    No version came back from three different things: a first install taken
+    back to none, nothing to undo, and a rollback refused with the failed
+    version still live. A caller told only None reported the last as the
+    first.
+    """
+
+    RESTORED = "restored"  # back on the version live before the commit
+    TO_NONE = "to_none"  # a first install, taken back to no version
+    NOTHING_TO_UNDO = "nothing_to_undo"  # no record of a commit to undo
+    REFUSED = "refused"  # the link moved, or the target went; nothing changed
+
+
+def _plan_rollback(release) -> Tuple[RollbackOutcome, Optional[dict]]:
+    """What `undo_last_commit` would do, and the record it would carry out.
+
+    The one place that decides, so `undo_last_commit` and `rolls_back_to_none`
+    cannot answer differently: one checking less than the other announced a
+    rollback to none that the rollback then refused.
     """
     record = _read_rollback(release)
     if record is None:
-        return None
+        return RollbackOutcome.NOTHING_TO_UNDO, None
     source, target = record["from"], record["to"]
 
     link = current_link(release)
     if link.is_symlink() and not _is_our_link(link):
-        return None
+        return RollbackOutcome.REFUSED, None
     current = _current_dir_name(release)
     if target is None:
         if current not in (source, None):
-            return None
-    elif current not in (source, target, None):
-        return None
-    if target is not None and not (versions_dir(release) / target).is_dir():
-        return None
-    return record
+            return RollbackOutcome.REFUSED, None
+        return RollbackOutcome.TO_NONE, record
+    if current not in (source, target, None):
+        return RollbackOutcome.REFUSED, None
+    if not (versions_dir(release) / target).is_dir():
+        return RollbackOutcome.REFUSED, None
+    return RollbackOutcome.RESTORED, record
 
 
 def rollback(release) -> Optional[str]:
     """Undo the last commit. Returns the version restored, or None.
+
+    None does not say why; `undo_last_commit` does.
+    """
+    return undo_last_commit(release)[1]
+
+
+def undo_last_commit(release) -> Tuple[RollbackOutcome, Optional[str]]:
+    """Undo the last commit. Returns what happened, and the version restored.
 
     The tree goes back to what was live before that commit -- no version at
     all, for a first install -- and the version it undid is marked abandoned,
@@ -525,10 +549,10 @@ def rollback(release) -> Optional[str]:
     Safe to repeat after a crash part way through: each step is the same
     whether or not it already ran.
     """
-    plan = _plan_rollback(release)
-    if plan is None:
-        return None
-    source, target = plan["from"], plan["to"]
+    outcome, record = _plan_rollback(release)
+    if record is None:
+        return outcome, None
+    source, target = record["from"], record["to"]
 
     link = current_link(release)
     abandoned = versions_dir(release) / source
@@ -541,9 +565,9 @@ def rollback(release) -> Optional[str]:
     _clear_rollback(release)
 
     if target is None:
-        return None
+        return outcome, None
     parsed = _split_generation(target)
-    return parsed[1] if parsed else target
+    return outcome, parsed[1] if parsed else target
 
 
 def discard_staging(release, version: str) -> None:

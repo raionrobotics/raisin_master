@@ -990,6 +990,34 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self.assertIsNone(it.rollback(self.release))
         self.assertEqual(os.readlink(self.release / "install"), str(elsewhere))
 
+    def test_it_says_what_a_rollback_did_when_no_version_comes_back(self):
+        """Found in review: None from `rollback` was a first install taken back
+        to none, nothing to undo, and a refusal alike."""
+        self._commit("1.0.0")
+        self.assertEqual(
+            it.undo_last_commit(self.release), (it.RollbackOutcome.TO_NONE, None)
+        )
+        self.assertEqual(
+            it.undo_last_commit(self.release),
+            (it.RollbackOutcome.NOTHING_TO_UNDO, None),
+        )
+
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        live = self.release / "install"
+        moved_to = live.resolve()
+        os.remove(live)
+        live.symlink_to(moved_to)
+        self.assertEqual(
+            it.undo_last_commit(self.release), (it.RollbackOutcome.REFUSED, None)
+        )
+
+        os.remove(live)
+        live.symlink_to(Path("versions") / moved_to.name)
+        self.assertEqual(
+            it.undo_last_commit(self.release), (it.RollbackOutcome.RESTORED, "1.0.0")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
