@@ -203,13 +203,12 @@ def rolls_back_to_none(release) -> bool:
     install. Asked before rolling back by a caller with something of its own to
     remove first, so that a stop between the two leaves the commit in place for
     the next rollback to find.
+
+    Read from the same plan `rollback` carries out, so a rollback it refuses is
+    never announced as one to none.
     """
-    record = _read_rollback(release)
-    return (
-        record is not None
-        and record["to"] is None
-        and _current_dir_name(release) in (record["from"], None)
-    )
+    plan = _plan_rollback(release)
+    return plan is not None and plan["to"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -483,22 +482,12 @@ def commit_version(
     return target.name
 
 
-def rollback(release) -> Optional[str]:
-    """Undo the last commit. Returns the version restored, or None.
+def _plan_rollback(release) -> Optional[dict]:
+    """The record `rollback` would carry out, or None when it would refuse.
 
-    The tree goes back to what was live before that commit -- no version at
-    all, for a first install -- and the version it undid is marked abandoned,
-    so `ensure_tree` never relinks it and pruning removes it. The record is
-    consumed: a second rollback with no commit between does nothing.
-
-    Nothing is done when there is no record, or when the link points at a
-    version on neither end of it -- someone else moved it, and putting it back
-    would undo their change rather than this commit. A missing link is not
-    such a change: left alone, `ensure_tree` would relink the newest committed
-    version, which is the one this rollback is undoing.
-
-    Safe to repeat after a crash part way through: each step is the same
-    whether or not it already ran.
+    The one place that decides, so `rollback` and `rolls_back_to_none` cannot
+    answer differently: one checking less than the other announced a rollback
+    to none that the rollback then refused.
     """
     record = _read_rollback(release)
     if record is None:
@@ -516,7 +505,32 @@ def rollback(release) -> Optional[str]:
         return None
     if target is not None and not (versions_dir(release) / target).is_dir():
         return None
+    return record
 
+
+def rollback(release) -> Optional[str]:
+    """Undo the last commit. Returns the version restored, or None.
+
+    The tree goes back to what was live before that commit -- no version at
+    all, for a first install -- and the version it undid is marked abandoned,
+    so `ensure_tree` never relinks it and pruning removes it. The record is
+    consumed: a second rollback with no commit between does nothing.
+
+    Nothing is done when there is no record, or when the link points at a
+    version on neither end of it -- someone else moved it, and putting it back
+    would undo their change rather than this commit. A missing link is not
+    such a change: left alone, `ensure_tree` would relink the newest committed
+    version, which is the one this rollback is undoing.
+
+    Safe to repeat after a crash part way through: each step is the same
+    whether or not it already ran.
+    """
+    plan = _plan_rollback(release)
+    if plan is None:
+        return None
+    source, target = plan["from"], plan["to"]
+
+    link = current_link(release)
     abandoned = versions_dir(release) / source
     if abandoned.is_dir():
         (abandoned / _STAGING_MARKER).write_text("", encoding="utf-8")

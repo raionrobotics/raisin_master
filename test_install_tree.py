@@ -976,6 +976,20 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         it.rollback(self.release)
         self.assertFalse(it.rolls_back_to_none(self.release))
 
+    def test_it_does_not_say_none_for_a_rollback_it_would_refuse(self):
+        """Found in review: with the link moved to another disk after a first
+        install, it said none while `rollback` refused the foreign link -- and
+        the agent removed the runtime tree on its word."""
+        self._commit("1.0.0")
+        elsewhere = Path(self._tmp.name) / "other-disk" / "0001-1.0.0"
+        elsewhere.mkdir(parents=True)
+        os.remove(self.release / "install")
+        (self.release / "install").symlink_to(elsewhere)
+
+        self.assertFalse(it.rolls_back_to_none(self.release))
+        self.assertIsNone(it.rollback(self.release))
+        self.assertEqual(os.readlink(self.release / "install"), str(elsewhere))
+
 
 if __name__ == "__main__":
     unittest.main()
