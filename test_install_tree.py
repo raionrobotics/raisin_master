@@ -1148,6 +1148,34 @@ class TestDurableWrites(unittest.TestCase):
     def test_a_directory_that_cannot_be_flushed_is_not_an_error(self):
         durable.fsync_directory(self.directory / "missing")
 
+    def test_a_failed_write_raises_and_leaves_the_file_and_nothing_else(self):
+        """From review: the temporary file stayed behind after a failure, and
+        its fixed name was safe only for a caller holding a lock."""
+        path = self.directory / "state.json"
+        path.write_text("old", encoding="utf-8")
+
+        with patch.object(durable.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                durable.write_durably(path, "new")
+
+        self.assertEqual(path.read_text(encoding="utf-8"), "old")
+        self.assertEqual([p.name for p in self.directory.iterdir()], ["state.json"])
+
+    def test_each_write_has_a_temporary_file_of_its_own(self):
+        names = []
+        real_replace = os.replace
+
+        def replace(source, destination):
+            names.append(Path(source).name)
+            real_replace(source, destination)
+
+        with patch.object(durable.os, "replace", replace):
+            durable.write_durably(self.directory / "state.json", "1")
+            durable.write_durably(self.directory / "state.json", "2")
+
+        self.assertEqual(len(set(names)), 2)
+        self.assertTrue(all(name.startswith(".state.json.") for name in names))
+
 
 if __name__ == "__main__":
     unittest.main()
