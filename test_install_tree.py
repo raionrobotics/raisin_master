@@ -933,6 +933,28 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
         self.assertFalse((self.release / ".previous-version").exists())
 
+    def test_an_earlier_release_file_after_its_own_rollback_changes_nothing(self):
+        """From review: an earlier release's rollback put the link back on 1.0.0
+        and rewrote the file to 0.9.0, one further down. Read after the upgrade
+        as a commit of 1.0.0 to undo, it marked the good version abandoned and
+        took the robot to 0.9.0.
+        """
+        for version in ("0.9.0", "1.0.0", "2.0.0"):
+            self._commit(version)
+        (self.release / ".rollback").unlink()
+        os.remove(self.release / "install")
+        (self.release / "install").symlink_to(Path("versions") / "0002-1.0.0")
+        (self.release / ".previous-version").write_text("0001-0.9.0", encoding="utf-8")
+
+        self.assertEqual(
+            it.undo_last_commit(self.release),
+            (it.RollbackOutcome.NOTHING_TO_UNDO, None),
+        )
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertFalse(
+            (self.release / "versions" / "0002-1.0.0" / ".staging").exists()
+        )
+
     def test_a_record_left_behind_by_a_downgrade_changes_nothing(self):
         """An earlier release committed after this record and left it stale.
 

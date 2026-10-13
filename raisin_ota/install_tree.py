@@ -300,6 +300,14 @@ def _legacy_rollback(release) -> Optional[dict]:
     undo: it is not read as a first install -- that guess is what this record
     replaces.
 
+    The live version stands in only while it is the newest committed one. An
+    earlier release's commit always made the newest generation live, and its
+    rollback moved the link back without marking what it left, rewriting the
+    file one generation further down. So a live version with a committed one
+    newer than it was put back already, and the file names where a second
+    rollback would have gone: undone again, a good version would be marked
+    abandoned and the robot taken a generation further back.
+
     Deprecated: remove once every robot has committed at least once with this
     release, after which no robot has a `.previous-version` without a record.
     """
@@ -313,6 +321,8 @@ def _legacy_rollback(release) -> Optional[dict]:
     if not target or not current or target == current:
         return None
     if not _is_generation_name(target):
+        return None
+    if current != _newest_available(release):
         return None
     return {"from": current, "to": target}
 
