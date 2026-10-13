@@ -491,9 +491,11 @@ def rollback(release) -> Optional[str]:
     so `ensure_tree` never relinks it and pruning removes it. The record is
     consumed: a second rollback with no commit between does nothing.
 
-    Nothing is done when there is no record, or when the link is no longer on
-    either end of it -- someone else moved it, and putting it back would undo
-    their change rather than this commit.
+    Nothing is done when there is no record, or when the link points at a
+    version on neither end of it -- someone else moved it, and putting it back
+    would undo their change rather than this commit. A missing link is not
+    such a change: left alone, `ensure_tree` would relink the newest committed
+    version, which is the one this rollback is undoing.
 
     Safe to repeat after a crash part way through: each step is the same
     whether or not it already ran.
@@ -510,7 +512,7 @@ def rollback(release) -> Optional[str]:
     if target is None:
         if current not in (source, None):
             return None
-    elif current not in (source, target):
+    elif current not in (source, target, None):
         return None
     if target is not None and not (versions_dir(release) / target).is_dir():
         return None

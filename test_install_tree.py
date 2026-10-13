@@ -945,6 +945,18 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self.assertIsNone(it.rollback(self.release))
         self.assertEqual(it.current_version(self.release), "3.0.0")
 
+    def test_a_rollback_with_the_link_removed_goes_back_to_the_version_before(self):
+        """Found in review: with no link the rollback did nothing, and the next
+        `ensure_tree` relinked the version it was asked to undo."""
+        self._commit("1.0.0", marker="good")
+        self._commit("2.0.0", marker="bad")
+        os.remove(self.release / "install")
+
+        self.assertEqual(it.rollback(self.release), "1.0.0")
+        it.ensure_tree(self.release)
+        self.assertEqual(it.current_version(self.release), "1.0.0")
+        self.assertIn("good", self._live_marker())
+
     def test_a_commit_clears_what_an_earlier_release_recorded(self):
         (self.release / ".previous-version").write_text("0009-gone")
         (self.release / ".current-session").write_text("s1")
