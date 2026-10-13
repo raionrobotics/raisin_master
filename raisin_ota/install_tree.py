@@ -26,6 +26,8 @@ import shutil
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from raisin_ota import durable
+
 
 class InstallTreeUnusable(Exception):
     """The versioned tree cannot be prepared where it has been placed.
@@ -291,58 +293,30 @@ def _write_rollback(release, source: str, target: Optional[str]) -> None:
     """
     for name in (_LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
         (Path(release) / name).unlink(missing_ok=True)
-    _write_durably(_rollback_file(release), json.dumps({"from": source, "to": target}))
+    durable.write_durably(
+        _rollback_file(release), json.dumps({"from": source, "to": target})
+    )
 
 
 def _clear_rollback(release) -> None:
     for name in (_ROLLBACK_FILE, _LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
         (Path(release) / name).unlink(missing_ok=True)
-    _fsync_directory(release)
+    durable.fsync_directory(release)
 
 
 # ---------------------------------------------------------------------------
 # Durability
 # ---------------------------------------------------------------------------
 #
-# A rename is atomic, not durable. After a power cut -- common on a robot -- the
-# new name can be gone, or present over data that never reached the disk: a
-# record read back empty, a link to a tree with empty files. So each step is
-# flushed before the step that relies on it.
-
-
-def _fsync_directory(directory) -> None:
-    """Make the names in `directory` durable.
-
-    Best effort: not every filesystem opens a directory for fsync, and one that
-    does not has nothing more to offer here.
-    """
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
-
-
-def _write_durably(path: Path, text: str) -> None:
-    """Replace `path` with `text`, on disk before this returns."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
-    _fsync_directory(path.parent)
+# A power cut after the switch must not leave a record read back empty, or a
+# link to a tree with empty files: each step is flushed, by `durable`, before
+# the step that relies on it.
 
 
 def _mark_staging(version_dir: Path) -> None:
     """Mark a tree uncommitted, on disk before anything relies on it."""
     (version_dir / _STAGING_MARKER).write_text("", encoding="utf-8")
-    _fsync_directory(version_dir)
+    durable.fsync_directory(version_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +337,7 @@ def _point_current_at(release, dir_name: str) -> None:
     # Relative so the tree survives being moved or mounted elsewhere.
     os.symlink(os.path.join(_VERSIONS_DIR, dir_name), tmp, target_is_directory=True)
     os.replace(tmp, link)
-    _fsync_directory(link.parent)
+    durable.fsync_directory(link.parent)
 
 
 def migrate_legacy_tree(release) -> bool:
@@ -386,7 +360,7 @@ def migrate_legacy_tree(release) -> bool:
         link.rename(target)
     except OSError as exc:
         raise InstallTreeUnusable(_layout_hint(link, target.parent, exc)) from exc
-    _fsync_directory(target.parent)
+    durable.fsync_directory(target.parent)
     _point_current_at(release, target.name)
     return True
 
@@ -537,7 +511,7 @@ def commit_version(
     # rename before that point must not leave a recovery-eligible partial tree.
     try:
         (target / _STAGING_MARKER).unlink()
-        _fsync_directory(target)
+        durable.fsync_directory(target)
     except OSError:
         pass
 
@@ -632,7 +606,7 @@ def undo_last_commit(release) -> Tuple[RollbackOutcome, Optional[str]]:
         _mark_staging(abandoned)
     if target is None:
         link.unlink(missing_ok=True)
-        _fsync_directory(link.parent)
+        durable.fsync_directory(link.parent)
     else:
         _point_current_at(release, target)
     _clear_rollback(release)

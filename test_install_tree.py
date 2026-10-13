@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from raisin_ota import install_tree as it  # noqa: E402
+from raisin_ota import durable  # noqa: E402
 
 
 class InstallTreeTestCase(unittest.TestCase):
@@ -1060,7 +1061,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
     def _steps(self):
         """Record, in order, the flushes and the moves of the link."""
         steps = []
-        write_durably, mark_staging = it._write_durably, it._mark_staging
+        write_durably, mark_staging = durable.write_durably, it._mark_staging
         point_current_at = it._point_current_at
 
         def durably(path, text):
@@ -1075,12 +1076,12 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
             steps.append(("link", dir_name))
             point_current_at(release, dir_name)
 
-        for name, fake in (
-            ("_write_durably", durably),
-            ("_mark_staging", marked),
-            ("_point_current_at", pointed),
+        for module, name, fake in (
+            (durable, "write_durably", durably),
+            (it, "_mark_staging", marked),
+            (it, "_point_current_at", pointed),
         ):
-            patcher = patch.object(it, name, fake)
+            patcher = patch.object(module, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
         patcher = patch.object(it.os, "sync", lambda: steps.append(("sync",)))
@@ -1111,6 +1112,41 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         it.rollback(self.release)
 
         self.assertEqual(steps, [("marked", "0002-2.0.0"), ("link", "0001-1.0.0")])
+
+
+class TestDurableWrites(unittest.TestCase):
+    """`durable` is public for the OTA agent, so what it promises is tested
+    here and not only through the tree."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.directory = Path(self._tmp.name)
+
+    def test_it_replaces_the_file_whole_and_leaves_nothing_beside_it(self):
+        path = self.directory / "state.json"
+        path.write_text("old", encoding="utf-8")
+
+        durable.write_durably(path, "new")
+
+        self.assertEqual(path.read_text(encoding="utf-8"), "new")
+        self.assertEqual([p.name for p in self.directory.iterdir()], ["state.json"])
+
+    def test_it_flushes_the_file_and_then_its_directory(self):
+        synced = []
+        real_fsync = os.fsync
+
+        def fsync(descriptor):
+            synced.append(os.path.isdir(f"/proc/self/fd/{descriptor}"))
+            real_fsync(descriptor)
+
+        with patch.object(durable.os, "fsync", fsync):
+            durable.write_durably(self.directory / "state.json", "x")
+
+        self.assertEqual(synced, [False, True])
+
+    def test_a_directory_that_cannot_be_flushed_is_not_an_error(self):
+        durable.fsync_directory(self.directory / "missing")
 
 
 if __name__ == "__main__":
