@@ -1057,6 +1057,61 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
                 self.assertFalse(it.rolls_back_to_none(self.release))
                 self.assertEqual(it.current_version(self.release), "2.0.0")
 
+    def _steps(self):
+        """Record, in order, the flushes and the moves of the link."""
+        steps = []
+        write_durably, mark_staging = it._write_durably, it._mark_staging
+        point_current_at = it._point_current_at
+
+        def durably(path, text):
+            write_durably(path, text)
+            steps.append(("durable", path.name))
+
+        def marked(version_dir):
+            mark_staging(version_dir)
+            steps.append(("marked", version_dir.name))
+
+        def pointed(release, dir_name):
+            steps.append(("link", dir_name))
+            point_current_at(release, dir_name)
+
+        for name, fake in (
+            ("_write_durably", durably),
+            ("_mark_staging", marked),
+            ("_point_current_at", pointed),
+        ):
+            patcher = patch.object(it, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(it.os, "sync", lambda: steps.append(("sync",)))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return steps
+
+    def test_a_commit_is_on_disk_before_the_link_names_it(self):
+        """From review: a rename is atomic, not durable. A power cut after the
+        switch could leave the record empty, or the link on a tree whose files
+        never reached the disk."""
+        self._commit("1.0.0")
+        self._write_pkg(it.stage_version(self.release, "2.0.0"), "pkg1", "2.0.0")
+        steps = self._steps()
+
+        it.commit_version(self.release, "2.0.0")
+
+        self.assertEqual(
+            steps,
+            [("sync",), ("durable", ".rollback"), ("link", "0002-2.0.0")],
+        )
+
+    def test_a_rollback_marks_what_it_undid_on_disk_before_moving_the_link(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        steps = self._steps()
+
+        it.rollback(self.release)
+
+        self.assertEqual(steps, [("marked", "0002-2.0.0"), ("link", "0001-1.0.0")])
+
 
 if __name__ == "__main__":
     unittest.main()
