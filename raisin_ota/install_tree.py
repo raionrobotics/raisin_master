@@ -305,14 +305,19 @@ def _write_rollback(release, source: str, target: Optional[str]) -> None:
     """Record the commit about to happen. Raises rather than leave it unrecorded.
 
     A link moved with no record behind it is a commit nothing can undo, so a
-    failure here stops the commit before the link moves. An earlier release's
-    files go too: they describe a commit before this one.
+    failure here stops the commit before the link moves.
+
+    An earlier release's files go too, once the record is on disk: they
+    describe a commit before this one, and left behind they would be read again
+    after a rollback consumes the record. Removed first, a write that failed
+    lost them with nothing in their place.
     """
-    for name in (_LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
-        (Path(release) / name).unlink(missing_ok=True)
     durable.write_durably(
         _rollback_file(release), json.dumps({"from": source, "to": target})
     )
+    for name in (_LEGACY_PREVIOUS_FILE, _LEGACY_SESSION_FILE):
+        (Path(release) / name).unlink(missing_ok=True)
+    durable.fsync_directory(release)
 
 
 def _clear_rollback(release) -> None:

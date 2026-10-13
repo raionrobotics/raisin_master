@@ -1085,6 +1085,24 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
                     self.assertEqual(list(outside.iterdir()), [])
                     self.assertFalse((self.release / ".staging").exists())
 
+    def test_a_record_that_cannot_be_written_keeps_an_earlier_releases_file(self):
+        """From review: the earlier release's `.previous-version` was removed
+        before the record was written, so a write that failed left nothing to
+        go back with."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".rollback").unlink()
+        (self.release / ".previous-version").write_text("0001-1.0.0", encoding="utf-8")
+        self._write_pkg(it.stage_version(self.release, "3.0.0"), "pkg1", "3.0.0")
+
+        with patch.object(durable, "write_durably", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                it.commit_version(self.release, "3.0.0")
+
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+        self.assertTrue((self.release / ".previous-version").exists())
+        self.assertEqual(it.rollback(self.release), "1.0.0")
+
     def test_an_earlier_release_file_naming_something_outside_is_ignored(self):
         self._commit("1.0.0")
         self._commit("2.0.0")
