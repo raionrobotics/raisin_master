@@ -1054,7 +1054,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
 
                 self.assertEqual(
                     it.undo_last_commit(self.release),
-                    (it.RollbackOutcome.UNREADABLE, None),
+                    (it.RollbackOutcome.UNUSABLE, None),
                 )
                 self.assertFalse(it.rolls_back_to_none(self.release))
                 self.assertEqual(it.current_version(self.release), "2.0.0")
@@ -1079,7 +1079,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
 
                     self.assertEqual(
                         it.undo_last_commit(self.release),
-                        (it.RollbackOutcome.UNREADABLE, None),
+                        (it.RollbackOutcome.UNUSABLE, None),
                     )
                     self.assertEqual(it.current_version(self.release), "2.0.0")
                     self.assertEqual(list(outside.iterdir()), [])
@@ -1101,6 +1101,32 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
 
         self.assertEqual(it.current_version(self.release), "2.0.0")
         self.assertTrue((self.release / ".previous-version").exists())
+        self.assertEqual(it.rollback(self.release), "1.0.0")
+
+    def test_a_record_naming_one_version_on_both_ends_is_unusable(self):
+        """Never written by a commit, which records nothing for the live
+        version; carried out, it marked the live version abandoned and said it
+        was restored."""
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+        (self.release / ".rollback").write_text(
+            json.dumps({"from": "0002-2.0.0", "to": "0002-2.0.0"}), encoding="utf-8"
+        )
+
+        self.assertEqual(
+            it.undo_last_commit(self.release), (it.RollbackOutcome.UNUSABLE, None)
+        )
+        self.assertFalse(
+            (self.release / "versions" / "0002-2.0.0" / ".staging").exists()
+        )
+        self.assertEqual(it.current_version(self.release), "2.0.0")
+
+    def test_committing_the_live_version_keeps_the_last_commits_record(self):
+        self._commit("1.0.0")
+        self._commit("2.0.0")
+
+        it.commit_version(self.release, "2.0.0")
+
         self.assertEqual(it.rollback(self.release), "1.0.0")
 
     def test_an_earlier_release_file_naming_something_outside_is_ignored(self):

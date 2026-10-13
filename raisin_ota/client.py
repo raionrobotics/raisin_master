@@ -4205,11 +4205,12 @@ def download_all_from_archive(
                     "release/install changed since the commit, so it was left as "
                     "it is: the failed version may still be live."
                 )
-            elif outcome is install_tree.RollbackOutcome.UNREADABLE:
+            elif outcome is install_tree.RollbackOutcome.UNUSABLE:
                 print(
                     f"⚠️ {len(broken)} package(s) unusable after the switch, and "
-                    "the rollback record could not be read, so release/install "
-                    "was left as it is: the failed version is still live."
+                    "the rollback record could not be used (unreadable or "
+                    "malformed), so release/install was left as it is: the "
+                    "failed version is still live."
                 )
             else:
                 print(

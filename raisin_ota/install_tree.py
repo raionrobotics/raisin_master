@@ -238,33 +238,39 @@ def _read_rollback(release) -> Optional[dict]:
     that last committed before this record existed.
     """
     record = _load_rollback(release)
-    return None if record is _UNREADABLE else record
+    return None if record is _UNUSABLE else record
 
 
-#: A record that is there and cannot be read: a commit to undo, with nothing
-#: saying where to. Kept apart from no record, which has nothing to undo.
-_UNREADABLE = object()
+#: A record that is there and cannot be used -- unreadable, or malformed: a
+#: commit to undo, with nothing trustworthy saying where to. Kept apart from
+#: no record, which has nothing to undo.
+_UNUSABLE = object()
 
 
 def _load_rollback(release):
-    """The record, None when there is none, or `_UNREADABLE`."""
+    """The record, None when there is none, or `_UNUSABLE`."""
     try:
         record = json.loads(_rollback_file(release).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return _legacy_rollback(release)
     except (OSError, ValueError):
-        return _UNREADABLE
+        return _UNUSABLE
     if not isinstance(record, dict):
-        return _UNREADABLE
+        return _UNUSABLE
     source, target = record.get("from"), record.get("to")
     if not isinstance(source, str) or not source:
-        return _UNREADABLE
+        return _UNUSABLE
     if target is not None and (not isinstance(target, str) or not target):
-        return _UNREADABLE
+        return _UNUSABLE
     if not _is_generation_name(source) or (
         target is not None and not _is_generation_name(target)
     ):
-        return _UNREADABLE
+        return _UNUSABLE
+    if source == target:
+        # A commit of the live version records nothing (`commit_version`), so
+        # this was not written by one. Carried out, it would mark the live
+        # version abandoned while reporting it restored.
+        return _UNUSABLE
     return {"from": source, "to": target}
 
 
@@ -519,7 +525,9 @@ def commit_version(
     outgoing = _current_dir_name(release)
     if outgoing == target.name:
         # Already live, so this commit changes nothing and there is nothing new
-        # to undo. Recording it would read as a first install.
+        # to undo; the record of the last commit that did stays. Recorded, it
+        # would name this version on both ends, and a rollback would mark the
+        # live version abandoned while reporting it restored.
         return target.name
     # The staged tree reaches the disk before anything can name it: written by
     # extraction and never flushed, a power cut after the switch would leave
@@ -545,15 +553,18 @@ class RollbackOutcome(enum.Enum):
 
     No version came back from four different things: a first install taken
     back to none, nothing to undo, a rollback refused, and a record that could
-    not be read -- the last two with the failed version still live. A caller
+    not be used -- the last two with the failed version still live. A caller
     told only None reported them all as the first.
+
+    Named for what a caller must do, not for every cause: values that call for
+    the same handling are one value, so a caller has fewer to list.
     """
 
     RESTORED = "restored"  # back on the version live before the commit
     TO_NONE = "to_none"  # a first install, taken back to no version
     NOTHING_TO_UNDO = "nothing_to_undo"  # no record of a commit to undo
     REFUSED = "refused"  # the link moved, or the target went; nothing changed
-    UNREADABLE = "unreadable"  # a record there but unreadable; nothing changed
+    UNUSABLE = "unusable"  # a record there, unreadable or malformed; nothing changed
 
 
 def _plan_rollback(release) -> Tuple[RollbackOutcome, Optional[dict]]:
@@ -564,10 +575,10 @@ def _plan_rollback(release) -> Tuple[RollbackOutcome, Optional[dict]]:
     rollback to none that the rollback then refused.
     """
     record = _load_rollback(release)
-    if record is _UNREADABLE:
+    if record is _UNUSABLE:
         # Torn by a power cut, or edited by hand: there is a commit to undo
         # and nothing to say where to, so the robot stays where it is.
-        return RollbackOutcome.UNREADABLE, None
+        return RollbackOutcome.UNUSABLE, None
     if record is None:
         return RollbackOutcome.NOTHING_TO_UNDO, None
     source, target = record["from"], record["to"]

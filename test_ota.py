@@ -2634,7 +2634,7 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
 
         said = " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
         self.assertNotIn("no previous version", said)
-        self.assertIn("rollback record could not be read", said)
+        self.assertIn("rollback record could not be used", said)
         self.assertEqual(install_tree.current_version(self.release), "2026.3.0")
         terminal = [
             e
