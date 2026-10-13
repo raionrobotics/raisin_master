@@ -1018,6 +1018,28 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
             it.undo_last_commit(self.release), (it.RollbackOutcome.RESTORED, "1.0.0")
         )
 
+    def test_a_directory_where_the_link_was_is_refused(self):
+        """Found in review: read as no link, the rollback went ahead and raised
+        IsADirectoryError -- after the agent, told it went back to none, had
+        removed the runtime tree."""
+        for versions in (["1.0.0"], ["1.0.0", "2.0.0"]):
+            with self.subTest(versions=versions):
+                shutil.rmtree(self.release)
+                self.release.mkdir()
+                for version in versions:
+                    self._commit(version)
+                live = self.release / "install"
+                os.remove(live)
+                live.mkdir()
+                (live / "restored-by-hand").write_text("x", encoding="utf-8")
+
+                self.assertFalse(it.rolls_back_to_none(self.release))
+                self.assertEqual(
+                    it.undo_last_commit(self.release),
+                    (it.RollbackOutcome.REFUSED, None),
+                )
+                self.assertTrue((live / "restored-by-hand").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

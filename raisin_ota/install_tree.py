@@ -512,6 +512,11 @@ def _plan_rollback(release) -> Tuple[RollbackOutcome, Optional[dict]]:
     link = current_link(release)
     if link.is_symlink() and not _is_our_link(link):
         return RollbackOutcome.REFUSED, None
+    if os.path.lexists(link) and not link.is_symlink():
+        # A directory put back where the link was, by hand -- `ensure_tree`
+        # adopts it as a version. Someone else's change, like a moved link,
+        # and not one a link could be swapped onto or removed from.
+        return RollbackOutcome.REFUSED, None
     current = _current_dir_name(release)
     if target is None:
         if current not in (source, None):
