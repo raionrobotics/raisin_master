@@ -18,10 +18,7 @@ import random
 import re
 import hashlib
 import shutil
-import stat
-import struct
 import subprocess
-import tempfile
 import time
 import uuid
 import zipfile
