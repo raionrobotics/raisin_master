@@ -508,24 +508,19 @@ def _resolve_version_dir(release, version: str) -> Optional[Path]:
     return matches[-1] if matches else None
 
 
-def commit_version(
-    release, version: str, session: Optional[str] = None
-) -> Optional[str]:
+def commit_version(release, version: str) -> Optional[str]:
     """Make a staged version live. Returns the directory now current.
 
     What was live before it is recorded first, so `undo_last_commit` can undo exactly
     this commit -- and when nothing was live, that is recorded too.
 
-    `session` is accepted for the callers that pass it and is not used. It used
-    to mark commits of one install, so that a second kept the first's rollback
-    target; but a failed install keeps its session so the retry can resume it,
-    and the retry's commit was taken for the same install committing twice --
-    it recorded nothing, and its rollback took a robot with a version back to
+    Each commit is undone on its own. A `session` argument used to mark the
+    commits of one install, so that a second kept the first's rollback target;
+    but a failed install keeps its session so the retry can resume it, and the
+    retry's commit was taken for the same install committing twice -- it
+    recorded nothing, and its rollback took a robot with a version back to
     none. The only caller that committed twice for one install was `--all`,
-    removed in 46a940c.
-
-    Deprecated: `session`. Remove once no caller passes it -- the two commits in
-    `client.py` and the tests that pass one.
+    removed in 46a940c; the argument went with its last callers.
     """
     target = _resolve_version_dir(release, version)
     if target is None:

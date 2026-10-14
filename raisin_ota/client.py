@@ -3259,11 +3259,7 @@ class PackageInstallTransaction:
                 )
                 print(f"❌ Staged packages are unusable: {', '.join(broken)}.")
                 return False
-        committed = install_tree.commit_version(
-            self.release,
-            self.version,
-            session=get_install_session_id(),
-        )
+        committed = install_tree.commit_version(self.release, self.version)
         if committed is None:
             note_install_failure("unpack", ERROR_UNKNOWN, "package tree commit failed")
             print(
@@ -4127,9 +4123,7 @@ def download_all_from_archive(
     # nothing was installed — and the health check below would read the tree
     # that is still live and pass, so silence here reports the previous
     # version's packages as a successful install of this one.
-    committed = install_tree.commit_version(
-        release, actual_version, session=install_session_id
-    )
+    committed = install_tree.commit_version(release, actual_version)
     if committed is None:
         print(
             f"⚠️ Could not switch release/install to '{archive_name}' "
