@@ -1912,12 +1912,9 @@ class RotatedCredential(RobotCallOutcome):
 class ExchangedCredential(RobotCallOutcome):
     """The node-pinned credential returned for a legacy robot-wide one."""
 
-    robot_id: Optional[str] = None
     node_key: Optional[str] = None
     node_id: Optional[str] = None
     plain_key: Optional[str] = None
-    legacy_credential_expires_at: Optional[str] = None
-    already_exchanged: bool = False
 
     @property
     def ok(self) -> bool:
@@ -2153,14 +2150,9 @@ def exchange_robot_credential(
         )
 
     return ExchangedCredential(
-        robot_id=_response_optional_string(payload.get("robotId")),
         node_key=returned_key,
         node_id=node_id,
         plain_key=plain_key,
-        legacy_credential_expires_at=_response_optional_string(
-            payload.get("legacyCredentialExpiresAt")
-        ),
-        already_exchanged=payload.get("alreadyExchanged") is True,
         **outcome,
     )
 
