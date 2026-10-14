@@ -192,20 +192,6 @@ def current_version(release) -> Optional[str]:
     return parsed[1] if parsed else name
 
 
-def previous_version(release) -> Optional[str]:
-    """Version a rollback would restore, or None when it would restore none.
-
-    Deprecated: nothing outside tests calls it, and nothing has since before
-    the rollback record. Remove with the tests that read it.
-    """
-    record = _read_rollback(release)
-    name = record.get("to") if record else None
-    if not name or not (versions_dir(release) / name).is_dir():
-        return None
-    parsed = _split_generation(name)
-    return parsed[1] if parsed else name
-
-
 def rolls_back_to_none(release) -> bool:
     """Whether `undo_last_commit` would take the tree back to no version at all.
 

@@ -46,6 +46,20 @@ class InstallTreeTestCase(unittest.TestCase):
         return d
 
 
+def previous_version(release):
+    """Version the rollback record would restore, or None.
+
+    Moved here from `install_tree` when nothing but these tests read it; the
+    assertions keep asking the same question of the same record.
+    """
+    record = it._read_rollback(release)
+    name = record.get("to") if record else None
+    if not name or not (it.versions_dir(release) / name).is_dir():
+        return None
+    parsed = it._split_generation(name)
+    return parsed[1] if parsed else name
+
+
 class TestLegacyMigration(InstallTreeTestCase):
     """Robots in the field have release/install as a real directory."""
 
@@ -154,7 +168,7 @@ class TestStageAndCommit(InstallTreeTestCase):
         self._write_pkg(it.stage_version(self.release, "2.0.0"), "pkg1", "new")
         it.commit_version(self.release, "2.0.0")
 
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertEqual(previous_version(self.release), "1.0.0")
 
     def test_abandoned_staging_leaves_the_live_tree_alone(self):
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "old")
@@ -412,7 +426,7 @@ class TestTamperRecovery(InstallTreeTestCase):
         it.ensure_tree(self.release)
 
         self.assertEqual(it.current_version(self.release), "2.0.0")
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertEqual(previous_version(self.release), "1.0.0")
 
     def test_symlink_replaced_by_a_real_directory_is_absorbed(self):
         self._commit("1.0.0")
@@ -448,7 +462,7 @@ class TestTamperRecovery(InstallTreeTestCase):
         self._commit("2.0.0")
         shutil.rmtree(self.release / "versions" / "0001-1.0.0")
 
-        self.assertIsNone(it.previous_version(self.release))
+        self.assertIsNone(previous_version(self.release))
         # `rollback` was removed (raisin_master#123); `undo_last_commit` returns
         # what it did and the version restored, and the version is what this reads.
         self.assertIsNone(it.undo_last_commit(self.release)[1])
@@ -522,7 +536,7 @@ class TestRollback(InstallTreeTestCase):
         it.commit_version(self.release, "1.0.0")
 
         self.assertEqual(it.current_version(self.release), "1.0.0")
-        self.assertIsNone(it.previous_version(self.release))
+        self.assertIsNone(previous_version(self.release))
 
     def test_a_rollback_record_that_is_not_text_is_not_read_as_none(self):
         """Corrupted bytes are not "no version before": the live one stays.
@@ -579,7 +593,7 @@ class TestMultiCommitAttempt(InstallTreeTestCase):
         self._commit("2.0.0", session="s1", marker="release")
 
         self.assertEqual(it.current_version(self.release), "2.0.0")
-        self.assertEqual(it.previous_version(self.release), "2.0.0-debug")
+        self.assertEqual(previous_version(self.release), "2.0.0-debug")
 
     def test_rollback_after_two_commits_under_one_session_undoes_the_last(self):
         """Changed from "restores the pre-attempt tree" (raisin_master#123).
@@ -609,13 +623,13 @@ class TestMultiCommitAttempt(InstallTreeTestCase):
         self._commit("1.0.0", session="s1", marker="first")
         self._commit("2.0.0", session="s2", marker="second")
 
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertEqual(previous_version(self.release), "1.0.0")
 
     def test_commits_without_a_session_behave_as_before(self):
         self._commit("1.0.0")
         self._commit("2.0.0")
 
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertEqual(previous_version(self.release), "1.0.0")
 
 
 class TestRetention(InstallTreeTestCase):
@@ -815,7 +829,7 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self._commit("2.0.0-debug", session="s1")
         self._commit("2.0.0", session="s1")
 
-        self.assertEqual(it.previous_version(self.release), "2.0.0-debug")
+        self.assertEqual(previous_version(self.release), "2.0.0-debug")
         self.assertEqual(it.undo_last_commit(self.release)[1], "2.0.0-debug")
         self.assertIsNone(it.undo_last_commit(self.release)[1])
 

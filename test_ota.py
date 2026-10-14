@@ -2638,8 +2638,8 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
 
         self.assertTrue(self.live.is_symlink())
         # The adopted tree is the rollback target, so its packages are still there.
-        previous = install_tree.previous_version(self.release)
-        self.assertEqual(previous, "legacy")
+        record = install_tree._read_rollback(self.release)
+        self.assertEqual(install_tree._split_generation(record["to"])[1], "legacy")
 
 
 class TestInstallSessionPersistence(unittest.TestCase):
