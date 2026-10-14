@@ -1171,25 +1171,6 @@ def _get_token_cache_path() -> Path:
     return _ctx().workspace / _TOKEN_CACHE_FILE
 
 
-def _is_jwt_expired(token: str) -> bool:
-    """Check if a JWT token is expired by decoding its payload.
-
-    Decodes the JWT payload (no signature verification — just reading
-    the ``exp`` claim) and returns True if the token expires within
-    30 seconds.
-    """
-    try:
-        payload_b64 = token.split(".")[1]
-        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
-        payload = json.loads(base64.b64decode(padded))
-        exp = payload.get("exp")
-        if exp is None:
-            return False
-        return time.time() > (exp - 30)
-    except Exception:
-        return True
-
-
 def _load_cached_token() -> Optional[str]:
     """Load token from persistent cache file if it's still valid.
 

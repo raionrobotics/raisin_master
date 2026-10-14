@@ -489,21 +489,6 @@ class TestTokenPersistence(unittest.TestCase):
 
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_is_jwt_expired_false_for_valid_token(self):
-        token = _make_jwt(exp_offset_seconds=3600)  # expires in 1 hour
-        self.assertFalse(ota._is_jwt_expired(token))
-
-    def test_is_jwt_expired_true_for_expired_token(self):
-        token = _make_jwt(exp_offset_seconds=-60)  # expired 1 min ago
-        self.assertTrue(ota._is_jwt_expired(token))
-
-    def test_is_jwt_expired_true_within_buffer(self):
-        token = _make_jwt(exp_offset_seconds=10)  # expires in 10s, within 30s buffer
-        self.assertTrue(ota._is_jwt_expired(token))
-
-    def test_is_jwt_expired_true_for_garbage(self):
-        self.assertTrue(ota._is_jwt_expired("not-a-jwt"))
-
     def test_save_and_load_token(self):
         token = _make_jwt(3600)
         with patch.dict(os.environ, {"RAISIN_OTA_ENDPOINT": "https://ota.test"}):
@@ -666,8 +651,8 @@ class TestSSHHelpers(unittest.TestCase):
 class TestAuthentication(unittest.TestCase):
     """Verify the SSH challenge-response authentication flow.
 
-    Patches _load_cached_token, _save_token, and _is_jwt_expired so the
-    persistent cache and JWT validation don't interfere with SSH auth tests.
+    Patches _load_cached_token and _save_token so the persistent cache does
+    not interfere with SSH auth tests.
     """
 
     def setUp(self):
