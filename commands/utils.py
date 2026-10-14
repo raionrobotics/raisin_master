@@ -172,7 +172,7 @@ def check_supported_architecture():
     machine = platform.machine()
     if machine not in SUPPORTED_ARCHITECTURES:
         print(f"❌ Unsupported architecture: {machine}")
-        print(f"   RAISIN build tooling supports: x86_64, aarch64/arm64.")
+        print("   RAISIN build tooling supports: x86_64, aarch64/arm64.")
         print(f"   Cross-compilation to {machine} is not yet supported.")
         sys.exit(1)
 
@@ -320,15 +320,10 @@ def get_os_info() -> Tuple[str, str, str, str, str, dict]:
     elif system == "Windows":
         vs_path2, ninja_path2, developer_env2 = find_build_tools("amd64")
         os_type2 = "windows"
-        try:
-            win = (
-                sys.getwindowsversion()
-            )  # (major, minor, build, platform, service_pack)
-            # os_version2 = f"{win.major}.{win.minor}.{win.build}"
-            os_version2 = "10or11"
-        except Exception:
-            release, version, _, _ = platform.win32_ver()
-            os_version2 = version or release or platform.release()
+        # One label for both, on purpose: the install tree is keyed by this
+        # string, and a per-build version would give every Windows update its
+        # own empty tree.
+        os_version2 = "10or11"
 
     else:  # e.g., FreeBSD, OpenBSD, SunOS, etc.
         os_type2 = system.lower() if system else "unknown"

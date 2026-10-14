@@ -504,7 +504,7 @@ def replace_package_dir(staging: Path, relative: Path) -> Path:
 
 
 def _resolve_version_dir(release, version: str) -> Optional[Path]:
-    matches = [entry for gen, name, entry in _generations(release) if name == version]
+    matches = [entry for _, name, entry in _generations(release) if name == version]
     return matches[-1] if matches else None
 
 
