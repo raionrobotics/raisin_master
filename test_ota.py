@@ -882,6 +882,35 @@ class TestExtractedModes(unittest.TestCase):
         self.assertTrue((self.install_dir / "lib" / "plain.so").is_file())
 
 
+class TestExtractReplacesWhatIsThere(unittest.TestCase):
+    """Extraction goes through `install_tree.replace_package_dir`, so a symlink
+    where the package goes does not end the install (it made `rmtree` raise)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.download = Path(self._tmp.name) / "pkg.zip"
+        self.install_dir = Path(self._tmp.name) / "installed"
+        with zipfile.ZipFile(self.download, "w") as zf:
+            zf.writestr("release.yaml", "version: 1.0.0\n")
+
+    def test_a_symlink_where_the_package_goes_is_replaced(self):
+        other = Path(self._tmp.name) / "elsewhere"
+        other.mkdir()
+        (other / "kept.txt").write_text("keep me", encoding="utf-8")
+        self.install_dir.symlink_to(other, target_is_directory=True)
+
+        result = ota._extract_and_read_deps(
+            self.download, self.install_dir, "pkg1", "1.0.0"
+        )
+
+        self.assertIsNotNone(result)
+        self.assertFalse(self.install_dir.is_symlink())
+        self.assertTrue((self.install_dir / "release.yaml").is_file())
+        self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
+        self.assertFalse((other / "release.yaml").exists())
+
+
 class TestMalformedReleaseYaml(unittest.TestCase):
     """A package's release.yaml is attacker- or accident-supplied content."""
 

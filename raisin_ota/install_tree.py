@@ -487,17 +487,28 @@ def _is_staging(version_dir: Path) -> bool:
     return (version_dir / _STAGING_MARKER).exists()
 
 
-def replace_package_dir(staging: Path, relative: Path) -> Path:
-    """Clear a package directory inside a staged tree before writing into it.
+def replace_package_dir(target: Path) -> Path:
+    """Clear a package's path inside a staged tree; return it as an empty directory.
 
-    A staged tree is hardlink-cloned from the live one, so its files share
-    inodes with the version a rollback would restore. Writing into an existing
-    file would edit that version too. Removing the directory first breaks the
-    link; the OTA extract path already does exactly this, and anything else
-    writing into a staged tree must too.
+    A staged tree is hardlink-cloned from the live one, so a file here shares
+    its inode with the version a rollback would restore, and writing into it
+    would edit that version too. Removing first breaks the link. Anything that
+    writes a package into a staged tree goes through here.
+
+    Whatever is at the path goes: a directory, a file, or a symlink -- removed
+    as the link and never followed, so what it points at is left alone. The
+    clone keeps symlinks as symlinks, so a link somebody put in the live tree
+    in a package's place arrives in every staged tree. `rmtree` refuses a
+    link, and refused on every attempt, which left that robot unable to
+    install anything until a person found the link. Replaced instead: the new
+    version gets the package the archive names, and the version with the link
+    stays as it was, for a rollback to restore. A link at `release/install`
+    is a different matter -- see `ensure_tree`, which leaves one it did not
+    make alone, because that one decides what runs.
     """
-    target = staging / relative
-    if target.exists():
+    if target.is_symlink() or (target.exists() and not target.is_dir()):
+        target.unlink()
+    elif target.is_dir():
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
     return target

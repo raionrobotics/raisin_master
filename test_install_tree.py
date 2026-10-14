@@ -40,8 +40,7 @@ class InstallTreeTestCase(unittest.TestCase):
 
         Editing in place would mutate the hardlink-shared previous version.
         """
-        relative = Path(name) / "linux" / "22.04" / "x86_64" / "release"
-        d = it.replace_package_dir(base, relative)
+        d = it.replace_package_dir(base / name / "linux" / "22.04" / "x86_64" / "release")
         (d / "release.yaml").write_text(f"version: {marker}\n", encoding="utf-8")
         return d
 
@@ -111,6 +110,95 @@ class TestLegacyMigration(InstallTreeTestCase):
             / "release.yaml"
         )
         self.assertEqual(moved.stat().st_ino, inode)
+
+
+class TestReplacePackageDir(InstallTreeTestCase):
+    """Whatever is where a package goes in a staged tree is replaced by an empty
+    directory, and nothing outside the staged tree is touched."""
+
+    PKG = Path("pkg1") / "linux" / "22.04" / "x86_64" / "release"
+
+    def _elsewhere(self):
+        """A directory outside the tree, with a file that must survive."""
+        other = self.release.parent / "elsewhere"
+        other.mkdir()
+        (other / "kept.txt").write_text("keep me", encoding="utf-8")
+        return other
+
+    def test_an_absent_path_becomes_an_empty_directory(self):
+        target = self.release / "staging" / self.PKG
+
+        self.assertEqual(it.replace_package_dir(target), target)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_directory_is_emptied_and_the_live_version_keeps_its_file(self):
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "old")
+        it.commit_version(self.release, "1.0.0")
+        staging = it.stage_version(self.release, "2.0.0")
+
+        it.replace_package_dir(staging / self.PKG)
+
+        self.assertEqual(list((staging / self.PKG).iterdir()), [])
+        live = self.release / "install" / self.PKG / "release.yaml"
+        self.assertIn("old", live.read_text(encoding="utf-8"))
+
+    def test_a_symlink_is_replaced_and_what_it_pointed_at_is_left_alone(self):
+        other = self._elsewhere()
+        target = self.release / "staging" / self.PKG
+        target.parent.mkdir(parents=True)
+        target.symlink_to(other, target_is_directory=True)
+
+        it.replace_package_dir(target)
+
+        self.assertFalse(target.is_symlink())
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
+
+    def test_a_dangling_symlink_is_replaced(self):
+        target = self.release / "staging" / self.PKG
+        target.parent.mkdir(parents=True)
+        target.symlink_to(self.release.parent / "gone", target_is_directory=True)
+
+        it.replace_package_dir(target)
+
+        self.assertFalse(target.is_symlink())
+        self.assertTrue(target.is_dir())
+
+    def test_a_file_is_replaced(self):
+        target = self.release / "staging" / self.PKG
+        target.parent.mkdir(parents=True)
+        target.write_text("not a directory", encoding="utf-8")
+
+        it.replace_package_dir(target)
+
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_link_in_the_live_tree_becomes_a_directory_in_the_staged_one(self):
+        """Somebody pointed a package in the live tree at their own directory.
+
+        The clone carries the link into the staged tree. The new version gets
+        a real directory for the package; the live version keeps its link, and
+        the directory the link pointed at keeps its file.
+        """
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "old")
+        it.commit_version(self.release, "1.0.0")
+        other = self._elsewhere()
+        live_pkg = self.release / "versions" / "0001-1.0.0" / self.PKG
+        shutil.rmtree(live_pkg)
+        live_pkg.symlink_to(other, target_is_directory=True)
+
+        staging = it.stage_version(self.release, "2.0.0")
+        self.assertTrue((staging / self.PKG).is_symlink())  # what the clone does
+
+        it.replace_package_dir(staging / self.PKG)
+
+        self.assertFalse((staging / self.PKG).is_symlink())
+        self.assertTrue((staging / self.PKG).is_dir())
+        self.assertTrue(live_pkg.is_symlink())
+        self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
 
 
 class TestStageAndCommit(InstallTreeTestCase):

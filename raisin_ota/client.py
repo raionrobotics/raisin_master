@@ -2827,9 +2827,8 @@ def _extract_and_read_deps(
 
     Returns dict with 'version' and 'dependencies' on success, None on failure.
     """
-    if install_dir.exists():
-        shutil.rmtree(install_dir)
-    install_dir.mkdir(parents=True, exist_ok=True)
+    # Remove, never overwrite: the staged tree shares inodes with the live one.
+    install_tree.replace_package_dir(install_dir)
 
     try:
         with zipfile.ZipFile(download_file, "r") as zip_ref:
