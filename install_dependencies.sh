@@ -175,12 +175,14 @@ else
     if [[ ${#failed_installers[@]} -eq 0 ]]; then
         echo -e "${GREEN}✅ All ${found_installers} package installer(s) completed successfully.${NC}"
     else
-        echo -e "${YELLOW}⚠️  ${found_installers} installer(s) found, ${#failed_installers[@]} failed:${NC}"
+        echo -e "${RED}❌ ${found_installers} installer(s) found, ${#failed_installers[@]} failed:${NC}"
         for failed in "${failed_installers[@]}"; do
             echo -e "${RED}   - ${failed}${NC}"
         done
         echo ""
-        echo "You may need to run the failed installers manually or check their output."
+        echo "Each failed installer printed its reason above (e.g. the apt packages it could not find)."
+        echo ""
+        exit 1
     fi
 fi
 echo ""
