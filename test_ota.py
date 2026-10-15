@@ -5157,6 +5157,78 @@ class TestPublishReportsFailureThroughItsExitCode(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
 
 
+class TestPublishCarriesTheDependencyDeclaration(unittest.TestCase):
+    """The install tree carries what the package declares it needs.
+
+    A package declares its system dependencies in `install_dependencies.sh`
+    and, once it has moved the apt list out of the script, in `deps/` next to
+    it. The script reads `deps/` relative to itself, so an archive with the
+    script and without the directory would run and install nothing. The robot
+    reads the declaration only from the install tree, never from source.
+    """
+
+    def _copy(self, target):
+        from commands.publish import _copy_dependency_declaration
+
+        install_dir = target.parent / "install"
+        install_dir.mkdir()
+        _copy_dependency_declaration(target, install_dir)
+        return install_dir
+
+    def test_script_and_deps_directory_travel_together(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "mypkg"
+            (target / "deps").mkdir(parents=True)
+            (target / "install_dependencies.sh").write_text("#!/bin/bash\n")
+            (target / "deps" / "apt.txt").write_text("libfoo-dev\n")
+            (target / "deps" / "apt.ubuntu-24.04.txt").write_text("libbar2\n")
+
+            install_dir = self._copy(target)
+
+            self.assertEqual(
+                (install_dir / "install_dependencies.sh").read_text(), "#!/bin/bash\n"
+            )
+            self.assertEqual((install_dir / "deps" / "apt.txt").read_text(), "libfoo-dev\n")
+            self.assertEqual(
+                (install_dir / "deps" / "apt.ubuntu-24.04.txt").read_text(), "libbar2\n"
+            )
+
+    def test_a_package_with_only_a_script_is_copied_as_before(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "mypkg"
+            target.mkdir()
+            (target / "install_dependencies.sh").write_text("#!/bin/bash\n")
+
+            install_dir = self._copy(target)
+
+            self.assertTrue((install_dir / "install_dependencies.sh").is_file())
+            self.assertFalse((install_dir / "deps").exists())
+
+    def test_a_package_that_declares_nothing_adds_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "mypkg"
+            target.mkdir()
+
+            install_dir = self._copy(target)
+
+            self.assertEqual(list(install_dir.iterdir()), [])
+
+    def test_a_rebuild_overwrites_a_stale_deps_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "mypkg"
+            (target / "deps").mkdir(parents=True)
+            (target / "deps" / "apt.txt").write_text("libnew-dev\n")
+            install_dir = Path(tmpdir) / "install"
+            (install_dir / "deps").mkdir(parents=True)
+            (install_dir / "deps" / "apt.txt").write_text("libold-dev\n")
+
+            from commands.publish import _copy_dependency_declaration
+
+            _copy_dependency_declaration(target, install_dir)
+
+            self.assertEqual((install_dir / "deps" / "apt.txt").read_text(), "libnew-dev\n")
+
+
 class TestPublishIntegration(unittest.TestCase):
     """`raisin publish` archives and says the upload is not its job.
 

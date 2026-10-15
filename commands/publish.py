@@ -226,15 +226,30 @@ def _build_package(
 
     print(f"✅ Build for '{target}' complete!")
 
-    # Copy release.yaml and install_dependencies.sh to install dir
+    # Copy release.yaml and the dependency declaration to install dir
     install_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(target_dir / "release.yaml", install_dir / "release.yaml")
+    _copy_dependency_declaration(target_dir, install_dir)
 
+    return True
+
+
+def _copy_dependency_declaration(target_dir: Path, install_dir: Path) -> None:
+    """Carry a package's system-dependency declaration into its install tree.
+
+    The declaration is `install_dependencies.sh` and, where the package has
+    moved its apt list out of the script, the `deps/` directory next to it
+    (`deps/apt.txt`, `deps/apt.ubuntu-<version>.txt`). The script reads
+    `deps/` relative to its own location, so an archive that carried the
+    script without the directory would install nothing. Both travel together.
+    """
     deps_script = target_dir / "install_dependencies.sh"
     if deps_script.is_file():
         shutil.copy(deps_script, install_dir / "install_dependencies.sh")
 
-    return True
+    deps_dir = target_dir / "deps"
+    if deps_dir.is_dir():
+        shutil.copytree(deps_dir, install_dir / "deps", dirs_exist_ok=True)
 
 
 # ============================================================================
