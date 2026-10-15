@@ -5229,6 +5229,53 @@ class TestPublishCarriesTheDependencyDeclaration(unittest.TestCase):
             self.assertEqual((install_dir / "deps" / "apt.txt").read_text(), "libnew-dev\n")
 
 
+class TestPublishArchivesOnlyThisBuild(unittest.TestCase):
+    """The install tree holds this build's output and nothing from an earlier one.
+
+    The archive is the install tree, zipped. The build directory was already
+    cleaned before every publish; the install tree was not, so a file the
+    package stopped installing -- a library, or a `deps/` list it deleted --
+    stayed in the tree and shipped in every later archive from that workspace.
+    """
+
+    @patch("commands.publish._get_publish_march", return_value="")
+    @patch("commands.publish.setup")
+    def test_files_from_an_earlier_publish_are_not_archived(self, _setup, _march):
+        from commands.publish import _build_package
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "src" / "mypkg"
+            (target / "deps").mkdir(parents=True)
+            (target / "release.yaml").write_text("version: 1.0.0\n")
+            (target / "deps" / "apt.txt").write_text("libfoo-dev\n")
+
+            install_dir = root / "release" / "install" / "mypkg" / "release"
+            (install_dir / "lib").mkdir(parents=True)
+            (install_dir / "deps").mkdir()
+            (install_dir / "lib" / "libold.so").write_text("old")
+            (install_dir / "deps" / "apt.ubuntu-24.04.txt").write_text("libold-dev\n")
+
+            def cmake_install(_build_dir, install_dir, *_args):
+                (install_dir / "lib").mkdir(parents=True, exist_ok=True)
+                (install_dir / "lib" / "libnew.so").write_text("new")
+
+            paths = {
+                "target_dir": target,
+                "install_dir": install_dir,
+                "build_dir": root / "release" / "build" / "mypkg" / "release",
+            }
+            with patch("commands.publish._build_linux", side_effect=cmake_install), patch(
+                "commands.publish._build_windows", side_effect=cmake_install
+            ):
+                self.assertTrue(_build_package("mypkg", "release", paths))
+
+            self.assertTrue((install_dir / "lib" / "libnew.so").is_file())
+            self.assertTrue((install_dir / "deps" / "apt.txt").is_file())
+            self.assertFalse((install_dir / "lib" / "libold.so").exists())
+            self.assertFalse((install_dir / "deps" / "apt.ubuntu-24.04.txt").exists())
+
+
 class TestPublishIntegration(unittest.TestCase):
     """`raisin publish` archives and says the upload is not its job.
 

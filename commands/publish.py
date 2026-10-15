@@ -208,6 +208,11 @@ def _build_package(
     if build_dir.exists():
         shutil.rmtree(build_dir)
 
+    # Clean the install tree too: it is what the archive contains, so a file
+    # the package no longer installs must not survive from an earlier publish.
+    if install_dir.exists():
+        shutil.rmtree(install_dir)
+
     print(f"\n--- Setting up build for '{target}' ---")
     setup(
         package_name=target,
