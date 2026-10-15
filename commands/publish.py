@@ -17,6 +17,7 @@ import yaml
 
 from commands import globals as g
 from commands.utils import (
+    delete_directory,
     is_qemu_emulated,
     get_build_jobs,
     get_default_portable_march,
@@ -205,13 +206,11 @@ def _build_package(
 
     # Clean stale build directory to prevent cached cmake paths from
     # interfering (e.g., system zstd vs install/ zstd).
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
+    delete_directory(build_dir)
 
     # Clean the install tree too: it is what the archive contains, so a file
     # the package no longer installs must not survive from an earlier publish.
-    if install_dir.exists():
-        shutil.rmtree(install_dir)
+    delete_directory(install_dir)
 
     print(f"\n--- Setting up build for '{target}' ---")
     setup(
