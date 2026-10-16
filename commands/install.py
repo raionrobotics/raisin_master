@@ -177,9 +177,6 @@ def _install(
 
     # Access globals
     script_directory = g.script_directory
-    os_type = g.os_type
-    os_version = g.os_version
-    architecture = g.architecture
 
     script_dir_path = Path(script_directory)
 

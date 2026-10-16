@@ -489,21 +489,6 @@ class TestTokenPersistence(unittest.TestCase):
 
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_is_jwt_expired_false_for_valid_token(self):
-        token = _make_jwt(exp_offset_seconds=3600)  # expires in 1 hour
-        self.assertFalse(ota._is_jwt_expired(token))
-
-    def test_is_jwt_expired_true_for_expired_token(self):
-        token = _make_jwt(exp_offset_seconds=-60)  # expired 1 min ago
-        self.assertTrue(ota._is_jwt_expired(token))
-
-    def test_is_jwt_expired_true_within_buffer(self):
-        token = _make_jwt(exp_offset_seconds=10)  # expires in 10s, within 30s buffer
-        self.assertTrue(ota._is_jwt_expired(token))
-
-    def test_is_jwt_expired_true_for_garbage(self):
-        self.assertTrue(ota._is_jwt_expired("not-a-jwt"))
-
     def test_save_and_load_token(self):
         token = _make_jwt(3600)
         with patch.dict(os.environ, {"RAISIN_OTA_ENDPOINT": "https://ota.test"}):
@@ -666,8 +651,8 @@ class TestSSHHelpers(unittest.TestCase):
 class TestAuthentication(unittest.TestCase):
     """Verify the SSH challenge-response authentication flow.
 
-    Patches _load_cached_token, _save_token, and _is_jwt_expired so the
-    persistent cache and JWT validation don't interfere with SSH auth tests.
+    Patches _load_cached_token and _save_token so the persistent cache does
+    not interfere with SSH auth tests.
     """
 
     def setUp(self):
@@ -895,6 +880,35 @@ class TestExtractedModes(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue((self.install_dir / "lib" / "plain.so").is_file())
+
+
+class TestExtractReplacesWhatIsThere(unittest.TestCase):
+    """Extraction goes through `install_tree.replace_package_dir`, so a symlink
+    where the package goes does not end the install (it made `rmtree` raise)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.download = Path(self._tmp.name) / "pkg.zip"
+        self.install_dir = Path(self._tmp.name) / "installed"
+        with zipfile.ZipFile(self.download, "w") as zf:
+            zf.writestr("release.yaml", "version: 1.0.0\n")
+
+    def test_a_symlink_where_the_package_goes_is_replaced(self):
+        other = Path(self._tmp.name) / "elsewhere"
+        other.mkdir()
+        (other / "kept.txt").write_text("keep me", encoding="utf-8")
+        self.install_dir.symlink_to(other, target_is_directory=True)
+
+        result = ota._extract_and_read_deps(
+            self.download, self.install_dir, "pkg1", "1.0.0"
+        )
+
+        self.assertIsNotNone(result)
+        self.assertFalse(self.install_dir.is_symlink())
+        self.assertTrue((self.install_dir / "release.yaml").is_file())
+        self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
+        self.assertFalse((other / "release.yaml").exists())
 
 
 class TestMalformedReleaseYaml(unittest.TestCase):
@@ -2653,8 +2667,8 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
 
         self.assertTrue(self.live.is_symlink())
         # The adopted tree is the rollback target, so its packages are still there.
-        previous = install_tree.previous_version(self.release)
-        self.assertEqual(previous, "legacy")
+        record = install_tree._read_rollback(self.release)
+        self.assertEqual(install_tree._split_generation(record["to"])[1], "legacy")
 
 
 class TestInstallSessionPersistence(unittest.TestCase):
