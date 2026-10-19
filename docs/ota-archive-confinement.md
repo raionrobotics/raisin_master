@@ -31,10 +31,13 @@ Robot/client extraction and build-machine fetch now share `archive_safety`:
   warning/continue behavior for ordinary per-file mode I/O failures. Alias/name
   violations remain fatal. Client returns None; builder raises FetchRefused.
 
-The cache-location prerequisite is NOT solved here: transactions still use the
+At this ZIP-only checkpoint the cache-location prerequisite was NOT solved:
+transactions still used the
 configured workspace's `install/` for ZIP downloads. Private preparation needs a
 separate reviewed cache destination and later dependency adoption before use.
 Neither a private install_base_path nor these ZIP fixes authorize managed writes.
+See the later [transaction cache candidate](ota-transaction-download-cache.md)
+for the optional destination contract; private preparation remains open.
 
 ## Verification and review
 

@@ -3168,13 +3168,30 @@ class PackageInstallTransaction:
     archive metadata needs refreshing. Downloaded ZIPs supply dependencies;
     unpacking never changes the live tree. Snapshots are queued after commit.
     The caller holds the workspace install-state lock.
+
+    download_cache_dir selects where this transaction downloads ZIPs and their
+    partial/state companions. None retains the configured workspace/install.
+    The directory is caller-controlled, not a security boundary; callers must
+    supply an exclusively owned stable path for private preparation. Files are
+    created lazily by the existing transport, with no fallback on failure.
+    Completed ZIPs are consumed by extraction; interrupted partials are retained
+    for resume. Context, credentials and install_base_path are not redirected.
     """
 
-    def __init__(self, install_base_path: Path, *, upgrade: bool = False):
+    def __init__(
+        self,
+        install_base_path: Path,
+        *,
+        upgrade: bool = False,
+        download_cache_dir: Optional[Path] = None,
+    ):
         # Cache only within this install attempt. A later command must observe
         # a moved tag or a newly published archive, even in the same process.
         _archive_cache.clear()
         self.install_base_path = Path(install_base_path)
+        self.download_cache_dir = (
+            Path(download_cache_dir) if download_cache_dir is not None else None
+        )
         self.release = install_tree.release_for(self.install_base_path)
         self.staging = None
         self.version = None
@@ -3407,7 +3424,10 @@ def _download_package(
         # An archive may omit tagName or use an alias. Its immutable ZIP is
         # then the version authority; never substitute 0.0.0 for an unknown.
         key = version or hashlib.sha256(str(pkg).encode()).hexdigest()[:16]
-        path = _ctx().workspace / "install" / f"{package_name}-ota-{key}.zip"
+        cache = transaction.download_cache_dir
+        if cache is None:
+            cache = _ctx().workspace / "install"
+        path = cache / f"{package_name}-ota-{key}.zip"
         record_install_event(
             "started",
             archive_id=archive_id,
