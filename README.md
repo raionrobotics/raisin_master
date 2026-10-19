@@ -104,6 +104,15 @@ and `REQUESTS_CA_BUNDLE=/absolute/path/to/ca.pem`. Keep the generated CA and reu
 its public certificate across sessions. This does not update an installed
 `raisin-ota-agent` release pin; it must adopt a subsequent core release.
 
+#### Archive extraction safety
+
+Robot downloads and build-machine fetch share ZIP name/permission checks.
+Absolute, parent-traversal, ambiguous and pre-existing aliased destinations are
+refused; executable bits are still restored with a0755 ceiling. The extraction
+prefix must be owned by the caller and protected from concurrent writers.
+See [the confinement checkpoint](docs/ota-archive-confinement.md) for the defect,
+verification and remaining private-preparation/cache limitations.
+
 #### SSH Key Authentication
 
 OTA authentication uses SSH key-based challenge-response. The following key types are supported:
