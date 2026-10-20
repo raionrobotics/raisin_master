@@ -43,18 +43,29 @@ def save_video(logdir, target, video_dir):
     return raw
 
 
+NET = False   # --net: the ROS-free two-PC stack (scripts/room_finder_net/run_net_sim.sh) instead of the ROS launcher
+NETSH = os.path.join(os.path.dirname(HERE), "room_finder_net", "run_net_sim.sh")
+
+
+def launcher_kill():
+    run(f"{NETSH if NET else HERE + '/run_reasonnav_sim.sh'} --kill > /dev/null 2>&1")
+
+
 def trial(target, max_time, tol, env_extra="", video_dir=None, extra=""):
-    run(f"{HERE}/run_reasonnav_sim.sh --kill > /dev/null 2>&1")
+    launcher_kill()
     # the previous sim must be fully gone: a lingering process keeps the livox UDP ports and the next lidar fails to bind
     for _ in range(30):
-        if run("pgrep -f '[r]aisin_raibo2_node|[r]aisin_bridge_node|[r]aisin_gui' > /dev/null").returncode != 0:
+        if run("pgrep -f '[r]aisin_raibo2_node|[r]aisin_bridge_node|[r]aisin_gui|[a]i_main.py|[r]obot_gateway.py' > /dev/null").returncode != 0:
             break
-        run("pkill -f '[r]aisin_raibo2_node'; pkill -f '[r]aisin_bridge_node'; pkill -f '[r]aisin_gui'; sleep 2")
+        run("pkill -f '[r]aisin_raibo2_node'; pkill -f '[r]aisin_bridge_node'; pkill -f '[r]aisin_gui'; pkill -f '[a]i_main.py'; pkill -f '[r]obot_gateway.py'; sleep 2")
     time.sleep(8)
     t0 = time.time()
     rec_flag = "--record" if video_dir else ""
-    run(f"cd {WS} && FINDER_MAX_TIME={max_time} {env_extra} {HERE}/run_reasonnav_sim.sh --goal {target} --no-gui --no-rviz {rec_flag} {extra} "
-        f"< /dev/null > /dev/null 2>&1")
+    if NET:
+        run(f"cd {WS} && FINDER_MAX_TIME={max_time} {env_extra} {NETSH} --goal {target} < /dev/null > /dev/null 2>&1")
+    else:
+        run(f"cd {WS} && FINDER_MAX_TIME={max_time} {env_extra} {HERE}/run_reasonnav_sim.sh --goal {target} --no-gui --no-rviz {rec_flag} {extra} "
+            f"< /dev/null > /dev/null 2>&1")
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(t0 - 5))
     fresh = sorted(d for d in os.listdir(f"{WS}/log/reasonnav_sim") if d[:2] == "20" and d >= stamp)
     if not fresh:     # the launcher did not create a log directory for this run (not executable, tmux session left over ...)
@@ -64,10 +75,10 @@ def trial(target, max_time, tol, env_extra="", video_dir=None, extra=""):
     res_path = f"{logdir}/finder/result.json"
     while not os.path.exists(res_path) and time.time() - t0 < max_time + 240:
         time.sleep(5)
-        fl = f"{logdir}/finder.log"
+        fl = f"{logdir}/{'ai' if NET else 'finder'}.log"
         if time.time() - t0 < 300 and os.path.exists(fl) and "Traceback" in open(fl).read():
             print(json.dumps({"target": str(target), "FINDER_CRASH": open(fl).read().strip().splitlines()[-1][:200]}), flush=True)
-            run(f"{HERE}/run_reasonnav_sim.sh --kill > /dev/null 2>&1")
+            launcher_kill()
             sys.exit(3)
     row = {"target": str(target), "logdir": logdir, "gt_xy": [round(v, 2) for v in gt_xy(target)]}
     if not os.path.exists(res_path):
@@ -81,7 +92,7 @@ def trial(target, max_time, tol, env_extra="", video_dir=None, extra=""):
         except ValueError:
             time.sleep(5)
     if r is None:
-        gave_up = re.search(r"GAVE UP on room \d+ after (\d+) s, (\d+) m", open(f"{logdir}/finder.log").read() if os.path.exists(f"{logdir}/finder.log") else "")
+        gave_up = re.search(r"GAVE UP on room \d+ after (\d+) s, (\d+) m", open(f"{logdir}/finder/finder.log").read() if os.path.exists(f"{logdir}/finder/finder.log") else "")
         row.update(found=False, success=False, claimed=False, elapsed_s=float(gave_up.group(1)) if gave_up else max_time, path_len_m=float(gave_up.group(2)) if gave_up else 0.0,
                    dist_label_to_gt=None, dist_robot_to_gt=None, reason="result.json unreadable; reconstructed from the finder log")
         return row
@@ -106,7 +117,9 @@ if __name__ == "__main__":
     ap.add_argument("--record", action="store_true", help="save a video of every search to log/reasonnav_sim/full_eval/<tag>/videos/")
     ap.add_argument("--extra", default="", help="extra launcher flags, e.g. --rn for the ReasonNav vlm_nav stack")
     ap.add_argument("--env", default="", help="extra VAR=value words for the launcher environment")
+    ap.add_argument("--net", action="store_true", help="use the ROS-free two-PC stack (robot gateway + AI PC process over raisin_network)")
     a = ap.parse_args()
+    NET = a.net
     os.makedirs(f"{WS}/log/reasonnav_sim/trials", exist_ok=True)
     out = f"{WS}/log/reasonnav_sim/trials/{a.tag}.jsonl"
     for tgt in a.targets:
@@ -118,6 +131,7 @@ if __name__ == "__main__":
             print(json.dumps({"target": str(tgt), "retry": "stack did not start"}), flush=True)
             row = trial(tgt, a.max_time, a.tol, a.env, vdir, a.extra)
         row["tag"] = a.tag
+        row["net"] = NET
         open(out, "a").write(json.dumps(row) + "\n")
         print(json.dumps({k: row.get(k) for k in ("target", "success", "claimed", "elapsed_s", "path_len_m", "dist_label_to_gt", "dist_robot_to_gt")}), flush=True)
-    run(f"{HERE}/run_reasonnav_sim.sh --kill > /dev/null 2>&1")
+    launcher_kill()

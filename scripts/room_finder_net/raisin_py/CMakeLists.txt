@@ -1,0 +1,20 @@
+# Python binding of raisin_network (no ROS 2). Build against a raisin install tree:
+#   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$RAISIN_WS/install \
+#         -Dpybind11_DIR=$(python3 -c "import pybind11;print(pybind11.get_cmake_dir())")
+#   cmake --build build -j && cp build/raisin_py*.so <somewhere on PYTHONPATH>
+cmake_minimum_required(VERSION 3.16)
+project(raisin_py LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+find_package(raisin_network REQUIRED)
+find_package(pybind11 CONFIG REQUIRED)
+pybind11_add_module(raisin_py raisin_py.cpp)
+target_link_libraries(raisin_py PRIVATE raisin_network)
+if(DEFINED ENV{RAISIN_WS})
+  target_include_directories(raisin_py PRIVATE $ENV{RAISIN_WS}/install/include $ENV{RAISIN_WS}/install)
+else()
+  foreach(p ${CMAKE_PREFIX_PATH})
+    target_include_directories(raisin_py PRIVATE ${p} ${p}/include)
+  endforeach()
+endif()

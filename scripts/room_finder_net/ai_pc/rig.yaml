@@ -1,0 +1,16 @@
+# Camera rig of the robot (AI PC side). base_link = the frame of the robot's /Odometry/base pose (x forward, y left, z up).
+# Defaults = the simulated 3-camera OAK-D Pro W mast (raisin_raibo2 modules/oak_mast): 1.0 m above the top plate.
+# For a real robot measure the mount and edit `mount_xyz` (camera height!) and each camera's yaw.
+topics:
+  odom: /Odometry/base          # robot pose in the navigation ("map") frame
+  rgb: "{cam}/rgb"
+  depth: "{cam}/depth"
+cameras:
+  oak_front: {yaw: 0.0}
+  oak_left:  {yaw: 1.5707963267948966}
+  oak_right: {yaw: -1.5707963267948966}
+mount_xyz: [-0.0579, 0.0, 1.113]   # of the mast in base_link
+sensor_offset: 0.02                # sensor origin ahead of the module origin along each camera's own x
+color: {width: 3840, height: 2880}
+depth: {width: 640, height: 480}
+hfov: 1.885                        # rad, colour and depth share it
