@@ -3917,7 +3917,7 @@ def download_all_from_archive(
     # 'raisin-robot'", which is what the chain below says when it comes up
     # empty, and which names neither the assignment nor why it was unusable.
     unusable_desired_state = None
-    if require_desired_state or not caller_pinned_archive:
+    if not caller_pinned_archive:
         try:
             halted, desired_name, desired_version, desired_manifest = (
                 _resolve_desired_state(platform_str)
