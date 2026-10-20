@@ -3845,6 +3845,7 @@ def download_all_from_archive(
     *,
     transaction: Optional[PackageInstallTransaction] = None,
     source_packages: Optional[set] = None,
+    require_desired_state: bool = False,
 ) -> dict:
     """Download all packages from an archive.
 
@@ -3879,11 +3880,24 @@ def download_all_from_archive(
 
             Default True because taking the report away from a caller with no
             later moment is worse than sending it early to one that has.
+        require_desired_state: Require a usable inline desired-state manifest,
+            with no legacy tag/latest/user-manifest fallback. False preserves
+            existing selection behavior. True conflicts with explicit or ambient
+            archive pins (ValueError before tree repair); missing/unusable desired
+            state raises OtaDesiredStateUnusable and halt remains OtaInstallHalted.
+            Once selected, package validation/download/preparation failures keep
+            their existing empty-dict result; they do not trigger fallback.
+            This restricts selection, not writes: callers needing private
+            preparation still supply a private install path and download cache.
 
     Returns:
         dict mapping package_name to {'version': str, 'dependencies': list}
         for successfully downloaded packages. Empty dict on complete failure.
     """
+    if type(require_desired_state) is not bool:
+        raise ValueError("require_desired_state must be a bool")
+    if require_desired_state and archive_is_pinned(archive_name, archive_version):
+        raise ValueError("desired-state-only selection cannot use archive pins")
     platform_str = _ctx().platform
 
     release = install_tree.release_for(install_base_path)
@@ -3909,6 +3923,8 @@ def download_all_from_archive(
                 _resolve_desired_state(platform_str)
             )
         except OtaDesiredStateUnusable as unusable:
+            if require_desired_state:
+                raise
             # Not fatal on its own. A caller with a user credential can still
             # resolve an archive the ordinary way, and for a person at a
             # terminal that is the right default — they ran a command and want
@@ -3921,6 +3937,14 @@ def download_all_from_archive(
             raise OtaInstallHalted("the OTA server has halted installs for this node")
         if desired_name and desired_version:
             archive_name, archive_version = desired_name, desired_version
+
+    if require_desired_state and not (
+        desired_name and desired_version and desired_manifest
+    ):
+        print(
+            "❌ A usable desired-state manifest is required; refusing legacy selection."
+        )
+        raise OtaDesiredStateUnusable("a usable desired-state manifest is required")
 
     # Selection priority: desired state > archive_version > tag > legacy latest.
     # The desired-state manifest comes first because it is the only route a
