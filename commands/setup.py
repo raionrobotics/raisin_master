@@ -15,7 +15,6 @@ import shutil
 import hashlib
 import platform
 import subprocess
-import stat
 import click
 from pathlib import Path
 from collections import defaultdict
@@ -24,6 +23,8 @@ from typing import List, Dict, Set, Optional
 from commands.repo_dependency_check import guard_src_repo_release_yaml_dependencies
 from commands.sdk_target_config import TargetConfig, TargetConfigError
 from commands.git_commands import find_repos_with_lfs_pointers
+from raisin_ota import runtime_prefix
+from raisin_ota.client import OtaContext
 
 # Import globals, constants, and utilities
 from commands import globals as g
@@ -744,19 +745,6 @@ def _resource_base_packages(project_directory):
     with open(marker, "r", encoding="utf-8") as f:
         bases = [line.strip() for line in f if line.strip() and not line.startswith("#")]
     return [] if os.path.basename(project_directory) in bases else bases
-
-
-def _ensure_scripts_executable(install_dir):
-    scripts_root = Path(g.script_directory) / install_dir / "scripts"
-    if not scripts_root.is_dir():
-        return
-    for script_path in scripts_root.rglob("*.sh"):
-        if script_path.is_file():
-            try:
-                mode = script_path.stat().st_mode
-                script_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-            except OSError:
-                print(f"⚠️  Failed to set executable: {script_path}")
 
 
 def find_interface_files(
@@ -1878,137 +1866,80 @@ def write_data(file_path, data):
             f.write(f"{repo} {commit}\n")
 
 
-def copy_resource(install_dir):
-    target_dir = "resource"
-    for root, dirs, files in os.walk(os.path.join(Path.home(), ".raisin")):
-
-        # Check if the directory contains the target g.architecture subdirectory
-        if target_dir in dirs:
-
-            source_dir = os.path.join(root, target_dir)
-            dest_dir = os.path.join(
-                g.script_directory,
-                install_dir,
-                "resource",
-                os.path.basename(root),
-                target_dir,
-            )
-
-            for item in os.listdir(source_dir):
-                s = os.path.join(source_dir, item)
-                d = os.path.join(dest_dir, item)
-                if os.path.isdir(s):
-                    shutil.copytree(s, d, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(s, d)
-
-
 def deploy_install_packages():
+    """Deploy the installed packages into install/, except those built from src/.
+
+    The copy itself is `raisin_ota.runtime_prefix`, shared with the OTA agent.
+    What stays here is what only a source build needs: leaving out the packages
+    src/ replaces, and collecting each deployed package's generated headers and
+    vcpkg dependencies.
     """
-    Finds and copies packages that match the current system's OS and g.architecture.
-
-    This function scans 'release/install' for packages matching the pattern
-    '{target}/{g.os_type}/{g.architecture}/{build_type}'. It only considers packages
-    where {g.os_type} and {g.architecture} match the current system. The contents
-    of each valid package are copied into a corresponding directory structure at
-    '{g.script_directory}/install/{target}/{g.os_type}/{g.architecture}', merging the
-    contents from different build types (e.g., 'release', 'debug').
-
-    Args:
-        g.script_directory (str): The absolute path to the base directory.
-    """
-
-    repos_to_ignore = set(get_repos_to_ignore())
-
-    # Create a glob pattern to find all build directories for the current system
-    # e.g., .../release/install/*/linux/x86_64/*
-    source_pattern = os.path.join(
-        g.script_directory,
-        "release",
-        "install",
-        "*",
-        g.os_type,
-        g.os_version,
-        g.architecture,
-        "*",
+    workspace = Path(g.script_directory)
+    context = OtaContext(
+        workspace=workspace,
+        os_type=g.os_type,
+        os_version=g.os_version,
+        architecture=g.architecture,
     )
-
-    # Find all source directories that match
-    found_source_dirs = glob.glob(source_pattern)
-
-    if not found_source_dirs:
+    deployed = runtime_prefix.deploy_packages(
+        context,
+        workspace / "install",
+        skip=_packages_built_from_src(workspace, set(get_repos_to_ignore())),
+    )
+    if not deployed:
         print(
             f"🤷 No installed packages found for the current system ({g.os_type}/{g.os_version}/{g.architecture})."
         )
         return
 
     print(
-        f"🚀 Deploying installed packages for system: {g.os_type}/{g.os_version}/{g.architecture}"
+        f"🚀 Deployed installed packages for system: {g.os_type}/{g.os_version}/{g.architecture}"
     )
     deployed_targets = set()
+    for p in deployed:
+        # .../install/{target}/{os}/{os_version}/{arch}/{build_type}
+        target_name = p.parents[3].name
+        if target_name not in deployed_targets:
+            print(f"  -> Deployed target '{target_name}' to: {workspace / 'install'}")
+            deployed_targets.add(target_name)
 
-    try:
-        for source_dir in found_source_dirs:
-            if not os.path.isdir(source_dir):
-                continue
+        release_yaml_path = p / "release.yaml"
+        if release_yaml_path.is_file():
+            try:
+                with open(release_yaml_path, "r") as f:
+                    release_data = yaml.safe_load(f)
+                    # Ensure data was loaded and is a dictionary
+                    if release_data and isinstance(release_data, dict):
+                        # Safely get the list of dependencies, default to empty list
+                        dependencies = release_data.get("vcpkg_dependencies", [])
+                        if dependencies and isinstance(dependencies, list):
+                            # Use set.update() to add all items from the list
+                            g.vcpkg_dependencies.update(dependencies)
+            except yaml.YAMLError as ye:
+                print(f"    - ⚠️ Warning: Could not parse {release_yaml_path}: {ye}")
+            except IOError as ioe:
+                print(f"    - ⚠️ Warning: Could not read {release_yaml_path}: {ioe}")
 
-            # Use pathlib to easily get the 'target' name from the path
-            # The path is .../install/{target}/{os}/{g.os_version}/{arch}/{build_type}
-            p = Path(source_dir)
-            target_name = p.parents[3].name
-            local_src_dir = Path(g.script_directory) / "src" / target_name
-            if local_src_dir.is_dir():
-                repo_name = get_repo_name_from_path(local_src_dir) or target_name
-                is_ignored = (
-                    target_name in repos_to_ignore or repo_name in repos_to_ignore
-                )
-                if not is_ignored:
-                    continue
+        if (p / "generated").is_dir():
+            shutil.copytree(p / "generated", g.generated_dir, dirs_exist_ok=True)
 
-            final_dest_dir = os.path.join(g.script_directory, "install")
-            generated_dest_dir = g.generated_dir
+    print(f"\n✅ Successfully deployed {deployed_targets} target(s).")
 
-            # Print the target-specific message only once
-            if target_name not in deployed_targets:
-                print(f"  -> Deploying target '{target_name}' to: {final_dest_dir}")
-                deployed_targets.add(target_name)
 
-            release_yaml_path = p / "release.yaml"
-            if release_yaml_path.is_file():
-                try:
-                    with open(release_yaml_path, "r") as f:
-                        release_data = yaml.safe_load(f)
-                        # Ensure data was loaded and is a dictionary
-                        if release_data and isinstance(release_data, dict):
-                            # Safely get the list of dependencies, default to empty list
-                            dependencies = release_data.get("vcpkg_dependencies", [])
-                            if dependencies and isinstance(dependencies, list):
-                                # Use set.update() to add all items from the list
-                                g.vcpkg_dependencies.update(dependencies)
-                except yaml.YAMLError as ye:
-                    print(f"    - ⚠️ Warning: Could not parse {release_yaml_path}: {ye}")
-                except IOError as ioe:
-                    print(f"    - ⚠️ Warning: Could not read {release_yaml_path}: {ioe}")
-
-            # Copy contents, merging files from different build_types
-            shutil.copytree(source_dir, final_dest_dir, dirs_exist_ok=True)
-
-            # Make all copied files executable
-            bin_path = os.path.join(final_dest_dir, "bin")
-            if os.path.exists(bin_path):
-                for root, dirs, files in os.walk(bin_path):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        os.chmod(file_path, 0o755)
-
-            if (p / "generated").is_dir():
-                shutil.copytree(p / "generated", generated_dest_dir, dirs_exist_ok=True)
-
-        if deployed_targets:
-            print(f"\n✅ Successfully deployed {deployed_targets} target(s).")
-
-    except Exception as e:
-        print(f"❌ An error occurred during deployment: {e}")
+def _packages_built_from_src(workspace: Path, repos_to_ignore: Set[str]) -> Set[str]:
+    """Installed packages that src/ holds a checkout of, unless that repo is ignored."""
+    installed = workspace / "release" / "install"
+    if not installed.is_dir():
+        return set()
+    built = set()
+    for target in installed.iterdir():
+        local_src_dir = workspace / "src" / target.name
+        if not local_src_dir.is_dir():
+            continue
+        repo_name = get_repo_name_from_path(local_src_dir) or target.name
+        if target.name not in repos_to_ignore and repo_name not in repos_to_ignore:
+            built.add(target.name)
+    return built
 
 
 def _release_archive_dir(target_name: str) -> Optional[Path]:
@@ -2397,7 +2328,7 @@ def setup(
         project_dirs, install_dir, packages_to_ignore, repos_to_ignore,
         set(target.packages) if cross else packages_allowed,
     )
-    _ensure_scripts_executable(install_dir)
+    runtime_prefix.make_scripts_executable(Path(g.script_directory) / install_dir)
 
     # Handle .action files
     for action_file in action_files:
@@ -2422,7 +2353,7 @@ def setup(
         update_cmake_file(project_directories, build_dir, bool(build_test_enabled))
 
     if package_name == "" and not cross:  # this means we are not in the release mode
-        copy_resource(install_dir)
+        runtime_prefix.copy_device_resources(Path(g.script_directory) / install_dir, Path.home())
 
     if cross:
         copy_extra_headers(target)
