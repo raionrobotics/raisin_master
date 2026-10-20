@@ -43,7 +43,7 @@ def test_guard_stops_and_names_the_repository_holding_pointers(capsys):
     output = capsys.readouterr().out
     assert "raisin_raibo2: 1 file(s) [resource/mesh/TORSO.STL]" in output
     assert "git lfs install --local && git lfs fetch && git lfs checkout" in output
-    assert "install_system_deps.sh" in output
+    assert "./raisin --install" in output
 
 
 def test_guard_stops_when_a_repository_could_not_be_scanned(capsys):
