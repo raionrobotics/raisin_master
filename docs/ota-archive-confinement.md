@@ -86,6 +86,22 @@ also use disposable loopback HTTP fixtures; no production/device API was used.
 Final `archive_safety.py` SHA256:
 `b8a3d85f42eabc954a614762fb77a0ef886c419d22c0d1f178dcc517a7802594`.
 
+### Publication self-review, 2026-10-20
+
+The extraction destination itself being a symlink/reparse point is deliberately
+refused, not silently resolved to another destination. Two filesystem regression
+cases verify that builder extraction and direct mode restoration refuse such a
+root without changing its target's bytes or permissions. This does not claim
+validation of every ancestor above a caller-provided root; the stable,
+caller-owned prefix precondition remains required.
+
+Unix-only FIFO and effective-UID test fixtures now explicitly identify missing
+platform facilities instead of raising AttributeError. Simulated missing-facility
+cases reproduced two failures before the guards were added. The write-only-file
+fixture remains POSIX-only; neither these guards nor the Linux simulations are
+an actual Windows acceptance result. Linux coverage/skip conditions for the
+real filesystem cases remain active.
+
 The repository's shared pre-commit hook initially found no local configuration
 in this new worktree. The original checkout's excluded config/baseline were
 copied byte-for-byte locally, not changed or staged. Existing checks remained

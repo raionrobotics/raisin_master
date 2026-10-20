@@ -116,6 +116,43 @@ def test_direct_mode_restoration_validates_all_names_before_first_chmod(tmp_path
     assert stat.S_IMODE(victim.stat().st_mode) == 0o700
 
 
+@pytest.mark.parametrize("caller", ["build-machine", "restore-modes"])
+def test_destination_symlink_is_refused_not_resolved(tmp_path, caller):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "tool"
+    victim.write_bytes(b"outside")
+    victim.chmod(0o700)
+    into = tmp_path / "into"
+    into.symlink_to(outside, target_is_directory=True)
+    path = tmp_path / "package.zip"
+    package(path, [("tool", b"must not replace outside", 0o100600)])
+    if caller == "build-machine":
+        with pytest.raises(build_machine.FetchRefused):
+            build_machine._unpack(path, into)
+    else:
+        with zipfile.ZipFile(path) as contents:
+            with pytest.raises(zipfile.BadZipFile):
+                client.restore_modes(contents, into)
+    assert into.is_symlink()
+    assert victim.read_bytes() == b"outside"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("missing", ["mkfifo", "geteuid"])
+def test_posix_only_fixtures_skip_when_operation_is_unavailable(
+    tmp_path, monkeypatch, missing
+):
+    monkeypatch.delattr(os, missing, raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        if missing == "mkfifo":
+            test_builder_preflight_rejects_special_or_incompatible_existing_nodes(
+                tmp_path, "fifo"
+            )
+        else:
+            test_owned_write_only_builder_file_regains_executable_mode(tmp_path)
+
+
 def test_normalized_duplicate_file_names_are_refused_before_extraction(tmp_path):
     into = tmp_path / "into"
     into.mkdir()
@@ -156,6 +193,8 @@ def test_builder_preflight_rejects_special_or_incompatible_existing_nodes(
     else:
         (into / "bin").mkdir()
         if kind == "fifo":
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("FIFO nodes are unavailable on this platform")
             os.mkfifo(into / "bin" / "tool")
         else:
             (into / "bin" / "tool").mkdir()
@@ -195,7 +234,7 @@ def test_mode_preflight_io_error_warns_and_other_files_still_restore(
 
 
 def write_only_fixture(root):
-    assert os.geteuid() != 0
+    assert os.name == "posix" and os.geteuid() != 0
     into = root / "into"
     into.mkdir()
     target = into / "tool"
@@ -209,6 +248,8 @@ def write_only_fixture(root):
 
 
 def test_owned_write_only_builder_file_regains_executable_mode(tmp_path):
+    if not hasattr(os, "geteuid"):
+        pytest.skip("Requires POSIX identity and file permission semantics")
     if os.geteuid() != 0:
         write_only_fixture(tmp_path)
     else:
