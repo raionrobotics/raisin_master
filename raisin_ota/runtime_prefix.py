@@ -92,26 +92,17 @@ def copy_device_resources(prefix: Path, home: Path) -> None:
 
     `.raisin/<name>/resource` holds the files changed on this one machine
     (raisin_robot_properties/README.md, "Shared resources"), so it goes in
-    after the packages and replaces their defaults. A name no package ships a
-    resource for still gets its folder. `home` is passed rather than read
-    because the agent's own HOME is not the workspace owner's.
+    after the packages and replaces their defaults. Only the first level names
+    a package: a `resource` folder inside an override is part of it, not
+    another package. A name no package ships a resource for still gets its
+    folder. `home` is passed rather than read because the agent's own HOME is
+    not the workspace owner's.
     """
-    target_dir = "resource"
-    for root, dirs, files in os.walk(Path(home) / ".raisin"):
-        if target_dir in dirs:
-            source_dir = os.path.join(root, target_dir)
-            dest_dir = os.path.join(
-                prefix, "resource", os.path.basename(root), target_dir
-            )
-
-            os.makedirs(dest_dir, exist_ok=True)
-            for item in os.listdir(source_dir):
-                s = os.path.join(source_dir, item)
-                d = os.path.join(dest_dir, item)
-                if os.path.isdir(s):
-                    shutil.copytree(s, d, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(s, d)
+    for source_dir in sorted((Path(home) / ".raisin").glob("*/resource")):
+        if not source_dir.is_dir():
+            continue
+        dest_dir = Path(prefix) / "resource" / source_dir.parent.name / "resource"
+        shutil.copytree(source_dir, dest_dir, dirs_exist_ok=True)
 
 
 def assemble(context: OtaContext, home: Path) -> List[Path]:

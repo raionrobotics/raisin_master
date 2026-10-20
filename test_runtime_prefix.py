@@ -175,6 +175,26 @@ class TestCopyDeviceResources(RuntimePrefixTestCase):
             self.read("resource/joy/resource/params.yaml"), "for this device"
         )
 
+    def test_a_resource_folder_inside_an_override_is_not_a_package(self):
+        # ~/.raisin/<pkg>/resource/<path>: only the first level names a package.
+        self.a_device_resource("raibo2", {"mesh/resource/a.stl": "mesh"})
+
+        runtime_prefix.copy_device_resources(self.prefix, self.home)
+
+        self.assertEqual(
+            self.read("resource/raibo2/resource/mesh/resource/a.stl"), "mesh"
+        )
+        self.assertFalse((self.prefix / "resource" / "mesh").exists())
+
+    def test_a_resource_folder_deeper_than_a_package_is_not_read(self):
+        nested = self.home / ".raisin" / "backup" / "raibo2" / "resource"
+        nested.mkdir(parents=True)
+        (nested / "params.yaml").write_text("old", encoding="utf-8")
+
+        runtime_prefix.copy_device_resources(self.prefix, self.home)
+
+        self.assertFalse((self.prefix / "resource" / "raibo2").exists())
+
 
 class TestAssemble(RuntimePrefixTestCase):
     def test_a_leftover_src_changes_nothing(self):
