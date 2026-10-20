@@ -53,7 +53,10 @@ else
     if ! ${SUDO} apt-get update; then
         echo "WARNING: apt-get update reported errors (see above). Continuing with the package lists apt has." >&2
     fi
-    ${SUDO} apt-get install -y "${missing[@]}"
+    # apt runs package scripts on a pseudo-terminal, so a debconf question (tzdata asks for the time zone)
+    # waits for an answer even without a user, as in CI. noninteractive takes the defaults (tzdata: UTC).
+    # Passed through env because sudo drops the caller's environment.
+    ${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
 fi
 
 # vcstool provides `vcs`, which src/setup.sh imports the repositories with. On 24.04 it comes from
