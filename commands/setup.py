@@ -2290,7 +2290,7 @@ def guard_src_repo_lfs_assets(repos=None):
 
     print("\u274c Error: Git LFS assets are not downloaded; they are still pointer files.")
     _print_lfs_repo_lines(affected, unreadable)
-    print("  git-lfs comes with './raisin --install' (deps/apt.build.txt).")
+    print("  git-lfs comes with 'sudo bash install_system_deps.sh'.")
     print("  Once it is installed, run in each repository above:")
     print("    git lfs install --local && git lfs fetch && git lfs checkout")
     sys.exit(1)

@@ -56,7 +56,7 @@ Run the install command to set up the RAISIN command-line tool. This:
 
 After installation, **restart your terminal** (or run `source ~/.bashrc`) to enable the `raisin` command.
 
-> **Note:** The installer prompts for sudo only when a build tool is missing. To install them yourself, install the packages listed in `deps/apt.build*.txt`. On systems other than Ubuntu, use the dev container.
+> **Note:** The installer prompts for sudo only when a build tool is missing. To install them separately, run `bash install_system_deps.sh`. On systems other than Ubuntu, use the dev container.
 
 ### 2. Project Configuration
 

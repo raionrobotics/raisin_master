@@ -250,49 +250,14 @@ if [[ "${1:-}" == "--install" ]]; then
   echo "Installed: ${install_path}"
   echo "Environment name: ${install_env_name}"
 
-  # root installs directly (a minimal container may have no sudo); everyone else goes through sudo,
-  # as the packages' install_dependencies.sh does.
-  SUDO=""
-  if [[ ${EUID} -ne 0 ]]; then
-    SUDO="sudo"
-  fi
-
-  # Install the build tools declared in deps/apt.build.txt (and deps/apt.build.ubuntu-<version>.txt)
-  # that are not installed yet; the venv packages among them are needed just below. The raisin-base
-  # build image already holds all of them, so in its containers apt is not called at all.
-  # Only Ubuntu (apt) is supported; on other systems install them yourself or use the dev container.
-  raisin_install_build_tools() {
-    local ubuntu_version lists=() names=() missing=() words list pkg
-    ubuntu_version="$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-}")"
-    lists=("${SCRIPT_DIR}/deps/apt.build.txt" "${SCRIPT_DIR}/deps/apt.build.ubuntu-${ubuntu_version}.txt")
-    for list in "${lists[@]}"; do
-      [[ -f "${list}" ]] || continue
-      # read -ra splits on whitespace without expanding globs; awk drops comments.
-      while read -ra words; do
-        names+=("${words[@]}")
-      done < <(awk '{ sub(/#.*/, ""); print }' "${list}")
-    done
-    for pkg in "${names[@]}"; do
-      if [[ "$(dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null)" != "install ok installed" ]]; then
-        missing+=("${pkg}")
-      fi
-    done
-    if [[ ${#missing[@]} -eq 0 ]]; then
-      echo "✅ Build tools (deps/apt.build.txt) are already installed."
-      return 0
-    fi
-    echo "📦 Installing build tools (deps/apt.build.txt): ${missing[*]}"
-    if ! { ${SUDO} apt-get update && ${SUDO} apt-get install -y "${missing[@]}"; }; then
-      echo "⚠️  Failed to install build tools. You can install them manually:"
-      echo "   sudo apt update && sudo apt install ${missing[*]}"
-    fi
-  }
-
+  # Install the build tools in deps/apt.build*.txt that are missing; the venv packages among them
+  # are needed just below. The script calls sudo itself, only when something is missing.
   echo ""
-  if command -v apt-get >/dev/null 2>&1; then
-    raisin_install_build_tools
-  else
-    echo "⚠️  apt-get not found. Install the tools in ${SCRIPT_DIR}/deps/apt.build.txt yourself, or use the dev container."
+  echo "📦 Installing system dependencies..."
+  sys_deps_script="${SCRIPT_DIR}/install_system_deps.sh"
+  if ! bash "${sys_deps_script}"; then
+    echo "⚠️  Some system dependencies may not have installed correctly."
+    echo "   You can re-run: bash ${sys_deps_script}"
   fi
 
   # Create the virtual environment immediately
@@ -304,23 +269,6 @@ if [[ "${1:-}" == "--install" ]]; then
   fi
   echo ""
   echo "✅ Virtual environment created: ${install_env_path}"
-
-  # vcstool provides `vcs`, which src/setup.sh imports the repositories with. On 24.04 it comes from
-  # apt (deps/apt.build.ubuntu-24.04.txt) above. Workaround for 22.04 only, whose archive does not have
-  # it: install it into the system Python with pip, unpinned (src/setup.sh runs outside the virtual
-  # environment). Remove this block when 22.04 support ends. 22.04's pip does not know
-  # --break-system-packages, hence the second try.
-  echo ""
-  if command -v vcs >/dev/null 2>&1; then
-    echo "✅ vcstool is already installed."
-  else
-    echo "📦 Installing vcstool..."
-    if ! ${SUDO} python3 -m pip install --break-system-packages vcstool 2>/dev/null \
-        && ! ${SUDO} python3 -m pip install vcstool; then
-      echo "⚠️  Failed to install vcstool. You can install it manually:"
-      echo "   sudo python3 -m pip install --break-system-packages vcstool"
-    fi
-  fi
 
   # Add shell function for auto-activation
   echo ""
