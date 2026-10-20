@@ -2817,6 +2817,7 @@ def restore_modes(archive: zipfile.ZipFile, into: Path) -> None:
 
 def _extract_and_read_deps(
     download_file: Path,
+    staging: Path,
     install_dir: Path,
     package_name: str,
     version: str,
@@ -2825,10 +2826,11 @@ def _extract_and_read_deps(
 ) -> Optional[dict]:
     """Extract downloaded package and read dependencies.
 
+    `install_dir` is the package's place under the staged tree `staging`.
     Returns dict with 'version' and 'dependencies' on success, None on failure.
     """
     # Remove, never overwrite: the staged tree shares inodes with the live one.
-    install_tree.replace_package_dir(install_dir)
+    install_tree.replace_package_dir(staging, install_dir)
 
     try:
         with zipfile.ZipFile(download_file, "r") as zip_ref:
@@ -3604,9 +3606,8 @@ def _download_package(
         download_file, download_file.stat().st_size
     ).hexdigest()
 
-    install_dir = _ctx().package_dir(
-        transaction.stage(actual_version), package_name, build_type
-    )
+    staging = transaction.stage(actual_version)
+    install_dir = _ctx().package_dir(staging, package_name, build_type)
 
     install_metadata = _build_archive_install_metadata(
         package_name=package_name,
@@ -3626,6 +3627,7 @@ def _download_package(
 
     result = _extract_and_read_deps(
         download_file,
+        staging,
         install_dir,
         package_name,
         version,
@@ -4081,6 +4083,7 @@ def download_all_from_archive(
 
         result = _extract_and_read_deps(
             download_file,
+            staging,
             install_dir,
             name,
             version,
@@ -4456,7 +4459,8 @@ def _download_package_at_timestamp(
                 f"using ZIP release.yaml version '{version}'."
             )
 
-        install_dir = _ctx().package_dir(transaction.stage(), package_name, build_type)
+        staging = transaction.stage()
+        install_dir = _ctx().package_dir(staging, package_name, build_type)
 
         install_metadata = {
             "schemaVersion": 1,
@@ -4478,6 +4482,7 @@ def _download_package_at_timestamp(
 
         result = _extract_and_read_deps(
             download_file,
+            staging,
             install_dir,
             package_name,
             version,

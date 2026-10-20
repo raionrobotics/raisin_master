@@ -838,7 +838,7 @@ class TestExtractedModes(unittest.TestCase):
                 info.external_attr = mode << 16
                 zf.writestr(info, content)
         return ota._extract_and_read_deps(
-            self.download, self.install_dir, "pkg1", "1.0.0"
+            self.download, Path(self._tmp.name), self.install_dir, "pkg1", "1.0.0"
         )
 
     def test_an_executable_stays_executable(self):
@@ -875,7 +875,7 @@ class TestExtractedModes(unittest.TestCase):
         with zipfile.ZipFile(self.download, "w") as zf:
             zf.writestr("lib/plain.so", "x")  # no external_attr
         result = ota._extract_and_read_deps(
-            self.download, self.install_dir, "pkg1", "1.0.0"
+            self.download, Path(self._tmp.name), self.install_dir, "pkg1", "1.0.0"
         )
 
         self.assertIsNotNone(result)
@@ -884,31 +884,55 @@ class TestExtractedModes(unittest.TestCase):
 
 class TestExtractReplacesWhatIsThere(unittest.TestCase):
     """Extraction goes through `install_tree.replace_package_dir`, so a symlink
-    where the package goes does not end the install (it made `rmtree` raise)."""
+    where the package goes does not end the install (it made `rmtree` raise),
+    and a symlink above it is not followed (it made `rmtree` empty the target)."""
+
+    PKG = Path("pkg1") / "linux" / "22.04" / "x86_64" / "release"
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.download = Path(self._tmp.name) / "pkg.zip"
-        self.install_dir = Path(self._tmp.name) / "installed"
+        self.staging = Path(self._tmp.name) / "staging"
+        self.install_dir = self.staging / self.PKG
+        self.other = Path(self._tmp.name) / "elsewhere"
+        self.other.mkdir()
+        (self.other / "kept.txt").write_text("keep me", encoding="utf-8")
         with zipfile.ZipFile(self.download, "w") as zf:
             zf.writestr("release.yaml", "version: 1.0.0\n")
 
-    def test_a_symlink_where_the_package_goes_is_replaced(self):
-        other = Path(self._tmp.name) / "elsewhere"
-        other.mkdir()
-        (other / "kept.txt").write_text("keep me", encoding="utf-8")
-        self.install_dir.symlink_to(other, target_is_directory=True)
-
-        result = ota._extract_and_read_deps(
-            self.download, self.install_dir, "pkg1", "1.0.0"
+    def _extract(self):
+        return ota._extract_and_read_deps(
+            self.download, self.staging, self.install_dir, "pkg1", "1.0.0"
         )
+
+    def test_a_symlink_where_the_package_goes_is_replaced(self):
+        self.install_dir.parent.mkdir(parents=True)
+        self.install_dir.symlink_to(self.other, target_is_directory=True)
+
+        result = self._extract()
 
         self.assertIsNotNone(result)
         self.assertFalse(self.install_dir.is_symlink())
         self.assertTrue((self.install_dir / "release.yaml").is_file())
-        self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
-        self.assertFalse((other / "release.yaml").exists())
+        self.assertEqual((self.other / "kept.txt").read_text(encoding="utf-8"), "keep me")
+        self.assertFalse((self.other / "release.yaml").exists())
+
+    def test_a_symlink_at_the_package_directory_is_replaced_and_not_followed(self):
+        """`pkg1 -> elsewhere`: the path's end is a real directory behind the link."""
+        build = self.other / "linux" / "22.04" / "x86_64" / "release"
+        build.mkdir(parents=True)
+        (build / "user_build.txt").write_text("theirs", encoding="utf-8")
+        self.staging.mkdir()
+        (self.staging / "pkg1").symlink_to(self.other, target_is_directory=True)
+
+        result = self._extract()
+
+        self.assertIsNotNone(result)
+        self.assertFalse((self.staging / "pkg1").is_symlink())
+        self.assertTrue((self.install_dir / "release.yaml").is_file())
+        self.assertEqual((build / "user_build.txt").read_text(encoding="utf-8"), "theirs")
+        self.assertFalse((build / "release.yaml").exists())
 
 
 class TestMalformedReleaseYaml(unittest.TestCase):
@@ -926,7 +950,7 @@ class TestMalformedReleaseYaml(unittest.TestCase):
         with zipfile.ZipFile(self.download, "w") as zf:
             zf.writestr("release.yaml", content)
         return ota._extract_and_read_deps(
-            self.download, self.install_dir, "pkg1", "1.0.0"
+            self.download, Path(self._tmp.name), self.install_dir, "pkg1", "1.0.0"
         )
 
     def test_scalar_release_yaml_does_not_crash_the_install(self):
@@ -1296,7 +1320,7 @@ class TestASessionDoesNotOutliveTheArchiveItWasFor(unittest.TestCase):
             }
         ]
 
-        def extract(download_file, install_dir, package_name, version, **kw):
+        def extract(download_file, staging, install_dir, package_name, version, **kw):
             install_dir.mkdir(parents=True, exist_ok=True)
             (install_dir / "release.yaml").write_text("version: 0.2.0\n")
             return {"version": version, "dependencies": []}
@@ -2113,7 +2137,7 @@ class TestInstallEventEmission(unittest.TestCase):
         return ota._read_install_event_queue()
 
     @staticmethod
-    def _real_extract(download_file, install_dir, package_name, version, **kw):
+    def _real_extract(download_file, staging, install_dir, package_name, version, **kw):
         install_dir.mkdir(parents=True, exist_ok=True)
         (install_dir / "release.yaml").write_text(
             f"version: {version}\n", encoding="utf-8"
@@ -2302,7 +2326,7 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
     def _extract_into(self, staging_names):
         """Stand in for extraction: write each package into the staged tree."""
 
-        def fake(download_file, install_dir, package_name, version, **kw):
+        def fake(download_file, staging, install_dir, package_name, version, **kw):
             if package_name not in staging_names:
                 return None
             install_dir.mkdir(parents=True, exist_ok=True)
@@ -2465,7 +2489,7 @@ class TestTransactionalArchiveInstall(unittest.TestCase):
     def _run_with_hollow_extract(self, version):
         """Extraction claims success but writes nothing — a broken commit."""
 
-        def hollow(download_file, install_dir, package_name, version_, **kw):
+        def hollow(download_file, staging, install_dir, package_name, version_, **kw):
             # Real extraction clears the directory before unpacking; this one
             # clears it and then writes nothing, while claiming success.
             if install_dir.exists():
@@ -4246,7 +4270,7 @@ class TestDownload(unittest.TestCase):
             (packages, "arch-1", "2026.1.0"),
         )
 
-        def extract(download_file, install_dir, package_name, version, **kw):
+        def extract(download_file, staging, install_dir, package_name, version, **kw):
             install_dir.mkdir(parents=True, exist_ok=True)
             (install_dir / "release.yaml").write_text("version: 0.1.0\n")
             return {"version": version, "dependencies": []}
@@ -5631,7 +5655,7 @@ class TestAPackageDroppedFromAnArchiveGoesAway(unittest.TestCase):
             for n in package_names
         ]
 
-        def extract(download_file, install_dir, package_name, version, **kw):
+        def extract(download_file, staging, install_dir, package_name, version, **kw):
             install_dir.mkdir(parents=True, exist_ok=True)
             (install_dir / "release.yaml").write_text("version: 0.2.0\n")
             return {"version": version, "dependencies": []}

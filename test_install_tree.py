@@ -40,7 +40,7 @@ class InstallTreeTestCase(unittest.TestCase):
 
         Editing in place would mutate the hardlink-shared previous version.
         """
-        d = it.replace_package_dir(base / name / "linux" / "22.04" / "x86_64" / "release")
+        d = it.replace_package_dir(base, base / name / "linux" / "22.04" / "x86_64" / "release")
         (d / "release.yaml").write_text(f"version: {marker}\n", encoding="utf-8")
         return d
 
@@ -126,9 +126,10 @@ class TestReplacePackageDir(InstallTreeTestCase):
         return other
 
     def test_an_absent_path_becomes_an_empty_directory(self):
-        target = self.release / "staging" / self.PKG
+        staging = self.release / "staging"
+        target = staging / self.PKG
 
-        self.assertEqual(it.replace_package_dir(target), target)
+        self.assertEqual(it.replace_package_dir(staging, target), target)
         self.assertTrue(target.is_dir())
         self.assertEqual(list(target.iterdir()), [])
 
@@ -137,7 +138,7 @@ class TestReplacePackageDir(InstallTreeTestCase):
         it.commit_version(self.release, "1.0.0")
         staging = it.stage_version(self.release, "2.0.0")
 
-        it.replace_package_dir(staging / self.PKG)
+        it.replace_package_dir(staging, staging / self.PKG)
 
         self.assertEqual(list((staging / self.PKG).iterdir()), [])
         live = self.release / "install" / self.PKG / "release.yaml"
@@ -145,11 +146,12 @@ class TestReplacePackageDir(InstallTreeTestCase):
 
     def test_a_symlink_is_replaced_and_what_it_pointed_at_is_left_alone(self):
         other = self._elsewhere()
-        target = self.release / "staging" / self.PKG
+        staging = self.release / "staging"
+        target = staging / self.PKG
         target.parent.mkdir(parents=True)
         target.symlink_to(other, target_is_directory=True)
 
-        it.replace_package_dir(target)
+        it.replace_package_dir(staging, target)
 
         self.assertFalse(target.is_symlink())
         self.assertTrue(target.is_dir())
@@ -157,21 +159,23 @@ class TestReplacePackageDir(InstallTreeTestCase):
         self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
 
     def test_a_dangling_symlink_is_replaced(self):
-        target = self.release / "staging" / self.PKG
+        staging = self.release / "staging"
+        target = staging / self.PKG
         target.parent.mkdir(parents=True)
         target.symlink_to(self.release.parent / "gone", target_is_directory=True)
 
-        it.replace_package_dir(target)
+        it.replace_package_dir(staging, target)
 
         self.assertFalse(target.is_symlink())
         self.assertTrue(target.is_dir())
 
     def test_a_file_is_replaced(self):
-        target = self.release / "staging" / self.PKG
+        staging = self.release / "staging"
+        target = staging / self.PKG
         target.parent.mkdir(parents=True)
         target.write_text("not a directory", encoding="utf-8")
 
-        it.replace_package_dir(target)
+        it.replace_package_dir(staging, target)
 
         self.assertTrue(target.is_dir())
         self.assertEqual(list(target.iterdir()), [])
@@ -193,12 +197,62 @@ class TestReplacePackageDir(InstallTreeTestCase):
         staging = it.stage_version(self.release, "2.0.0")
         self.assertTrue((staging / self.PKG).is_symlink())  # what the clone does
 
-        it.replace_package_dir(staging / self.PKG)
+        it.replace_package_dir(staging, staging / self.PKG)
 
         self.assertFalse((staging / self.PKG).is_symlink())
         self.assertTrue((staging / self.PKG).is_dir())
         self.assertTrue(live_pkg.is_symlink())
         self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
+
+    def _elsewhere_with_a_build(self):
+        """Somebody's own build of pkg1: the same layout a package has."""
+        other = self._elsewhere()
+        build = other / "linux" / "22.04" / "x86_64" / "release"
+        build.mkdir(parents=True)
+        (build / "user_build.txt").write_text("theirs", encoding="utf-8")
+        return other, build
+
+    def test_a_link_at_the_package_directory_is_replaced_and_the_build_behind_it_is_kept(self):
+        """The link is the package directory itself, not its last component.
+
+        The path's end is then a real directory -- behind the link -- and
+        `rmtree` there would empty somebody's build without a word.
+        """
+        other, build = self._elsewhere_with_a_build()
+        staging = self.release / "staging"
+        staging.mkdir(parents=True)
+        (staging / "pkg1").symlink_to(other, target_is_directory=True)
+
+        it.replace_package_dir(staging, staging / self.PKG)
+
+        self.assertFalse((staging / "pkg1").is_symlink())
+        self.assertTrue((staging / self.PKG).is_dir())
+        self.assertEqual(list((staging / self.PKG).iterdir()), [])
+        self.assertEqual((build / "user_build.txt").read_text(encoding="utf-8"), "theirs")
+
+    def test_a_package_directory_linked_in_the_live_tree_becomes_a_directory_in_the_staged_one(self):
+        """Same as above, arriving the way it does on a robot: by the clone."""
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "old")
+        it.commit_version(self.release, "1.0.0")
+        other, build = self._elsewhere_with_a_build()
+        live_pkg = self.release / "versions" / "0001-1.0.0" / "pkg1"
+        shutil.rmtree(live_pkg)
+        live_pkg.symlink_to(other, target_is_directory=True)
+
+        staging = it.stage_version(self.release, "2.0.0")
+        self.assertTrue((staging / "pkg1").is_symlink())  # what the clone does
+
+        it.replace_package_dir(staging, staging / self.PKG)
+
+        self.assertFalse((staging / "pkg1").is_symlink())
+        self.assertEqual(list((staging / self.PKG).iterdir()), [])
+        self.assertTrue(live_pkg.is_symlink())
+        self.assertEqual((build / "user_build.txt").read_text(encoding="utf-8"), "theirs")
+
+    def test_a_target_outside_the_staged_tree_is_refused(self):
+        """The walk stops at `staging`; a target not under it is a caller bug."""
+        with self.assertRaises(ValueError):
+            it.replace_package_dir(self.release / "staging", self.release / "other" / self.PKG)
 
 
 class TestStageAndCommit(InstallTreeTestCase):

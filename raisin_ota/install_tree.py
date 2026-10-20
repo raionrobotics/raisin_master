@@ -487,7 +487,7 @@ def _is_staging(version_dir: Path) -> bool:
     return (version_dir / _STAGING_MARKER).exists()
 
 
-def replace_package_dir(target: Path) -> Path:
+def replace_package_dir(staging: Path, target: Path) -> Path:
     """Clear a package's path inside a staged tree; return it as an empty directory.
 
     A staged tree is hardlink-cloned from the live one, so a file here shares
@@ -495,20 +495,29 @@ def replace_package_dir(target: Path) -> Path:
     would edit that version too. Removing first breaks the link. Anything that
     writes a package into a staged tree goes through here.
 
-    Whatever is at the path goes: a directory, a file, or a symlink -- removed
-    as the link and never followed, so what it points at is left alone. The
-    clone keeps symlinks as symlinks, so a link somebody put in the live tree
-    in a package's place arrives in every staged tree. `rmtree` refuses a
-    link, and refused on every attempt, which left that robot unable to
-    install anything until a person found the link. Replaced instead: the new
-    version gets the package the archive names, and the version with the link
-    stays as it was, for a rollback to restore. A link at `release/install`
-    is a different matter -- see `ensure_tree`, which leaves one it did not
-    make alone, because that one decides what runs.
+    Whatever is on the way from `staging` down to `target` goes. A directory
+    at the end is removed. A file or a symlink met at any depth -- the package
+    directory itself, or the build-type directory at the end -- is unlinked
+    and never followed, so what it points at is left alone. The clone keeps
+    symlinks as symlinks, so a link somebody put in the live tree in a
+    package's place arrives in every staged tree, at whatever depth they put
+    it. Removing only the end handled neither: `rmtree` refused a link there,
+    and refused on every attempt, which left that robot unable to install
+    anything until a person found the link; a link higher up it followed, and
+    emptied the directory behind it. Replaced instead: the new version gets
+    the package the archive names, and the version with the link stays as it
+    was, for a rollback to restore. A link at `release/install` is a different
+    matter -- see `ensure_tree`, which leaves one it did not make alone,
+    because that one decides what runs. `staging` is this module's own
+    directory and is not checked.
     """
-    if target.is_symlink() or (target.exists() and not target.is_dir()):
-        target.unlink()
-    elif target.is_dir():
+    path = staging
+    for part in target.relative_to(staging).parts:
+        path = path / part
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            path.unlink()
+            break
+    if target.is_dir():
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
     return target
