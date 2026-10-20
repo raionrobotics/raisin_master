@@ -250,15 +250,14 @@ if [[ "${1:-}" == "--install" ]]; then
   echo "Installed: ${install_path}"
   echo "Environment name: ${install_env_name}"
 
-  # On Debian-based systems, install the Python virtual environment packages
-  # needed to create the environment below.
-  if command -v apt-get >/dev/null 2>&1; then
-    echo ""
-    echo "📦 Installing Python virtual environment packages..."
-    if ! { sudo apt-get update && sudo apt-get install -y python3-venv python3-virtualenv python3-pip; }; then
-      echo "⚠️  Failed to install Python venv packages. You can install them manually:"
-      echo "   sudo apt update && sudo apt install python3-venv python3-virtualenv python3-pip"
-    fi
+  # Install the build tools in deps/apt.build*.txt that are missing; the venv packages among them
+  # are needed just below. The script calls sudo itself, only when something is missing.
+  echo ""
+  echo "📦 Installing system dependencies..."
+  sys_deps_script="${SCRIPT_DIR}/install_system_deps.sh"
+  if ! bash "${sys_deps_script}"; then
+    echo "⚠️  Some system dependencies may not have installed correctly."
+    echo "   You can re-run: bash ${sys_deps_script}"
   fi
 
   # Create the virtual environment immediately
@@ -270,19 +269,6 @@ if [[ "${1:-}" == "--install" ]]; then
   fi
   echo ""
   echo "✅ Virtual environment created: ${install_env_path}"
-
-  # Install system dependencies (cmake, ninja, etc.)
-  echo ""
-  echo "📦 Installing system dependencies..."
-  sys_deps_script="${SCRIPT_DIR}/install_system_deps.sh"
-  if [[ -f "${sys_deps_script}" ]]; then
-    if ! sudo bash "${sys_deps_script}"; then
-      echo "⚠️  Some system dependencies may not have installed correctly."
-      echo "   You can re-run: sudo bash ${sys_deps_script}"
-    fi
-  else
-    echo "⚠️  System dependencies script not found: ${sys_deps_script}"
-  fi
 
   # Add shell function for auto-activation
   echo ""
