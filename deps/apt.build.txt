@@ -12,6 +12,12 @@ python3-pip
 # raisin build
 cmake
 ninja-build
+# raisin build configures with the vcpkg toolchain, which bootstraps vcpkg; its
+# scripts/bootstrap.sh requires these four
+curl
+zip
+unzip
+tar
 # raisin setup and the git commands read Git LFS files
 git-lfs
 # raisin cppcheck
