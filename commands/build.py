@@ -14,6 +14,7 @@ from pathlib import Path
 
 # Import globals and utilities
 from commands import globals as g
+from commands.constants import SYMLINK_CONFIG_HELP
 from commands.utils import (
     delete_directory,
     check_supported_architecture,
@@ -272,6 +273,11 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     help="Install artifacts to install/ directory after building",
 )
 @click.option(
+    "--symlink-config/--copy-config",
+    default=True,
+    help=SYMLINK_CONFIG_HELP,
+)
+@click.option(
     "--raisin-py-exec",
     "python_executable",
     default=None,
@@ -292,7 +298,7 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
 )
 @click.argument("targets", nargs=-1)
 def build_cli_command(
-    build_types, install, python_executable, test, asan, tsan, targets
+    build_types, install, symlink_config, python_executable, test, asan, tsan, targets
 ):
     """
     Compile the project using CMake and Ninja.
@@ -302,6 +308,7 @@ def build_cli_command(
         raisin build --type release                  # Build release only
         raisin build --type debug --install          # Build debug and install
         raisin build -t release -t debug -i          # Build both types and install
+        raisin build -t release -i --copy-config     # Copy config/ into install/ instead of symlinking
         raisin build -t release raisin_network       # Build specific target
         raisin build -t debug --test                 # Tests, no sanitizer
         raisin build -t debug --asan                 # Tests + ASan+UBSan (ASan/TSan are mutually exclusive)
@@ -333,6 +340,7 @@ def build_cli_command(
     setup(
         raisin_march=raisin_march,
         build_test_enabled=build_test_enabled,
+        symlink_config=symlink_config,
     )
 
     # Then build

@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import raisin_ota.client as ota  # noqa: E402
 
@@ -176,7 +176,7 @@ class TestCoreDoesNotImportTheCli(unittest.TestCase):
     )
 
     def _import_lines(self, module):
-        source = Path(module).read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parent.parent / module).read_text(encoding="utf-8")
         for line_no, line in enumerate(source.splitlines(), 1):
             stripped = line.strip()
             if stripped.startswith(("import ", "from ")):

@@ -27,7 +27,7 @@ from commands.git_commands import find_repos_with_lfs_pointers
 
 # Import globals, constants, and utilities
 from commands import globals as g
-from commands.constants import TYPE_MAPPING, STRING_TYPES
+from commands.constants import TYPE_MAPPING, STRING_TYPES, SYMLINK_CONFIG_HELP
 from commands.utils import (
     load_configuration,
     delete_directory,
@@ -218,8 +218,13 @@ def _build_single_cmake_project(
     is_flag=True,
     help="Enable building unit tests for this setup run",
 )
+@click.option(
+    "--symlink-config/--copy-config",
+    default=True,
+    help=SYMLINK_CONFIG_HELP,
+)
 @click.argument("targets", nargs=-1)
-def setup_command(test, targets):
+def setup_command(test, symlink_config, targets):
     """
     Generate interface files (.msg, .srv, .action) and configure CMake.
 
@@ -228,6 +233,7 @@ def setup_command(test, targets):
         raisin setup                        # Build all packages
         raisin setup raisin_network         # Build specific package
         raisin setup raibo_controller gui   # Build multiple packages
+        raisin setup --copy-config          # Copy config/ instead of symlinking it
 
     Note: Run 'sudo bash install_dependencies.sh' to install package dependencies.
     """
@@ -239,7 +245,7 @@ def setup_command(test, targets):
     else:
         click.echo(f"🛠️  building the following targets: {g.build_pattern}")
 
-    setup(build_test_enabled=test)
+    setup(build_test_enabled=test, symlink_config=symlink_config)
 
 
 def process_build_targets(targets):
@@ -651,6 +657,7 @@ def find_project_directories(
     packages_to_ignore=None,
     repos_to_ignore=None,
     packages_allowed=None,
+    symlink_config=False,
 ):
     """
     Search for all subdirectories in <g.script_directory> containing 'CMakeLists.txt'.
@@ -660,6 +667,7 @@ def find_project_directories(
     :param install_dir:
     :param packages_to_ignore:
     :param search_directories: A list of directories to search (e.g., ['src', 'messages']).
+    :param symlink_config: Link each package's config/ into install_dir instead of copying it.
     """
 
     if packages_to_ignore is None:
@@ -723,10 +731,40 @@ def find_project_directories(
                             sys.exit(1)
                         shutil.copytree(os.path.join(base_dir, "resource"), target_path, dirs_exist_ok=True)
 
+                if directory == "config" and symlink_config:
+                    _link_or_copy_config(source_dir, target_path)
+                    continue
+
                 # Copy the entire directory
                 shutil.copytree(source_dir, target_path, dirs_exist_ok=True)
 
     return project_directories
+
+
+def _link_or_copy_config(source_dir, target_path):
+    """Symlink target_path to source_dir, or merge a copy into it when it already exists.
+
+    An existing link belongs to a same-named package; copying through it would write into that
+    package's source, so it is replaced by a copy first.
+    """
+    if os.path.islink(target_path):
+        linked_dir = os.path.realpath(target_path)
+        os.unlink(target_path)
+        shutil.copytree(linked_dir, target_path)
+        print(f"⚠️  {source_dir} and {linked_dir} share {target_path}; copying both instead of symlinking")
+    elif not os.path.lexists(target_path):
+        try:
+            os.symlink(
+                os.path.relpath(source_dir, os.path.dirname(target_path)),
+                target_path,
+                target_is_directory=True,
+            )
+            return
+        except OSError as e:
+            print(f"⚠️  Could not symlink {target_path} ({e}); copying instead")
+    else:
+        print(f"⚠️  {target_path} already exists; copying {source_dir} into it instead of symlinking")
+    shutil.copytree(source_dir, target_path, dirs_exist_ok=True)
 
 
 def _repo_directory(project_directory):
@@ -2303,6 +2341,7 @@ def setup(
     build_test_enabled=None,
     raisin_march: Optional[str] = None,
     target: Optional[TargetConfig] = None,
+    symlink_config: bool = False,
 ):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
@@ -2316,6 +2355,8 @@ def setup(
         target: Build target (commands.sdk_target_config.TargetConfig). Defaults to
             the build host. SDK targets prepare their own headers and install
             prefix; build_sdk owns their CMake generation.
+        symlink_config: Symlink each package's config/ into install/ instead of copying it.
+            Ignored for package and SDK installs, whose archives need real files.
 
     Returns:
         Discovered project directories, for SDK CMake generation by the caller.
@@ -2392,10 +2433,14 @@ def setup(
         interface_dirs, ["action"], packages_to_ignore, repos_to_ignore, packages_allowed
     )[0]
 
+    symlink_config = symlink_config and not cross and package_name == ""
+    if symlink_config:
+        click.echo("🔗 config/ symlinked to src/; keep local overrides in ~/.raisin/<pkg>/ (--copy-config to copy)")
     project_dirs = [f"src/{name}" for name in target.source_repositories] if cross else [src_dir]
     project_directories = find_project_directories(
         project_dirs, install_dir, packages_to_ignore, repos_to_ignore,
         set(target.packages) if cross else packages_allowed,
+        symlink_config=symlink_config,
     )
     _ensure_scripts_executable(install_dir)
 

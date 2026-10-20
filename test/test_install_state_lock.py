@@ -53,7 +53,7 @@ with install_state_lock(workspace, holder):
 """
         process = subprocess.Popen(
             [sys.executable, "-c", code, str(self.workspace), name],
-            cwd=Path(__file__).parent,
+            cwd=Path(__file__).resolve().parent.parent,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

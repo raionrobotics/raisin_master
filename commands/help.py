@@ -35,6 +35,12 @@ def print_help():
     print(
         f"  {'':<22} Add --install flag to also install artifacts into the 'install/' directory."
     )
+    print(
+        f"  {'':<22} Each package's config/ is symlinked into 'install/' so source edits apply"
+    )
+    print(
+        f"  {'':<22} without rebuilding; add --copy-config to copy it instead (also for 'setup')."
+    )
     print("-" * 35)
     print(
         f"  {'publish <target> [--type debug|release]':<20} 📦 Builds the target and archives it into 'release/'."

@@ -23,6 +23,11 @@ TYPE_MAPPING = {
 
 STRING_TYPES = ["std::string", "std::u16string"]
 
+SYMLINK_CONFIG_HELP = (
+    "Symlink each package's config/ into install/ (default) so source edits apply without "
+    "rebuilding; --copy-config copies instead."
+)
+
 
 class Colors:
     """ANSI color codes for terminal output."""
