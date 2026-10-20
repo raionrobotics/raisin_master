@@ -250,6 +250,13 @@ if [[ "${1:-}" == "--install" ]]; then
   echo "Installed: ${install_path}"
   echo "Environment name: ${install_env_name}"
 
+  # root installs directly (a minimal container may have no sudo); everyone else goes through sudo,
+  # as the packages' install_dependencies.sh does.
+  SUDO=""
+  if [[ ${EUID} -ne 0 ]]; then
+    SUDO="sudo"
+  fi
+
   # Install the build tools declared in deps/apt.build.txt (and deps/apt.build.ubuntu-<version>.txt)
   # that are not installed yet; the venv packages among them are needed just below. The raisin-base
   # build image already holds all of them, so in its containers apt is not called at all.
@@ -275,7 +282,7 @@ if [[ "${1:-}" == "--install" ]]; then
       return 0
     fi
     echo "📦 Installing build tools (deps/apt.build.txt): ${missing[*]}"
-    if ! { sudo apt-get update && sudo apt-get install -y "${missing[@]}"; }; then
+    if ! { ${SUDO} apt-get update && ${SUDO} apt-get install -y "${missing[@]}"; }; then
       echo "⚠️  Failed to install build tools. You can install them manually:"
       echo "   sudo apt update && sudo apt install ${missing[*]}"
     fi
@@ -308,8 +315,8 @@ if [[ "${1:-}" == "--install" ]]; then
     echo "✅ vcstool is already installed."
   else
     echo "📦 Installing vcstool..."
-    if ! sudo python3 -m pip install --break-system-packages vcstool 2>/dev/null \
-        && ! sudo python3 -m pip install vcstool; then
+    if ! ${SUDO} python3 -m pip install --break-system-packages vcstool 2>/dev/null \
+        && ! ${SUDO} python3 -m pip install vcstool; then
       echo "⚠️  Failed to install vcstool. You can install it manually:"
       echo "   sudo python3 -m pip install --break-system-packages vcstool"
     fi
