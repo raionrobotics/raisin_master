@@ -90,9 +90,11 @@ def make_scripts_executable(prefix: Path) -> None:
 def copy_device_resources(prefix: Path, home: Path) -> None:
     """Lay `<home>/.raisin/<name>/resource` over `<prefix>/resource/<name>/resource`.
 
-    `.raisin` is what provisioning writes for this one device, so it goes in
-    after the packages and replaces their defaults. `home` is passed rather
-    than read because the agent's own HOME is not the workspace owner's.
+    `.raisin/<name>/resource` holds the files changed on this one machine
+    (raisin_robot_properties/README.md, "Shared resources"), so it goes in
+    after the packages and replaces their defaults. A name no package ships a
+    resource for still gets its folder. `home` is passed rather than read
+    because the agent's own HOME is not the workspace owner's.
     """
     target_dir = "resource"
     for root, dirs, files in os.walk(Path(home) / ".raisin"):
@@ -102,6 +104,7 @@ def copy_device_resources(prefix: Path, home: Path) -> None:
                 prefix, "resource", os.path.basename(root), target_dir
             )
 
+            os.makedirs(dest_dir, exist_ok=True)
             for item in os.listdir(source_dir):
                 s = os.path.join(source_dir, item)
                 d = os.path.join(dest_dir, item)

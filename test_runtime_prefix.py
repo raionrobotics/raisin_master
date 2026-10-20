@@ -165,6 +165,16 @@ class TestCopyDeviceResources(RuntimePrefixTestCase):
             self.read("resource/raibo2/resource/calibration/imu.yaml"), "imu"
         )
 
+    def test_a_file_is_copied_for_a_package_that_ships_no_resource(self):
+        # The destination does not exist yet; a folder made it, a file did not.
+        self.a_device_resource("joy", {"params.yaml": "for this device"})
+
+        runtime_prefix.copy_device_resources(self.prefix, self.home)
+
+        self.assertEqual(
+            self.read("resource/joy/resource/params.yaml"), "for this device"
+        )
+
 
 class TestAssemble(RuntimePrefixTestCase):
     def test_a_leftover_src_changes_nothing(self):
