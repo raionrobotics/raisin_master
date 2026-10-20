@@ -3161,6 +3161,12 @@ def _report_snapshot_from_install_metadata(
     return False
 
 
+def _ota_zip_path(cache_dir: Optional[Path], name: str, key: str) -> Path:
+    """Calculate a ZIP path without creating directories or granting isolation."""
+    cache = _ctx().workspace / "install" if cache_dir is None else Path(cache_dir)
+    return cache / f"{name}-ota-{key}.zip"
+
+
 class PackageInstallTransaction:
     """One staged tree and one commit for a package dependency closure.
 
@@ -3424,10 +3430,7 @@ def _download_package(
         # An archive may omit tagName or use an alias. Its immutable ZIP is
         # then the version authority; never substitute 0.0.0 for an unknown.
         key = version or hashlib.sha256(str(pkg).encode()).hexdigest()[:16]
-        cache = transaction.download_cache_dir
-        if cache is None:
-            cache = _ctx().workspace / "install"
-        path = cache / f"{package_name}-ota-{key}.zip"
+        path = _ota_zip_path(transaction.download_cache_dir, package_name, key)
         record_install_event(
             "started",
             archive_id=archive_id,
@@ -4085,7 +4088,7 @@ def download_all_from_archive(
         # is what breaks the hardlink shared with the previous version.
         install_dir = _ctx().package_dir(staging, name, build_type)
 
-        download_file = _ctx().workspace / "install" / f"{name}-ota-{version}.zip"
+        download_file = _ota_zip_path(None, name, version)
 
         print(f"⬇️  Downloading '{name}' v{version} from OTA server...")
         download_ok, _download_error = _download_package_blob(
@@ -4482,9 +4485,7 @@ def _download_package_at_timestamp(
             print(f"⚠️ Manifest for '{package_name}' has no blob hash")
             return None
 
-        download_file = (
-            _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
-        )
+        download_file = _ota_zip_path(None, package_name, version)
 
         print(f"⬇️  Downloading '{package_name}' v{version} (at {timestamp})...")
         if not _download_blob_by_hash(blob_hash, download_file):

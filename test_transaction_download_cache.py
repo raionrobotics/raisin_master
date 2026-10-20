@@ -179,3 +179,41 @@ def test_constructor_does_not_require_configured_context(tmp_path, monkeypatch):
     ota.PackageInstallTransaction(
         tmp_path / "release/install", download_cache_dir=tmp_path / "cache"
     )
+
+
+def test_explicit_zip_path_neither_accesses_context_nor_creates_cache(
+    tmp_path, monkeypatch
+):
+    def unconfigured():
+        pytest.fail("explicit cache lookup accessed the OTA context")
+
+    monkeypatch.setattr(ota, "_ctx", unconfigured)
+    cache = tmp_path / "private/cache"
+    assert ota._ota_zip_path(cache, "fixture", "1.0.0") == (
+        cache / "fixture-ota-1.0.0.zip"
+    )
+    assert not cache.exists()
+
+
+def test_default_zip_path_uses_workspace_without_creating_cache(archive_lab):
+    lab = archive_lab
+    assert ota._ota_zip_path(None, "fixture", "1.0.0") == (
+        lab.workspace / "install/fixture-ota-1.0.0.zip"
+    )
+    assert not lab.workspace.exists()
+
+
+def test_nontransactional_archive_keeps_workspace_cache(archive_lab):
+    lab = archive_lab
+    result = ota.download_all_from_archive(
+        "release",
+        lab.install,
+        archive_version="2026.10.19",
+        archive_name="test-robot",
+        report_snapshot=False,
+    )
+    assert set(result) == {"primary", "library"}
+    assert lab.install.is_symlink()
+    assert not lab.cache.exists()
+    assert len(lab.artifacts) == 4
+    assert all(path.parent == lab.workspace / "install" for path in lab.artifacts)
