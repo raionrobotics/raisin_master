@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-LAUNCHER = Path(__file__).resolve().parent / "raisin"
+LAUNCHER = Path(__file__).resolve().parent.parent / "raisin"
 SYSTEM_PATH = "/usr/bin:/bin"
 
 

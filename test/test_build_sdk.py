@@ -6,8 +6,8 @@ Covers CLI dispatch, platform profiles, Android target selection, dependency
 closure, host/SDK isolation, and SDK metadata and consumer compatibility.
 
 Usage:
-    python3 test_build_sdk.py
-    python3 -m unittest test_build_sdk
+    python3 test/test_build_sdk.py
+    python3 -m pytest test/test_build_sdk.py
 """
 
 import json
@@ -26,13 +26,13 @@ from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from commands import globals as g
 from commands import sdk_target_config as tc
 from raisin import cli
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 FAKE_NDK_VERSION = "28.2.13676358"
 
 
@@ -248,7 +248,7 @@ class CMakeTemplateIsolationTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.templates = Path(__file__).parent / "templates"
+        self.templates = SCRIPT_DIR / "templates"
         g.init_globals(script_directory=str(self.root))
 
     def test_sdk_generation_needs_no_host_cmake_template(self):
