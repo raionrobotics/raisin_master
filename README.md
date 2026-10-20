@@ -106,12 +106,12 @@ its public certificate across sessions. This does not update an installed
 
 #### Archive extraction safety
 
-Robot downloads and build-machine fetch share ZIP name/permission checks.
-Absolute, parent-traversal, ambiguous and pre-existing aliased destinations are
-refused; executable bits are still restored with a0755 ceiling. The extraction
-prefix must be owned by the caller and protected from concurrent writers.
-See [the confinement checkpoint](docs/ota-archive-confinement.md) for the defect,
-verification and remaining private-preparation/cache limitations.
+Client downloads and build-machine fetch share ZIP name/permission checks.
+Absolute, parent-traversal and ambiguous member names are refused; builder
+extraction also refuses pre-existing aliased targets. Executable bits are restored
+with a `0755` ceiling. Callers must own a stable extraction prefix and exclude
+concurrent writers. See [the safety contract](docs/ota-archive-confinement.md) for
+guarantees and limitations; review evidence is linked there separately.
 
 #### SSH Key Authentication
 
