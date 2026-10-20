@@ -4485,7 +4485,9 @@ def _download_package_at_timestamp(
             print(f"⚠️ Manifest for '{package_name}' has no blob hash")
             return None
 
-        download_file = _ota_zip_path(None, package_name, version)
+        download_file = _ota_zip_path(
+            transaction.download_cache_dir, package_name, version
+        )
 
         print(f"⬇️  Downloading '{package_name}' v{version} (at {timestamp})...")
         if not _download_blob_by_hash(blob_hash, download_file):

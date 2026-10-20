@@ -50,6 +50,7 @@ def archive_lab(tmp_path, monkeypatch):
         install=tmp_path / "private/release/install",
         cache=tmp_path / "private/downloads",
         packages=packages,
+        bodies=bodies,
         requests=requests_seen,
         sessions=sessions,
         artifacts=[],
@@ -217,3 +218,93 @@ def test_nontransactional_archive_keeps_workspace_cache(archive_lab):
     assert not lab.cache.exists()
     assert len(lab.artifacts) == 4
     assert all(path.parent == lab.workspace / "install" for path in lab.artifacts)
+
+
+@pytest.fixture
+def timestamp_lab(archive_lab, monkeypatch):
+    lab = archive_lab
+    base = "https://ota.invalid"
+    digest = hashlib.sha256(lab.bodies["primary"]).hexdigest()
+    lab.timestamp_manifest = {"version": "1.0.0", "blobHash": digest}
+    stream_response = ota.requests.get
+    monkeypatch.setattr(ota, "_fetch_package_id_by_name", lambda name: name)
+    monkeypatch.setattr(ota, "_get_auth_context", lambda: (base, {"X-Test": "user"}))
+
+    def get(url, **kwargs):
+        if url == base + "/packages/primary/manifests/at":
+            response = MagicMock()
+            response.json.return_value = {"data": lab.timestamp_manifest}
+            return response
+        assert url == base + f"/blobs/{digest}/download"
+        return stream_response(base + "/packages/primary/download", **kwargs)
+
+    monkeypatch.setattr(ota.requests, "get", get)
+    return lab
+
+
+def download_timestamp(lab, transaction):
+    return ota.download_package_at_timestamp(
+        "primary", "2026-10-21", "release", lab.install, transaction=transaction
+    )
+
+
+@pytest.mark.parametrize("cache_mode", ["explicit", "omitted", "none"])
+@pytest.mark.parametrize("has_version", [True, False])
+def test_timestamp_cache_selection_and_zip_declared_version(
+    timestamp_lab, cache_mode, has_version
+):
+    lab = timestamp_lab
+    if not has_version:
+        lab.timestamp_manifest.pop("version")
+    options = {}
+    if cache_mode != "omitted":
+        options["download_cache_dir"] = lab.cache if cache_mode == "explicit" else None
+    expected = lab.cache if cache_mode == "explicit" else lab.workspace / "install"
+    with prepare(lab, **options) as transaction:
+        result = download_timestamp(lab, transaction)
+        assert result["version"] == "1.0.0"
+        assert result["otaMetadata"]["source"] == "timestamp"
+        assert transaction.packages == {"release": {"primary"}}
+        assert not transaction.committed
+        directory = lab.context.package_dir(
+            transaction.package_base, "primary", "release"
+        )
+        assert (directory / "payload.txt").read_text() == "primary"
+        assert len(lab.artifacts) == 2
+        assert all(path.parent == expected for path in lab.artifacts)
+        assert list(expected.iterdir()) == []
+        assert not (
+            lab.workspace / "install" if cache_mode == "explicit" else lab.cache
+        ).exists()
+    assert not lab.install.exists()
+
+
+def test_timestamp_partial_and_resume_state_stay_in_explicit_cache(timestamp_lab):
+    lab = timestamp_lab
+    lab.interrupted = True
+    with prepare(lab, download_cache_dir=lab.cache) as transaction:
+        assert download_timestamp(lab, transaction) is None
+    partial = lab.cache / "primary-ota-1.0.0.zip.part"
+    state = partial.with_name(partial.name + ".json")
+    assert partial.stat().st_size == 31
+    assert state.is_file()
+    assert not (lab.workspace / "install").exists()
+    lab.interrupted = False
+    with prepare(lab, download_cache_dir=lab.cache) as transaction:
+        assert download_timestamp(lab, transaction)["version"] == "1.0.0"
+    resumed = lab.requests[-1][1]
+    assert resumed["Range"] == "bytes=31-"
+    assert "If-Range" in resumed
+    assert not partial.exists() and not state.exists()
+    assert not (lab.workspace / "install").exists()
+
+
+def test_timestamp_unusable_explicit_cache_does_not_fall_back(timestamp_lab):
+    lab = timestamp_lab
+    lab.cache.parent.mkdir(parents=True)
+    lab.cache.write_text("not a directory")
+    with prepare(lab, download_cache_dir=lab.cache) as transaction:
+        assert download_timestamp(lab, transaction) is None
+    assert lab.cache.read_text() == "not a directory"
+    assert not lab.requests
+    assert not (lab.workspace / "install").exists()
