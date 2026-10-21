@@ -129,9 +129,9 @@ release/dependency pin until separately reviewed immutable publication.
   of the requested one, and omitting executable normalization were each detected
   by behavioral tests. Product callables were restored and source hashes unchanged.
 
-Final product SHA256:
+Initial verified product SHA256:
 `8a95658f9878f1979e2214ca1db23ea314ca36a2ac3e4eadc4ffea67e5bed9aa`.
-Final managed-test SHA256:
+Initial verified managed-test SHA256:
 `ca93b43b89ad35841105c4562363b8c3c9903dffd5be91c480942bd456a9dc13`.
 
 Replay from a checkout with declared dependencies and pytest installed:
@@ -154,3 +154,20 @@ This remains a reviewed opt-in library slice, not an installed owner, completed
 runtime transition, PID1/power-loss proof or FMS command acceptance. No caller or
 dependency pin is changed by this PR. The parent corePR131 still needs its own
 review/merge and immutable publication before an agent adopts this mechanism.
+
+### Automatic review: explicit permission bits
+
+The stat.S_IMODE suggestion is accepted as a clearer chmod boundary, not a
+reproduced Linux runtime failure. The old Linux call ignored file-type bits;
+the new managed helper passes only the permission bits plus executable flags.
+A strict-argument fixture failed before the one-line change and passes afterward.
+Legacy helper behavior remains unchanged. Focused managed/parity72 PASS.
+Updated module SHA256:
+`983194f6f536d35c30bdaaccf631fef2c3fa7ab52ad566cead33fbd8c7ff4dcf`.
+Updated test SHA256:
+`17caaa999f0329dcc200db709d75eeb44edac909d8b87118241ddbd9c0a46afe`.
+Earlier wheel/host counts describe2dfba2e; follow-up verification is separate.
+
+Follow-up full regression: Python3.9.25 **803 PASS/36 existing SKIP (11.98s)**,
+Python3.12.3 **803 PASS/36 existing SKIP (11.86s)**. Same restricted root and
+UID65534 profile: **72 PASS each (0.22s/0.21s)**. No new skip or default change.

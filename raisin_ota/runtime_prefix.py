@@ -332,7 +332,7 @@ def _managed_executables(prefix):
                     elif name == "bin":
                         path.chmod(0o755)
                     elif path.name.endswith(".sh"):
-                        path.chmod(info.st_mode | 0o111)
+                        path.chmod(stat.S_IMODE(info.st_mode) | 0o111)
 
 
 def populate_marked(

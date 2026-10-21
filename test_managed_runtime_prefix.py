@@ -323,6 +323,22 @@ def test_shell_pattern_includes_dot_sh_but_not_other_scripts(marked, name):
     assert stat.S_IMODE((marked.prefix / "scripts/keep.txt").stat().st_mode) == 0o644
 
 
+def test_script_chmod_receives_only_permission_bits(marked, monkeypatch):
+    original, observed = Path.chmod, []
+    script = marked.prefix / "scripts/primary/start.sh"
+
+    def chmod(path, mode, *args, **kwargs):
+        if path == script:
+            observed.append(mode)
+            if mode & ~0o7777:
+                raise ValueError("fixture chmod accepts only permission bits")
+        return original(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", chmod)
+    populate(marked)
+    assert observed == [0o755]
+
+
 def test_unselected_build_payload_is_not_followed(marked):
     debug = marked.context.package_dir(marked.selected, "primary", "debug")
     (debug / "ignored-link").symlink_to(marked.home)
