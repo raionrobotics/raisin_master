@@ -14,14 +14,15 @@ The workspace root `install_dependencies.sh` (raisin_master) installs every list
 
 ## Files
 
-| File | Contents | Required |
-|---|---|---|
-| `apt.txt` | Libraries the package uses, and what it needs to **run**, every Ubuntu version | yes |
-| `apt.ubuntu-<version>.txt` | Same, for that Ubuntu version only | no |
-| `apt.build.txt` | What **building, testing and analysing** it adds on top of `apt.txt` | no |
-| `apt.build.ubuntu-<version>.txt` | Same, for that Ubuntu version only | no |
+| File | Contents |
+|---|---|
+| `apt.txt` | Libraries the package uses, and what it needs to **run**, every Ubuntu version |
+| `apt.ubuntu-<version>.txt` | Same, for that Ubuntu version only |
+| `apt.build.txt` | What **building, testing and analysing** it adds on top of `apt.txt` |
+| `apt.build.ubuntu-<version>.txt` | Same, for that Ubuntu version only |
 
-Create an optional file only when it has a package to list; an empty file is not needed.
+Every file is optional: create one only when it has a package to list. A package that needs
+nothing from apt has none of them, and installing prints that nothing is declared and moves on.
 
 ## Format
 
