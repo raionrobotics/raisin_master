@@ -93,17 +93,3 @@ else
     # Passed through env because sudo drops the caller's environment.
     ${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get install -y "${to_install[@]}"
 fi
-
-# vcstool provides `vcs`, which src/setup.sh imports the repositories with. On 24.04 it comes from
-# apt (deps/apt.build.ubuntu-24.04.txt) above. Workaround for 22.04 only, whose archive does not have
-# it: install it into the system Python with pip, unpinned (src/setup.sh runs outside the virtual
-# environment, so /usr/bin/python3 rather than whichever python3 an active venv puts first on PATH).
-# Remove this block when 22.04 support ends. 22.04's pip does not know --break-system-packages, hence
-# the second try.
-if command -v vcs >/dev/null 2>&1; then
-    echo "✅ vcstool is already installed."
-else
-    echo "📦 Installing vcstool..."
-    ${SUDO} /usr/bin/python3 -m pip install --break-system-packages vcstool 2>/dev/null \
-        || ${SUDO} /usr/bin/python3 -m pip install vcstool
-fi

@@ -1,4 +1,0 @@
-# Ubuntu 24.04 only. See apt.build.txt for the format.
-
-# vcs, which src/setup.sh imports the repositories with. The 22.04 archive does not have it.
-vcstool
