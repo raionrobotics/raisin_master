@@ -54,7 +54,7 @@ def workspace(tmp_path):
     return root
 
 
-def package(workspace, name, origin, *, executable, status=0):
+def package(workspace, name, origin, *, executable, status=0, build_type="release"):
     if origin == "source":
         directory = workspace / "src" / name
     else:
@@ -77,9 +77,9 @@ def package(workspace, name, origin, *, executable, status=0):
             timeout=5,
         ).stdout
         parts = platform_parts(detected, platform.machine())
-        directory = workspace / "release" / "install" / name / Path(*parts) / "release"
+        directory = workspace / "release" / "install" / name / Path(*parts) / build_type
     directory.mkdir(parents=True)
-    marker = workspace / (name + "-" + origin + ".called")
+    marker = workspace / (name + "-" + origin + "-" + build_type + ".called")
     installer = directory / "install_dependencies.sh"
     installer.write_text(
         "#!/usr/bin/env bash\n"
