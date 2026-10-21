@@ -46,7 +46,7 @@ Follow these steps to configure and build your project.
 
 Run the install command to set up the RAISIN command-line tool. This:
 - Creates a Python virtual environment
-- Installs the build tools declared in `deps/apt.build*.txt` that are missing (Python venv, CMake, Ninja, Git LFS, cppcheck, gcovr, vcstool; Ubuntu only)
+- Installs the build tools declared in `deps/apt.build*.txt` that are missing (Ubuntu only)
 - Installs the Python tools in `requirements.txt` (pre-commit, documentation tools) into the virtual environment
 - Adds a shell function for auto-activation
 

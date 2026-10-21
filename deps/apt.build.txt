@@ -1,8 +1,8 @@
 # Build tools of raisin_master on Ubuntu: what ./raisin (the launcher, raisin build, test and
 # cppcheck) runs. apt package names separated by spaces or newlines (one per line by convention),
 # '#' starts a comment; version-specific packages go in apt.build.ubuntu-<version>.txt.
-# install_system_deps.sh (run by ./raisin --install) installs the ones that are missing, and the raisin-base build image installs
-# this list, so its containers need nothing more.
+# install_system_deps.sh (run by ./raisin --install) installs the ones that are missing, and the
+# raisin-base build image installs this list, so its containers need nothing more.
 
 # The launcher creates the raisin virtual environment
 python3

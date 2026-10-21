@@ -28,6 +28,13 @@ fi
 # Read Ubuntu version from /etc/os-release (lsb_release is absent on minimal installs)
 ubuntu_version="$(. /etc/os-release && echo "${VERSION_ID:-}")"
 
+# deps/apt.build.txt always sits next to this script. Without it nothing would be installed and the
+# run would still look like success.
+if [[ ! -f "${SCRIPT_DIR}/deps/apt.build.txt" ]]; then
+    echo "ERROR: ${SCRIPT_DIR}/deps/apt.build.txt is missing." >&2
+    exit 1
+fi
+
 names=()
 for list in "${SCRIPT_DIR}/deps/apt.build.txt" "${SCRIPT_DIR}/deps/apt.build.ubuntu-${ubuntu_version}.txt"; do
     [[ -f "${list}" ]] || continue
@@ -62,12 +69,13 @@ fi
 # vcstool provides `vcs`, which src/setup.sh imports the repositories with. On 24.04 it comes from
 # apt (deps/apt.build.ubuntu-24.04.txt) above. Workaround for 22.04 only, whose archive does not have
 # it: install it into the system Python with pip, unpinned (src/setup.sh runs outside the virtual
-# environment). Remove this block when 22.04 support ends. 22.04's pip does not know
-# --break-system-packages, hence the second try.
+# environment, so /usr/bin/python3 rather than whichever python3 an active venv puts first on PATH).
+# Remove this block when 22.04 support ends. 22.04's pip does not know --break-system-packages, hence
+# the second try.
 if command -v vcs >/dev/null 2>&1; then
     echo "✅ vcstool is already installed."
 else
     echo "📦 Installing vcstool..."
-    ${SUDO} python3 -m pip install --break-system-packages vcstool 2>/dev/null \
-        || ${SUDO} python3 -m pip install vcstool
+    ${SUDO} /usr/bin/python3 -m pip install --break-system-packages vcstool 2>/dev/null \
+        || ${SUDO} /usr/bin/python3 -m pip install vcstool
 fi
