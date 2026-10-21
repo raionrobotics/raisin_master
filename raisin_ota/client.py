@@ -32,6 +32,7 @@ from typing import Optional, Tuple
 
 from . import install_tree
 from .install_tree import InstallTreeUnusable, safe_component
+from .archive_safety import PERMITTED_MODE, checked_members, restore_modes
 
 # Module-level cached auth token (lives for the CLI session)
 _cached_token = None
@@ -2776,45 +2777,6 @@ def _write_install_metadata(
         )
 
 
-#: The widest mode a file may arrive with from a package.
-#:
-#: `extractall` does not apply the mode a zip carries -- long-standing CPython
-#: behaviour -- so every extracted file takes whatever the umask allows and
-#: nothing in `bin/` comes out executable. Measured against a published
-#: package, extracted by this very function with systemd's `0022`:
-#:
-#:     zip stores  bin/raisin_cli   0o100755
-#:     on disk     bin/raisin_cli   0o644      not executable
-#:
-#: `raion-setup` runs `install/bin/rs_multicam` and `install/bin/slaveinfo`
-#: during the wizard, and both ship in `raisin_third_party_robot`, so this is
-#: not a latent defect.
-#:
-#: Restoring the stored mode fixes that, and masking it fixes a second thing:
-#: the result stops depending on the umask of whatever unpacked it, and no
-#: package can hand out a group-writable, world-writable or setuid file however
-#: it was built. A robot's tree is then the same tree wherever it was unpacked.
-PERMITTED_MODE = 0o755
-
-
-def restore_modes(archive: zipfile.ZipFile, into: Path) -> None:
-    """Give back the mode the publisher stored, narrowed to `PERMITTED_MODE`."""
-    for entry in archive.infolist():
-        if entry.is_dir():
-            continue
-        stored = (entry.external_attr >> 16) & 0o7777
-        if not stored:
-            # A zip written where no Unix mode is recorded. Nothing to restore,
-            # and inventing one would be guessing.
-            continue
-        try:
-            (into / entry.filename).chmod(stored & PERMITTED_MODE)
-        except OSError as error:
-            # An unreadable mode is not a reason to fail an install that has
-            # otherwise landed; the file is there and its content is right.
-            print(f"⚠️ Could not set the mode of '{entry.filename}': {error}")
-
-
 def _extract_and_read_deps(
     download_file: Path,
     staging: Path,
@@ -2829,11 +2791,11 @@ def _extract_and_read_deps(
     `install_dir` is the package's place under the staged tree `staging`.
     Returns dict with 'version' and 'dependencies' on success, None on failure.
     """
-    # Remove, never overwrite: the staged tree shares inodes with the live one.
-    install_tree.replace_package_dir(staging, install_dir)
-
     try:
         with zipfile.ZipFile(download_file, "r") as zip_ref:
+            checked_members(zip_ref)
+            # Remove, never overwrite: the staged tree shares inodes with the live one.
+            install_tree.replace_package_dir(staging, install_dir)
             zip_ref.extractall(install_dir)
             restore_modes(zip_ref, install_dir)
         download_file.unlink()
@@ -3170,6 +3132,12 @@ def _report_snapshot_from_install_metadata(
     return False
 
 
+def _ota_zip_path(cache_dir: Optional[Path], name: str, key: str) -> Path:
+    """Calculate a ZIP path without creating directories or granting isolation."""
+    cache = _ctx().workspace / "install" if cache_dir is None else Path(cache_dir)
+    return cache / f"{name}-ota-{key}.zip"
+
+
 class PackageInstallTransaction:
     """One staged tree and one commit for a package dependency closure.
 
@@ -3177,13 +3145,30 @@ class PackageInstallTransaction:
     archive metadata needs refreshing. Downloaded ZIPs supply dependencies;
     unpacking never changes the live tree. Snapshots are queued after commit.
     The caller holds the workspace install-state lock.
+
+    download_cache_dir selects where this transaction downloads ZIPs and their
+    partial/state companions. None retains the configured workspace/install.
+    The directory is caller-controlled, not a security boundary; callers must
+    supply an exclusively owned stable path for private preparation. Files are
+    created lazily by the existing transport, with no fallback on failure.
+    Completed ZIPs are consumed by extraction; interrupted partials are retained
+    for resume. Context, credentials and install_base_path are not redirected.
     """
 
-    def __init__(self, install_base_path: Path, *, upgrade: bool = False):
+    def __init__(
+        self,
+        install_base_path: Path,
+        *,
+        upgrade: bool = False,
+        download_cache_dir: Optional[Path] = None,
+    ):
         # Cache only within this install attempt. A later command must observe
         # a moved tag or a newly published archive, even in the same process.
         _archive_cache.clear()
         self.install_base_path = Path(install_base_path)
+        self.download_cache_dir = (
+            Path(download_cache_dir) if download_cache_dir is not None else None
+        )
         self.release = install_tree.release_for(self.install_base_path)
         self.staging = None
         self.version = None
@@ -3412,7 +3397,7 @@ def _download_package(
         # An archive may omit tagName or use an alias. Its immutable ZIP is
         # then the version authority; never substitute 0.0.0 for an unknown.
         key = version or hashlib.sha256(str(pkg).encode()).hexdigest()[:16]
-        path = _ctx().workspace / "install" / f"{package_name}-ota-{key}.zip"
+        path = _ota_zip_path(transaction.download_cache_dir, package_name, key)
         record_install_event(
             "started",
             archive_id=archive_id,
@@ -3830,6 +3815,7 @@ def download_all_from_archive(
     *,
     transaction: Optional[PackageInstallTransaction] = None,
     source_packages: Optional[set] = None,
+    require_desired_state: bool = False,
 ) -> dict:
     """Download all packages from an archive.
 
@@ -3864,11 +3850,24 @@ def download_all_from_archive(
 
             Default True because taking the report away from a caller with no
             later moment is worse than sending it early to one that has.
+        require_desired_state: Require a usable inline desired-state manifest,
+            with no legacy tag/latest/user-manifest fallback. False preserves
+            existing selection behavior. True conflicts with explicit or ambient
+            archive pins (ValueError before tree repair); missing/unusable desired
+            state raises OtaDesiredStateUnusable and halt remains OtaInstallHalted.
+            Once selected, package validation/download/preparation failures keep
+            their existing empty-dict result; they do not trigger fallback.
+            This restricts selection, not writes: callers needing private
+            preparation still supply a private install path and download cache.
 
     Returns:
         dict mapping package_name to {'version': str, 'dependencies': list}
         for successfully downloaded packages. Empty dict on complete failure.
     """
+    if type(require_desired_state) is not bool:
+        raise ValueError("require_desired_state must be a bool")
+    if require_desired_state and archive_is_pinned(archive_name, archive_version):
+        raise ValueError("desired-state-only selection cannot use archive pins")
     platform_str = _ctx().platform
 
     release = install_tree.release_for(install_base_path)
@@ -3894,6 +3893,8 @@ def download_all_from_archive(
                 _resolve_desired_state(platform_str)
             )
         except OtaDesiredStateUnusable as unusable:
+            if require_desired_state:
+                raise
             # Not fatal on its own. A caller with a user credential can still
             # resolve an archive the ordinary way, and for a person at a
             # terminal that is the right default — they ran a command and want
@@ -3906,6 +3907,14 @@ def download_all_from_archive(
             raise OtaInstallHalted("the OTA server has halted installs for this node")
         if desired_name and desired_version:
             archive_name, archive_version = desired_name, desired_version
+
+    if require_desired_state and not (
+        desired_name and desired_version and desired_manifest
+    ):
+        print(
+            "❌ A usable desired-state manifest is required; refusing legacy selection."
+        )
+        raise OtaDesiredStateUnusable("a usable desired-state manifest is required")
 
     # Selection priority: desired state > archive_version > tag > legacy latest.
     # The desired-state manifest comes first because it is the only route a
@@ -4046,7 +4055,7 @@ def download_all_from_archive(
         # is what breaks the hardlink shared with the previous version.
         install_dir = _ctx().package_dir(staging, name, build_type)
 
-        download_file = _ctx().workspace / "install" / f"{name}-ota-{version}.zip"
+        download_file = _ota_zip_path(None, name, version)
 
         print(f"⬇️  Downloading '{name}' v{version} from OTA server...")
         download_ok, _download_error = _download_package_blob(
@@ -4442,8 +4451,8 @@ def _download_package_at_timestamp(
             print(f"⚠️ Manifest for '{package_name}' has no blob hash")
             return None
 
-        download_file = (
-            _ctx().workspace / "install" / f"{package_name}-ota-{version}.zip"
+        download_file = _ota_zip_path(
+            transaction.download_cache_dir, package_name, version
         )
 
         print(f"⬇️  Downloading '{package_name}' v{version} (at {timestamp})...")

@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from . import transport as requests
+from .archive_safety import validate_targets
 
 from .client import (
     _download_to_path,
@@ -65,7 +66,6 @@ PACKAGE_KEY_PREFIX = "pk_"
 #: one cannot be widened by the same edit. Both hops live under it, which is why
 #: only the base moves and no path below does.
 READ_SURFACE = "archive-read"
-
 
 
 class FetchRefused(Exception):
@@ -194,21 +194,13 @@ def resolve_archive(
 
 
 def _entries_within(archive: zipfile.ZipFile, into: Path) -> None:
-    """Refuse a package that would write outside the prefix it is unpacked into.
-
-    `extractall` resolves `../` relative to the destination, so one entry named
-    `../../etc/whatever` in a package escapes it. The robot path guards the
-    *package name* for this reason -- `a/../../../../OUTSIDE` put a tree
-    anywhere the process could write -- and a merged prefix is the place where
-    an entry can do the same thing, since nothing here renames as it unpacks.
-    """
-    root = into.resolve()
-    for name in archive.namelist():
-        target = (root / name).resolve()
-        if target != root and root not in target.parents:
-            raise FetchRefused(
-                f"Package entry '{name}' would be written outside {into}."
-            )
+    """Use the same name/alias boundary as robot extraction and chmod."""
+    try:
+        validate_targets(archive, into)
+    except zipfile.BadZipFile as error:
+        raise FetchRefused(
+            f"Package entry is outside the safe extraction contract: {error}"
+        ) from error
 
 
 def _unpack(zip_path: Path, into: Path) -> None:
@@ -314,9 +306,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Unpack a published archive's packages into one prefix.",
     )
     parser.add_argument("--archive", required=True, help="Archive name")
-    parser.add_argument(
-        "--platform", required=True, help="e.g. ubuntu-24.04-x86_64"
-    )
+    parser.add_argument("--platform", required=True, help="e.g. ubuntu-24.04-x86_64")
     parser.add_argument(
         "--into", required=True, type=Path, help="Prefix to unpack into"
     )

@@ -468,4 +468,18 @@ if [[ -z "${RAISIN_VCPKG_INSTALLED_DIR:-}" ]]; then
 fi
 mkdir -p "${RAISIN_VCPKG_INSTALLED_DIR}"
 
+# Run inside the selected virtual environment, not only with its interpreter: a tool the
+# environment installs (sphinx-build for the raisin docs) is then found on PATH, as it is
+# after activating the environment. A system Python leaves the environment untouched.
+python_dir="$(cd "$(dirname "${python_bin}")" && pwd)"
+if [[ -f "${python_dir}/../pyvenv.cfg" ]]; then
+  venv_dir="$(dirname "${python_dir}")"
+  if [[ "${VIRTUAL_ENV:-}" != "${venv_dir}" ]]; then
+    VIRTUAL_ENV="${venv_dir}"
+    PATH="${python_dir}:${PATH}"
+    export VIRTUAL_ENV PATH
+    unset PYTHONHOME
+  fi
+fi
+
 exec "${python_bin}" "${SCRIPT_DIR}/raisin.py" "$@"
