@@ -1,0 +1,12 @@
+# Commit hooks of raisin_master. .githooks/pre-commit runs them; ./raisin --install enables it
+# (git config core.hooksPath .githooks).
+repos:
+  # Regenerates requirements.txt from requirements.in whenever a commit changes either, and
+  # stops the commit when the file changed: add it and commit again. Versions already in
+  # requirements.txt are kept; only what requirements.in changed is resolved again.
+  # --universal --python-version 3.10: one lock for Ubuntu 22.04 (Python 3.10) and 24.04 (3.12).
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.12.23
+    hooks:
+      - id: pip-compile
+        args: [requirements.in, --universal, --python-version, "3.10", --no-header, -o, requirements.txt]

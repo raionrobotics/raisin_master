@@ -47,7 +47,8 @@ Follow these steps to configure and build your project.
 Run the install command to set up the RAISIN command-line tool. This:
 - Creates a Python virtual environment
 - Installs the build tools declared in `deps/apt.build*.txt` that are missing (Ubuntu only)
-- Installs the Python tools in `requirements.txt` (pre-commit, documentation tools) into the virtual environment
+- Installs the Python packages pinned in `requirements.txt` (pre-commit, documentation tools) into the virtual environment. To change them, edit `requirements.in`
+- Enables the raisin_master commit hook (`.githooks/`), which regenerates `requirements.txt` when a commit changes `requirements.in`. It works from the host and from a dev container; where pre-commit is missing it warns and lets the commit through
 - Adds a shell function for auto-activation
 
 ```bash

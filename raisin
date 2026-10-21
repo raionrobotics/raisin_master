@@ -280,6 +280,15 @@ if [[ "${1:-}" == "--install" ]]; then
   echo ""
   echo "✅ Virtual environment created: ${install_env_path}"
 
+  # The commit hook (.githooks/pre-commit) runs .pre-commit-config.yaml, which regenerates
+  # requirements.txt when a commit changes requirements.in. It finds pre-commit at every commit,
+  # so it works from the host and from a dev container sharing this repository.
+  echo ""
+  echo "🪝 Enabling the raisin_master commit hook..."
+  if ! git -C "${SCRIPT_DIR}" config core.hooksPath .githooks 2> /dev/null; then
+    echo "⚠️  ${SCRIPT_DIR} is not a git repository; skipped the commit hook."
+  fi
+
   # Add shell function for auto-activation
   echo ""
   echo "🔧 Configuring shell for venv auto-activation..."
