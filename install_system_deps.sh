@@ -28,13 +28,6 @@ fi
 # Read Ubuntu version from /etc/os-release (lsb_release is absent on minimal installs)
 ubuntu_version="$(. /etc/os-release && echo "${VERSION_ID:-}")"
 
-# deps/apt.build.txt always sits next to this script. Without it nothing would be installed and the
-# run would still look like success.
-if [[ ! -f "${SCRIPT_DIR}/deps/apt.build.txt" ]]; then
-    echo "ERROR: ${SCRIPT_DIR}/deps/apt.build.txt is missing." >&2
-    exit 1
-fi
-
 names=()
 for list in "${SCRIPT_DIR}/deps/apt.build.txt" "${SCRIPT_DIR}/deps/apt.build.ubuntu-${ubuntu_version}.txt"; do
     [[ -f "${list}" ]] || continue
@@ -51,7 +44,9 @@ for pkg in "${names[@]}"; do
     fi
 done
 
-if [[ ${#missing[@]} -eq 0 ]]; then
+if [[ ${#names[@]} -eq 0 ]]; then
+    echo "No apt packages declared in ${SCRIPT_DIR}/deps/ (apt.build*.txt); nothing to install."
+elif [[ ${#missing[@]} -eq 0 ]]; then
     echo "✅ Build tools (deps/apt.build.txt) are already installed."
 else
     echo "📦 Installing build tools (deps/apt.build.txt): ${missing[*]}"
