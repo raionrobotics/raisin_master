@@ -16,7 +16,9 @@ Before you begin, ensure your system meets the following requirements.
 
 ### Supported Operating Systems
 * **Windows**: 10 / 11
-* **Linux**: Ubuntu 22.04 / 24.04 (x86_64, ARM64)
+* **Linux**: Ubuntu 24.04 (x86_64, ARM64)
+  * Ubuntu 22.04 (for example Jetson with JetPack 6) only runs packages; CI builds its archives.
+    To develop on a 22.04 PC, use the [dev container](https://github.com/raionrobotics/raisin-base/blob/main/docs/run.md#ide-vs-code-dev-containers).
 
 ### Dependencies
 
