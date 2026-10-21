@@ -47,7 +47,7 @@ Follow these steps to configure and build your project.
 Run the install command to set up the RAISIN command-line tool. This:
 - Creates a Python virtual environment
 - Installs the build tools declared in `deps/apt.build*.txt` that are missing (Ubuntu only)
-- Installs the Python tools in `requirements.txt` (pre-commit, documentation tools) into the virtual environment
+- Installs the Python packages pinned in `requirements.txt` (pre-commit, documentation tools) into the virtual environment. To change them, see [Updating Python Dependencies](#updating-python-dependencies)
 - Adds a shell function for auto-activation
 
 ```bash
@@ -470,6 +470,45 @@ raisin build -t release
 # 9. (Optional) Cross-compile the Android SDK
 raisin build_sdk android
 ```
+
+---
+
+## Updating Python Dependencies
+
+The Python packages are declared in two files:
+
+| File | Edited by | Content |
+|---|---|---|
+| `requirements.in` | You | The packages raisin_master uses directly, grouped by what uses them |
+| `requirements.txt` | uv (do not edit) | Every package with its exact version, including the packages the ones above depend on. `./raisin --install` and CI install this file with pip |
+
+`requirements.txt` is one lock for Ubuntu 22.04 (Python 3.10) and 24.04 (Python 3.12): a package only one of
+them needs carries a marker such as `; python_full_version < '3.11'`. uv, which generates it, is pinned in
+`requirements.in`, so the raisin virtual environment already has it.
+
+```bash
+# 1. Edit requirements.in (e.g. Sphinx==8.1.3 -> Sphinx==8.2.0)
+
+# 2. Activate the raisin virtual environment, which has uv (default location shown)
+source ~/.venvs/raisin_master/bin/activate
+
+# 3. Regenerate requirements.txt
+uv pip compile requirements.in --universal --python-version 3.10 --no-header -o requirements.txt
+
+# 4. Bring your virtual environment to the new lock
+uv pip sync requirements.txt
+
+# 5. Commit both files together
+git add requirements.in requirements.txt
+```
+
+- Step 3 keeps every version already in `requirements.txt` and resolves only what changed. Keep
+  `--universal --python-version 3.10`: without them the lock covers only the Python running uv and misses the
+  packages that 22.04 needs.
+- To raise a package that `requirements.in` does not list (e.g. a security fix in `urllib3`), add
+  `--upgrade-package urllib3` to step 3. To raise every package, add `--upgrade`.
+- If `requirements.txt` cannot be installed (e.g. after a merge conflict), install uv from the source file
+  first: `pip install -r requirements.in`.
 
 ---
 
