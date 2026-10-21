@@ -26,6 +26,9 @@ from commands.setup import (
     setup,
 )
 
+# The installer a package that declares only deps/ ships as its install_dependencies.sh.
+SHARED_DEPS_INSTALLER = Path(__file__).resolve().parent.parent / "scripts" / "install_package_deps.sh"
+
 
 # ============================================================================
 # Path Helpers
@@ -246,12 +249,22 @@ def _copy_dependency_declaration(target_dir: Path, install_dir: Path) -> None:
     (`deps/apt.txt`, `deps/apt.ubuntu-<version>.txt`). The script reads
     `deps/` relative to its own location, so an archive that carried the
     script without the directory would install nothing. Both travel together.
+
+    A package that declares only `deps/` gets the shared installer
+    (`scripts/install_package_deps.sh`) as its `install_dependencies.sh`.
+    Robots run the script from the install tree with the workspace root
+    `install_dependencies.sh` they were provisioned with, which runs only
+    scripts and is not updated by OTA.
     """
     deps_script = target_dir / "install_dependencies.sh"
+    deps_dir = target_dir / "deps"
     if deps_script.is_file():
         shutil.copy(deps_script, install_dir / "install_dependencies.sh")
+    elif deps_dir.is_dir():
+        # Copied without checking that it exists: an archive without the script would reach
+        # robots that skip its deps/, so a missing installer has to stop the publish here.
+        shutil.copy(SHARED_DEPS_INSTALLER, install_dir / "install_dependencies.sh")
 
-    deps_dir = target_dir / "deps"
     if deps_dir.is_dir():
         shutil.copytree(deps_dir, install_dir / "deps", dirs_exist_ok=True)
 

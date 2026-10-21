@@ -231,7 +231,7 @@ Run the package dependency installer to install package-specific dependencies (e
 sudo bash install_dependencies.sh
 ```
 
-> **Note:** This script runs `install_dependencies.sh` files directly from source packages (`src/`) and release packages (`release/install/`).
+> **Note:** This script installs what each source package (`src/`) declares in its `deps/` (apt packages and udev rules, see [deps/README.md](deps/README.md)) with `scripts/install_package_deps.sh`, and runs the `install_dependencies.sh` of each release package (`release/install/`). A source package that still has its own `install_dependencies.sh` runs that instead.
 
 ### 7. Setup and Generate Build Files
 

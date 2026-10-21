@@ -2,7 +2,7 @@
 # install_dependencies.sh
 # -----------------------
 # Purpose  : Run package-specific dependency installers directly from source locations.
-# Sources  : - src/<pkg>/install_dependencies.sh
+# Sources  : - src/<pkg>/install_dependencies.sh, or scripts/install_package_deps.sh for src/<pkg>/deps/
 #            - release/install/<pkg>/<os>/<os_version>/<arch>/<build_type>/install_dependencies.sh
 # Usage    : sudo bash install_dependencies.sh
 # Note     : Run `raisin setup` first to download release packages.
@@ -83,12 +83,13 @@ run_installer() {
     local installer="$1"
     local pkg_name="$2"
     local source_type="$3"
+    local installer_args=("${@:4}")
 
     echo -e "${YELLOW}🔧 Running installer for: ${pkg_name} (${source_type})${NC}"
 
     if [[ -x "${installer}" ]]; then
         # Script is executable, run it directly
-        if "${installer}"; then
+        if "${installer}" "${installer_args[@]}"; then
             echo -e "${GREEN}   ✅ Completed: ${pkg_name}${NC}"
             return 0
         else
@@ -97,7 +98,7 @@ run_installer() {
         fi
     else
         # Script is not executable, run via bash
-        if bash "${installer}"; then
+        if bash "${installer}" "${installer_args[@]}"; then
             echo -e "${GREEN}   ✅ Completed: ${pkg_name}${NC}"
             return 0
         else
@@ -107,21 +108,30 @@ run_installer() {
     fi
 }
 
-# --- Run installers from src/<pkg>/install_dependencies.sh ---
+# --- Run installers from src/<pkg>/install_dependencies.sh, or src/<pkg>/deps/ ---
+# A package without its own script declares only deps/; the shared installer reads it from there.
+# `raisin publish` copies that same installer into the release tree, so release/ always has a script.
+package_deps_installer="${SCRIPT_DIR}/scripts/install_package_deps.sh"
 if [[ -d "${SCRIPT_DIR}/src" ]]; then
     echo -e "${BLUE}📂 Checking source packages (src/)...${NC}"
     for pkg_dir in "${SCRIPT_DIR}"/src/*/; do
         if [[ -d "${pkg_dir}" ]]; then
+            pkg_name="$(basename "${pkg_dir}")"
             installer="${pkg_dir}install_dependencies.sh"
             if [[ -f "${installer}" ]]; then
-                pkg_name="$(basename "${pkg_dir}")"
-                processed_packages["${pkg_name}"]=1
-                ((found_installers++)) || true
-                if ! run_installer "${installer}" "${pkg_name}" "src"; then
-                    failed_installers+=("${pkg_name}")
-                fi
-                echo ""
+                installer_args=()
+            elif [[ -d "${pkg_dir}deps" ]]; then
+                installer="${package_deps_installer}"
+                installer_args=("${pkg_dir}")
+            else
+                continue
             fi
+            processed_packages["${pkg_name}"]=1
+            ((found_installers++)) || true
+            if ! run_installer "${installer}" "${pkg_name}" "src" "${installer_args[@]}"; then
+                failed_installers+=("${pkg_name}")
+            fi
+            echo ""
         fi
     done
 fi

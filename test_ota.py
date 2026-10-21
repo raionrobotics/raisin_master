@@ -5213,6 +5213,40 @@ class TestPublishCarriesTheDependencyDeclaration(unittest.TestCase):
 
             self.assertEqual(list(install_dir.iterdir()), [])
 
+    def test_a_package_with_only_deps_gets_the_shared_installer(self):
+        # Robots run only install_dependencies.sh from the install tree, with a workspace
+        # root script that OTA does not update, so the archive has to carry one.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_installer = Path(tmpdir) / "install_package_deps.sh"
+            shared_installer.write_text("# shared\n")
+            target = Path(tmpdir) / "mypkg"
+            (target / "deps").mkdir(parents=True)
+            (target / "deps" / "apt.txt").write_text("libfoo-dev\n")
+
+            with patch("commands.publish.SHARED_DEPS_INSTALLER", shared_installer):
+                install_dir = self._copy(target)
+
+            self.assertEqual(
+                (install_dir / "install_dependencies.sh").read_text(), "# shared\n"
+            )
+            self.assertEqual((install_dir / "deps" / "apt.txt").read_text(), "libfoo-dev\n")
+
+    def test_publishing_deps_without_the_shared_installer_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "mypkg"
+            (target / "deps").mkdir(parents=True)
+            (target / "deps" / "apt.txt").write_text("libfoo-dev\n")
+
+            missing = Path(tmpdir) / "missing" / "install_package_deps.sh"
+            with patch("commands.publish.SHARED_DEPS_INSTALLER", missing):
+                with self.assertRaises(FileNotFoundError):
+                    self._copy(target)
+
+    def test_the_shared_installer_is_part_of_raisin_master(self):
+        from commands.publish import SHARED_DEPS_INSTALLER
+
+        self.assertTrue(SHARED_DEPS_INSTALLER.is_file())
+
     def test_a_rebuild_overwrites_a_stale_deps_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "mypkg"
