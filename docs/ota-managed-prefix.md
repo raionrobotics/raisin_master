@@ -141,6 +141,15 @@ python -m pytest -q -rs -p no:cacheprovider
 python -m pytest test_managed_runtime_prefix.py test_runtime_prefix.py test_runtime_prefix_parity.py test_setup_deploy.py -q -p no:cacheprovider
 ```
 
+Installed-artifact proof: built `raisin_ota-0.1.9.dev13+g2dfba2e-py3-none-any.whl`
+from code commit2dfba2e, installed it with declared dependencies from the offline
+cache in a fresh venv, and copied only the managed and library runtime-prefix
+tests outside the checkout. Python isolated mode verified the exact installed
+module path/SHA256 above and **66 passed (0.20s)**. No source-path injection or CLI
+checkout was used. This development version follows the older parent branch's
+tags; it is not a new published release or an upgrade recommendation over0.2.0.
+Evidence is retained under `/tmp/raisin-managed-prefix-wheel-gqScFC` locally.
+
 This remains a reviewed opt-in library slice, not an installed owner, completed
 runtime transition, PID1/power-loss proof or FMS command acceptance. No caller or
 dependency pin is changed by this PR. The parent corePR131 still needs its own
