@@ -1,5 +1,8 @@
 """Exact delivered-only selection, exercising the real shell aggregator."""
 
+import ctypes
+import errno
+import os
 import subprocess
 
 import pytest
@@ -189,3 +192,149 @@ def test_explicit_selection_consumes_the_real_release_selector(workspace, tmp_pa
     assert result.returncode == 0, result.stdout + result.stderr
     assert selected.read_text() == "called\n"
     assert delivered.is_symlink()
+
+
+@pytest.mark.parametrize("workspace_first", [False, True])
+def test_detached_runner_uses_only_explicit_workspace(
+    workspace, tmp_path, workspace_first
+):
+    selected_root = tmp_path / "selected-workspace"
+    selected_root.mkdir()
+    selected = package(selected_root, "same", "release", executable=False)
+    source = package(selected_root, "same", "source", executable=True, status=7)
+    unrelated = package(workspace, "same", "release", executable=True, status=7)
+    options = [
+        "--delivered-build-type=release",
+        "--delivered-workspace=" + str(selected_root),
+    ]
+    if workspace_first:
+        options.reverse()
+    result = run(workspace, tmp_path, *options)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert selected.read_text() == "called\n"
+    assert not source.exists() and not unrelated.exists()
+
+
+@pytest.mark.parametrize(
+    "suffix", ["", "/", "/.", "/..", "//child", "/missing", "/a b", "/a\nb", "/é"]
+)
+def test_noncanonical_or_missing_workspace_refuses_before_work(
+    workspace, tmp_path, suffix
+):
+    marker = package(workspace, "same", "release", executable=True)
+    root = tmp_path / "selected-workspace"
+    root.mkdir()
+    value = "" if not suffix else str(root) + suffix
+    result = run(
+        workspace,
+        tmp_path,
+        "--delivered-build-type=release",
+        "--delivered-workspace=" + value,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert result.stderr == "Invalid delivered dependency selection\n"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "kind", ["relative", "root", "symlink", "file", "long", "deep"]
+)
+def test_unsafe_workspace_kind_refuses_before_work(workspace, tmp_path, kind):
+    marker = package(workspace, "same", "release", executable=True)
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    regular = tmp_path / "not-directory"
+    regular.write_text("fixture")
+    deep = tmp_path.joinpath(*(["a"] * 64))
+    deep.mkdir(parents=True)
+    values = {
+        "relative": "target",
+        "root": "/",
+        "symlink": str(alias),
+        "file": str(regular),
+        "long": "/" + "a" * 2048,
+        "deep": str(deep),
+    }
+    result = run(
+        workspace,
+        tmp_path,
+        "--delivered-build-type=release",
+        "--delivered-workspace=" + values[kind],
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert result.stderr == "Invalid delivered dependency selection\n"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--delivered-workspace=/tmp",),
+        ("--delivered-workspace", "/tmp", "--delivered-build-type=release"),
+        ("--delivered-workspacex=/tmp", "--delivered-build-type=release"),
+        (
+            "--delivered-workspace=/tmp",
+            "--delivered-workspace=/tmp",
+            "--delivered-build-type=release",
+        ),
+    ],
+)
+def test_workspace_options_need_build_type_and_exact_single_spelling(
+    workspace, tmp_path, options
+):
+    source = package(workspace, "same", "source", executable=True)
+    selected = package(workspace, "same", "release", executable=True)
+    result = run(workspace, tmp_path, *options)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert not source.exists() and not selected.exists()
+
+
+def test_sealed_runner_snapshot_ignores_replaced_workspace_script(workspace, tmp_path):
+    import fcntl  # Linux-only test; preserve collection on other supported hosts.
+
+    selected_root = tmp_path / "selected-workspace"
+    selected_root.mkdir()
+    selected = package(selected_root, "same", "release", executable=True)
+    replaced = selected_root / SOURCE.name
+    replaced.write_bytes(SOURCE.read_bytes())
+    with open(replaced, "rb") as original:
+        raw = original.read()
+    # This Python3.9 test build omits memfd/seal names despite a capable kernel.
+    # Call libc with Linux UAPI values; no alternate execution or skipped proof.
+    create = ctypes.CDLL(None, use_errno=True).memfd_create
+    create.argtypes = (ctypes.c_char_p, ctypes.c_uint)
+    create.restype = ctypes.c_int
+    fd = create(b"dependency-runner-test", 0x0001 | 0x0002)
+    assert fd >= 0, os.strerror(ctypes.get_errno())
+    try:
+        assert os.write(fd, raw) == len(raw)
+        fcntl.fcntl(fd, 1033, 0x000F)  # F_ADD_SEALS: WRITE/GROW/SHRINK/SEAL
+        assert fcntl.fcntl(fd, 1034) == 0x000F  # F_GET_SEALS
+        with pytest.raises(OSError) as sealed:
+            os.pwrite(fd, b"X", 0)
+        assert sealed.value.errno == errno.EPERM
+        replacement = selected_root / "replacement.sh"
+        replacement.write_text("exit 73\n")
+        replacement.replace(replaced)
+        result = subprocess.run(
+            [
+                BASH,
+                "/proc/self/fd/" + str(fd),
+                "--delivered-build-type=release",
+                "--delivered-workspace=" + str(selected_root),
+                "-y",
+            ],
+            cwd=tmp_path,
+            env=ENVIRONMENT,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            pass_fds=(fd,),
+        )
+    finally:
+        os.close(fd)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert selected.read_text() == "called\n"
+    assert replaced.read_text() == "exit 73\n"
