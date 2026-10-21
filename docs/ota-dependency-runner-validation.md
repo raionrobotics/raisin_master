@@ -52,9 +52,14 @@ fixtures to have actually executed; an empty lookup cannot masquerade as success
   began RED and now pass; scoped source re-review found no actionable defect.
   The reviewer did not independently execute the tests. Cross-model review was
   skipped during autonomous continuation; no external model CLI was executed.
-- Final 21 PASS on Python3.9/3.12 and in root/UID65534 containers, each without
+- Automatic review also found Bash discovery/launch inconsistency under a
+  restricted PATH. A new absolute-launch/no-inherited-hook test began RED. Both
+  calls now use the resolved absolute Bash, with a minimal PATH including the
+  discovered Bash/coreutils directories. Final scoped source review is clear;
+  this does not claim actual NixOS/macOS execution (the suite targets Linux).
+- Final 22 PASS on Python3.9/3.12 and in root/UID65534 containers, each without
   network, capabilities or writable rootfs. Fixtures write only private tmpfs.
-- Full core: Python3.9 **831 PASS/36 SKIP**, Python3.12 **831 PASS/36 SKIP**.
+- Full core: Python3.9 **832 PASS/36 SKIP**, Python3.12 **832 PASS/36 SKIP**.
   The new file has zero skips on these Linux hosts. Existing SDK/server/credential
   environment skips are not acceptance proof for those integrations.
 - Removing the unique exit 1 only from the temporary fixture input produced

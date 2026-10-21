@@ -15,11 +15,21 @@ import subprocess
 import pytest
 
 SOURCE = Path(__file__).with_name("install_dependencies.sh")
+TOOLS = {name: shutil.which(name) for name in ("bash", "dirname", "basename", "uname")}
+BASH = TOOLS["bash"]
 pytestmark = pytest.mark.skipif(
-    platform.system() != "Linux" or shutil.which("bash") is None,
-    reason="dependency runner integration requires Linux and Bash",
+    platform.system() != "Linux" or not all(TOOLS.values()),
+    reason="dependency runner integration requires Linux, Bash and basic coreutils",
 )
-ENVIRONMENT = {"PATH": os.defpath, "LC_ALL": "C"}
+ENVIRONMENT = {
+    "PATH": os.pathsep.join(
+        dict.fromkeys(
+            [str(Path(path).parent) for path in TOOLS.values() if path]
+            + os.defpath.split(os.pathsep)
+        )
+    ),
+    "LC_ALL": "C",
+}
 
 
 def platform_parts(detected, architecture):
@@ -52,7 +62,7 @@ def package(workspace, name, origin, *, executable, status=0):
         # startup hooks. No platform is injected into the code under test.
         detected = subprocess.run(
             [
-                "bash",
+                BASH,
                 "--noprofile",
                 "--norc",
                 "-c",
@@ -87,7 +97,7 @@ def package(workspace, name, origin, *, executable, status=0):
 
 def run(workspace, tmp_path):
     return subprocess.run(
-        ["bash", str(workspace / SOURCE.name), "-y"],
+        [BASH, str(workspace / SOURCE.name), "-y"],
         cwd=tmp_path,
         env=ENVIRONMENT,
         capture_output=True,
@@ -167,3 +177,23 @@ def test_fixture_platform_components_match_runner_fallbacks(
 def test_fixture_platform_cannot_escape_private_workspace(detected, architecture):
     with pytest.raises(ValueError):
         platform_parts(detected, architecture)
+
+
+def test_subprocesses_use_resolved_bash_without_inherited_shell_hooks(
+    workspace, tmp_path, monkeypatch
+):
+    bash = shutil.which("bash")
+    original, calls = subprocess.run, []
+    monkeypatch.setenv("BASH_ENV", str(tmp_path / "untrusted-startup-hook"))
+
+    def checked(argv, **kwargs):
+        assert argv[0] == bash and Path(argv[0]).is_absolute()
+        assert "BASH_ENV" not in kwargs["env"]
+        calls.append(argv)
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", checked)
+    marker = package(workspace, "absolute_bash", "release", executable=True)
+    result = run(workspace, tmp_path)
+    assert result.returncode == 0 and marker.read_text() == "called\n"
+    assert len(calls) == 2
