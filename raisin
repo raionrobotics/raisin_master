@@ -252,12 +252,22 @@ if [[ "${1:-}" == "--install" ]]; then
 
   # Install the build tools in deps/apt.build*.txt that are missing; the venv packages among them
   # are needed just below. The script calls sudo itself, only when something is missing.
+  # When it fails the install goes on, so the steps that do not need it still finish (a system
+  # without apt, tools installed by hand), and the failure is repeated when --install exits, also
+  # when a later step stops it: that step may have failed because of it, and the script's own
+  # error is far above by then.
   echo ""
   echo "📦 Installing system dependencies..."
   sys_deps_script="${SCRIPT_DIR}/install_system_deps.sh"
+  raisin_report_sys_deps_failure() {
+    echo "" >&2
+    echo "⚠️  ${sys_deps_script} failed (its error is above), so build tools may be missing." >&2
+    echo "   A later step may have failed because of it. Fix that error, then re-run:" >&2
+    echo "     bash ${sys_deps_script} && ./raisin --install" >&2
+  }
   if ! bash "${sys_deps_script}"; then
-    echo "⚠️  Some system dependencies may not have installed correctly."
-    echo "   You can re-run: bash ${sys_deps_script}"
+    echo "⚠️  Some system dependencies were not installed. Continuing; the reason is repeated at the end."
+    trap raisin_report_sys_deps_failure EXIT
   fi
 
   # Create the virtual environment immediately
