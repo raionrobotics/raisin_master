@@ -5,12 +5,73 @@
 # Sources  : - src/<pkg>/install_dependencies.sh
 #            - release/install/<pkg>/<os>/<os_version>/<arch>/<build_type>/install_dependencies.sh
 # Usage    : sudo bash install_dependencies.sh
+# Delivered-only: sudo bash install_dependencies.sh --delivered-build-type=release
+# Detached runner: add --delivered-workspace=/absolute/canonical/workspace
 # Note     : Run `raisin setup` first to download release packages.
 
 set -euo pipefail
 
-# Absolute path to the directory where this script lives
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Selection only, not archive authentication or a worker-completion receipt.
+selection_error() {
+    echo "Invalid delivered dependency selection" >&2
+    exit 2
+}
+
+valid_build_type() {
+    local LC_ALL=C value="$1"
+    [[ ${#value} -le 64 && "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
+}
+
+DELIVERED_BUILD_TYPE=""
+DELIVERED_WORKSPACE=""
+unexpected_argument=false
+for argument in "$@"; do
+    case "$argument" in
+        --delivered-build-type=*)
+            [[ -z "$DELIVERED_BUILD_TYPE" ]] || selection_error
+            value="${argument#--delivered-build-type=}"
+            valid_build_type "$value" || selection_error
+            DELIVERED_BUILD_TYPE="$value"
+            ;;
+        --delivered-build-type*) selection_error ;;
+        --delivered-workspace=*)
+            [[ -z "$DELIVERED_WORKSPACE" ]] || selection_error
+            value="${argument#--delivered-workspace=}"
+            [[ -n "$value" ]] || selection_error
+            DELIVERED_WORKSPACE="$value"
+            ;;
+        --delivered-workspace*) selection_error ;;
+        -y) ;;  # Already accepted by provisioning; not forwarded to packages.
+        *) unexpected_argument=true ;;  # Preserve ignored legacy arguments.
+    esac
+done
+if [[ -n "$DELIVERED_BUILD_TYPE" && "$unexpected_argument" == true ]]; then
+    selection_error
+fi
+
+# An independently bound worker may execute pinned bytes outside the workspace.
+# This path selector is not authorization to perform root work in that location.
+if [[ -n "$DELIVERED_WORKSPACE" ]]; then
+    [[ -n "$DELIVERED_BUILD_TYPE" ]] || selection_error
+    valid_workspace() {
+        local LC_ALL=C value="$1"
+        local -a components
+        [[ ${#value} -ge 2 && ${#value} -le 2048 &&
+           "$value" =~ ^/[A-Za-z0-9_./-]+$ ]] || return 1
+        case "$value" in *//*|*/|*/./*|*/../*|*/.|*/..) return 1 ;; esac
+        IFS=/ read -r -a components <<< "$value"
+        [[ ${#components[@]} -le 64 ]]
+    }
+    valid_workspace "$DELIVERED_WORKSPACE" || selection_error
+    SCRIPT_DIR="$(cd -P -- "$DELIVERED_WORKSPACE" 2>/dev/null && pwd -P)" || selection_error
+    [[ "$SCRIPT_DIR" == "$DELIVERED_WORKSPACE" ]] || selection_error
+else
+    # Preserve the developer/source runner's existing script-relative behavior.
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+if [[ -n "$DELIVERED_BUILD_TYPE" && ! -d "$SCRIPT_DIR/release/install" ]]; then
+    selection_error
+fi
 
 # Prevent globbing patterns from expanding to themselves when no match is found
 shopt -s nullglob
@@ -108,7 +169,7 @@ run_installer() {
 }
 
 # --- Run installers from src/<pkg>/install_dependencies.sh ---
-if [[ -d "${SCRIPT_DIR}/src" ]]; then
+if [[ -z "$DELIVERED_BUILD_TYPE" && -d "${SCRIPT_DIR}/src" ]]; then
     echo -e "${BLUE}📂 Checking source packages (src/)...${NC}"
     for pkg_dir in "${SCRIPT_DIR}"/src/*/; do
         if [[ -d "${pkg_dir}" ]]; then
@@ -140,9 +201,13 @@ if [[ -d "${release_install_dir}" ]]; then
                 continue
             fi
 
-            # Look for installer in matching OS/version/arch path
-            # Check all build types (release, debug, etc.)
-            for build_type_dir in "${pkg_dir}${OS_TYPE}/${OS_VERSION}/${ARCH}"/*/; do
+            # Explicit mode never falls back to another build type.
+            if [[ -n "$DELIVERED_BUILD_TYPE" ]]; then
+                build_type_dirs=("${pkg_dir}${OS_TYPE}/${OS_VERSION}/${ARCH}/${DELIVERED_BUILD_TYPE}/")
+            else
+                build_type_dirs=("${pkg_dir}${OS_TYPE}/${OS_VERSION}/${ARCH}"/*/)
+            fi
+            for build_type_dir in "${build_type_dirs[@]}"; do
                 if [[ -d "${build_type_dir}" ]]; then
                     installer="${build_type_dir}install_dependencies.sh"
                     if [[ -f "${installer}" ]]; then
