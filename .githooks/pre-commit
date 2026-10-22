@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Runs the hooks in .pre-commit-config.yaml with the pre-commit this shell can reach.
+# ./raisin --install points git here (core.hooksPath). The host and a dev container share this
+# repository but not their virtual environments, so pre-commit is looked up at every commit
+# instead of being fixed when the hook is installed.
+for pc in "$(command -v pre-commit)" "${HOME}/.venvs/raisin_master/bin/pre-commit"; do
+  if [[ -x "${pc}" ]]; then
+    exec "${pc}" run   # the staged files, as the hook pre-commit install writes does
+  fi
+done
+echo "pre-commit not found: requirements.txt was not checked against requirements.in." >&2
+echo "Run ./raisin --install, or commit where it is installed." >&2
+exit 0   # do not block the commit; test_requirements_lock.py still catches a stale lock
