@@ -1,173 +1,127 @@
 # Populate an owned marked runtime prefix
 
-Candidate library mechanism on corePR13137ea05f; no CLI/agent factory or installed
-activation. Existing `assemble`, `deploy_packages`, setup and legacy resource
-behavior are unchanged. The caller still owns core exclusion, original operation
-claim, fresh writer drain, verified candidate/current request/root completion and
-the actual prefix lifetime. This API does not establish those authorities, issue
-unit commands, release claims, remove markers or report runtime health.
+This opt-in library mechanism does not activate an installed CLI or agent path.
+Existing `assemble`, `deploy_packages`, setup and legacy resource behavior are
+unchanged. The caller owns core exclusion, the original operation claim, fresh
+writer drain, verified candidate/current request, root completion and actual
+prefix lifetime. This API does not establish those authorities, issue unit
+commands, release claims, remove markers or report runtime health.
 
 ## Interface
 
 `runtime_prefix.populate_marked(context, *, selected_path, prefix, build_type, home)
 -> List[Path]`
 
-Require explicit canonical absolute real paths: context.workspace, selected_path,
-prefix and device home. Selected_path is the exact caller-selected generation,
-not the mutable release/install selector. It must be below the workspace's real
-release/versions, with one direct real package directory per delivered package
-and an optional empty regular `.staging` generation marker. No other files at
-that level. The library does not select or validate generation numbers or infer
-archive/authentication/installation identity from this path.
+Require explicit canonical absolute real paths for context.workspace,
+selected_path, prefix and device home. selected_path is the exact caller-selected
+generation, not the mutable release/install selector. It must be directly below
+the workspace's real release/versions, with one real package directory per
+delivered package and an optional empty regular `.staging` generation marker.
+No other files are allowed at that level. The library does not select or validate
+generation numbers or infer archive/authentication/installation identity.
 
-Validate platform components via the existing safe-component rules; build_type
+Validate platform components with the existing safe-component rules; build_type
 is exactly debug or release. Every package must contain the requested exact
 platform/build directory; missing/empty selection refuses before a prefix write.
 Only that build is copied. Unselected build payloads are not traversed/copied.
-Package order is lexical and later packages win on colliding regular file names,
-matching the legacy merge model with an explicit deterministic ordering.
-Overlays are also applied in lexical package order, after all package copies and
-their permission normalization. Internal copy traversal and exact partial output
-on a failure are not promised deterministic; only merge precedence and retained
-negative state are. No caller may adopt that partial output as a resumable result.
+Package order is lexical; later packages win on colliding regular file names.
+Device overlays are applied in lexical package order after all package copies
+and executable normalization. Internal copy traversal and exact partial output
+on failure are not promised deterministic. Partial output is never resumable.
 
 Prefix is exactly workspace/install, already owned by the caller's effective
-UID/GID, real0700 and ACL-free. It initially contains only one `.incomplete`:
-an empty regular0600 single-link file with the same owner and no ACL. Never create,
+UID/GID, real0700 and ACL-free. It initially contains only one `.incomplete`: an
+empty regular0600 single-link file with the same owner and no ACL. Never create,
 delete, rename, chmod, copy metadata onto or replace that root/marker. Copy package
 children, not the source root via copytree. Prefix dev/inode/mode/owner and full
-marker metadata must remain the original facts; parent directory namespace
-timestamps/nlink can change from adding children. Result paths are information
-about the package inputs used, never completion/start/recovery authority.
+marker metadata must remain original. Parent namespace timestamps/nlink may change
+as children are added. Returned package paths confer no completion/start authority.
 
-## Input plan and failure behavior
+## Input stability and bounded discovery
 
-Plan all selected package children and `home/.raisin/<package>/resource` overlays
-before the first output write. Optional missing .raisin or resource directories
-are fine; ordinary unrelated regular files immediately in .raisin are ignored.
-Overlay discovery is one package level only. Overrides follow all packages and
-retain the existing resource/<package>/resource destination layout, including
-packages which have no delivered resource folder. Directory/file merge conflicts
-raise, never yield a partially successful result. Output may remain partial.
+Plan all selected package children and home/.raisin/<package>/resource overlays
+before the first output write. Missing .raisin/resource directories are allowed;
+ordinary unrelated regular files immediately in .raisin are ignored. Discovery
+is one package level only. Overrides retain resource/<package>/resource layout,
+including packages without delivered resources. Directory/file conflicts raise.
 
-All traversed input ancestors/entries must be real canonical directories or
-single-link regular files, no symlink/special file/ACL. The selected generation
-may carry only the checked optional marker plus packages. Reject any selected
-build root child named .incomplete before writing; overlays are confined below resource.
-Input trees and prefix must be disjoint. Count every inspected discovery/traversal
-entry globally within each complete input plan, including ignored regular .raisin
-entries and package directories without a resource, with a65536 cap. The post-copy
-plan has its own identical cap. Stop enumeration immediately at the cap;
-use iterative scans, not an unbounded recursive validation. Reject
-unsupported ACL capability rather than assuming no ACL. This supported POSIX
-managed profile does not expand legacy CLI platform requirements.
+All inspected entries must be real directories or single-link regular files,
+without symlink/special file/extended ACL. Required ancestors must be canonical
+real directories. Reject a selected build root child named `.incomplete` before
+writing; overlays remain below resource. Input trees and prefix must be disjoint.
+Unsupported ACL capability refuses rather than assuming no ACL.
 
-Retain metadata observations (excluding read-induced atime), repeat the input
-plan after copying and permission normalization, and refuse if it changed. Normal
-stable cooperative hierarchy, caller exclusion and trusted root/updater/mount
-management are required; this is not a hostile same-UID/path-swap sandbox or a
-content hash. The caller must not treat metadata observations as authentication.
+Repeat the plan after copying and normalization. Full metadata observations,
+excluding read-induced atime, must match for copied trees and the generation
+marker. Selected generation membership must match. Required ancestors retain
+dev/inode/mode/owner, but not size, nlink or namespace timestamps: unrelated files
+added to home/workspace/release do not invalidate copied inputs. Ignored .raisin
+files and resource-less packages are checked for safety and counted, not retained
+as content witnesses. A newly discovered real overlay still changes the plan and
+refuses. Stable cooperative hierarchy, caller exclusion and trusted root/updater/
+mount management are required. This is metadata change detection, not content
+authentication or a hostile same-UID/path-swap sandbox.
 
-The input profile intentionally requires the agent's freshly extracted complete
-archive candidate (private_preparation), which already rejects hardlinks. It does
-not accept legacy stage_version clones of unchanged packages: those use shared
-inodes with st_nlink>1. That refusal is deliberate and will be tested with the
-actual producer, not "fixed" by weakening the agent's existing preparation
-contract. Legacy assemble/setup behavior for such generations is unchanged.
+`MANAGED_PREFIX_MAX_ENTRIES` is 65,536. Each complete input plan counts unique
+inspected paths, including required ancestors, ignored discovery entries and
+optional missing resource paths. Re-inspection does not double-charge a path;
+multiple metadata facts about it do not consume extra entries. Pre/post plans
+have separate identical budgets; scans stop before inspecting an entry beyond
+the limit. Executable traversal has a separate 65,536-entry bound. Scans are
+iterative, not unbounded recursion.
 
-Mark copied bin files0755 and scripts/**/*.sh executable as the existing runtime
-behavior does, but errors must propagate (no warning-and-continue in this path).
-Do not use source/build discovery, generate compiler files, read CLI globals or
-run external commands. Ordinary validation refusals use ValueError, I/O failures
-propagate their OSError; internal programming errors/cancellation are not masked.
-On every failure preserve original root/marker and retain partial output; no
-rollback/deletion/repair/retry/recovery. Fresh independent whole validation and
-strict file/directory synchronization remain the owner's later completion gate;
-a returned list is not durable installation or successful startup.
+The agent's private-preparation/output witness also has a 65,536 limit, but counts
+one tree including its root, not this entire discovery set. These are distinct
+sets: a prepared candidate can fit while population exceeds its discovery budget
+because of ancestors or local overlays. No unlimited/future-release capacity is
+promised. A caller must handle `entry_limit` as an incomplete refusal; never raise
+the limit silently, truncate the plan or adopt partial output. The public constant
+lets callers detect limit-profile drift before beginning owned work.
 
-## Required proof
+The managed profile requires freshly extracted complete single-link candidates.
+Legacy stage_version clones share inodes with st_nlink>1 and are deliberately
+refused. Legacy assemble/setup behavior for those generations is unchanged.
 
-Real filesystem copies with two packages/platforms/debug/release, deterministic
-collisions, explicit generation despite a selector pointing elsewhere, leftover
-src ignored, local resource overlays and root/marker identity preservation.
-Refuse missing/nonempty/unsafe destination, missing package build, reserved marker
-collision, symlinks/special files/hardlinks/ACLs, overlapping or changed inputs,
-and entry-budget exhaustion before the first output write. Inject copy and chmod
-failure/cancellation and confirm partial output stays marked, root/marker intact.
-Mutation tests must detect deleting the marker, copying all builds or swallowing
-permission errors. Preserve existing setup/assemble parity. Root/nonroot fixtures
-do not prove installed guard/unit/PID1 or web→mission→web acceptance. No new core
-release/dependency pin until separately reviewed immutable publication.
+## Refusals and ownership
 
-## Review and local verification, 2026-10-21
+Managed validation raises `RuntimePrefixError`, a backwards-compatible ValueError
+subclass with a fixed `reason_code`. Codes are invalid_input, unsafe_entry,
+hardlinked_input, extended_acl, acl_unavailable, invalid_prefix, invalid_marker,
+invalid_build, missing_build, no_packages, entry_limit, input_changed and
+output_changed. Codes do not contain paths or original exception strings. An
+ordinary ValueError from existing component validation need not have a code.
+I/O errors propagate as OSError; programming errors/cancellation are not masked.
+Consumers must allowlist codes at this boundary, not trust arbitrary exception
+attributes elsewhere or parse raw error text.
 
-- Contract review found discovery-only entries were not included in the proposed
-  bound. All inspected entries now share the per-plan budget, including ignored
-  files and packages with no resource directory. Re-review found no required gap.
-- Implementation review reproduced output scan PermissionError being swallowed
-  by os.walk/rglob. Two RED regressions now pass with strict iterative scandir;
-  the legacy helpers are unchanged. Corrective review also reproduced the exact
-  `.sh` filename mismatch: two RED cases now pass with the existing glob semantics.
-  No other required issue was found under the documented cooperative hierarchy.
-- New managed tests:47, including actual legacy stage_version hardlink output,
-  injected scan/copy/chmod failures, cancellation and original marker preservation.
-  The chmod injection targets Path.chmod directly because pathlib3.9 caches its
-  accessor; this is a test instrumentation difference, not a product fallback.
-- Full host regression: Python3.9.25 **802 passed/36 skipped (11.90s)** and
-  Python3.12.3 **802 passed/36 skipped (12.91s)**. Existing skips are20 SDK/source
-  availability tests and16 external OTA server/robot credential tests. None were
-  newly disabled. No external-server integration is claimed by this run.
-- Restricted root and UID65534 fixtures each **71 passed (0.21s)**, including
-  existing runtime-prefix/setup parity. Network disabled, read-only source/rootfs,
-  private tmpfs, all capabilities dropped and no-new-privileges. No host services,
-  state or credentials were mounted. Image sha256:
-  `fb1debb5d2d3ecf204abe3a130b0dae1f0fc53bb511da0032044605afb9ce690`.
-  Its absent CLI-only dependencies Click and Git were supplied by read-only mounts
-  of the verified test environment's Click package and `/usr/bin/git`; initial
-  missing-dependency runs are not counted as passing evidence.
-- In-memory mutations of deleting the marker, copying both build types instead
-  of the requested one, and omitting executable normalization were each detected
-  by behavioral tests. Product callables were restored and source hashes unchanged.
+Copied bin files become0755; scripts/**/*.sh gain executable bits. Copy/scan/chmod
+errors propagate. Do not discover source/build trees, generate compiler files,
+read CLI globals or run external commands. Every failure retains original
+root/marker and any partial output, without deletion/rollback/repair/retry.
+Fresh independent whole validation, strict file/directory synchronization and
+explicit recovery remain the owner's later gate. A return is not durable
+installation or successful startup. Immutable publication and separately reviewed
+caller adoption are required before deployment.
 
-Initial verified product SHA256:
-`8a95658f9878f1979e2214ca1db23ea314ca36a2ac3e4eadc4ffea67e5bed9aa`.
-Initial verified managed-test SHA256:
-`ca93b43b89ad35841105c4562363b8c3c9903dffd5be91c480942bd456a9dc13`.
+## Verification and history
 
-Replay from a checkout with declared dependencies and pytest installed:
+Run the managed and legacy-parity checks, then the full suite with declared
+dependencies installed:
 
 ```sh
-python -m pytest -q -rs -p no:cacheprovider
 python -m pytest test_managed_runtime_prefix.py test_runtime_prefix.py test_runtime_prefix_parity.py test_setup_deploy.py -q -p no:cacheprovider
+python -m pytest -q -rs -p no:cacheprovider
 ```
 
-Installed-artifact proof: built `raisin_ota-0.1.9.dev13+g2dfba2e-py3-none-any.whl`
-from code commit2dfba2e, installed it with declared dependencies from the offline
-cache in a fresh venv, and copied only the managed and library runtime-prefix
-tests outside the checkout. Python isolated mode verified the exact installed
-module path/SHA256 above and **66 passed (0.20s)**. No source-path injection or CLI
-checkout was used. This development version follows the older parent branch's
-tags; it is not a new published release or an upgrade recommendation over0.2.0.
-Evidence is retained under `/tmp/raisin-managed-prefix-wheel-gqScFC` locally.
+Coverage must include real copies, exact selected builds, collisions, overlays,
+root/marker preservation, irrelevant namespace changes, changed copied inputs,
+unsafe/overlapping inputs, exact budget boundaries and injected copy/scan/chmod
+failure/cancellation. Local fixtures do not prove installed PID1/power-loss or
+web→mission→web acceptance.
 
-This remains a reviewed opt-in library slice, not an installed owner, completed
-runtime transition, PID1/power-loss proof or FMS command acceptance. No caller or
-dependency pin is changed by this PR. The parent corePR131 still needs its own
-review/merge and immutable publication before an agent adopts this mechanism.
-
-### Automatic review: explicit permission bits
-
-The stat.S_IMODE suggestion is accepted as a clearer chmod boundary, not a
-reproduced Linux runtime failure. The old Linux call ignored file-type bits;
-the new managed helper passes only the permission bits plus executable flags.
-A strict-argument fixture failed before the one-line change and passes afterward.
-Legacy helper behavior remains unchanged. Focused managed/parity72 PASS.
-Updated module SHA256:
-`983194f6f536d35c30bdaaccf631fef2c3fa7ab52ad566cead33fbd8c7ff4dcf`.
-Updated test SHA256:
-`17caaa999f0329dcc200db709d75eeb44edac909d8b87118241ddbd9c0a46afe`.
-Earlier wheel/host counts describe2dfba2e; follow-up verification is separate.
-
-Follow-up full regression: Python3.9.25 **803 PASS/36 existing SKIP (11.98s)**,
-Python3.12.3 **803 PASS/36 existing SKIP (11.86s)**. Same restricted root and
-UID65534 profile: **72 PASS each (0.22s/0.21s)**. No new skip or default change.
+Historical verification counts, artifact hashes and environment details belong
+to [PR #138](https://github.com/raionrobotics/raisin_master/pull/138), not the durable
+contract. Earlier records remain inspectable in
+[the pre-review documentation](https://github.com/raionrobotics/raisin_master/blob/15ab719b94122ab9e8d47773af0a607e8d1a8a9d/docs/ota-managed-prefix.md).
+The [review](https://github.com/raionrobotics/raisin_master/pull/138#pullrequestreview-5609033203)
+records the namespace, limit, diagnostics and documentation corrections.
