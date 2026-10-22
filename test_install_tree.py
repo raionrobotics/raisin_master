@@ -40,10 +40,23 @@ class InstallTreeTestCase(unittest.TestCase):
 
         Editing in place would mutate the hardlink-shared previous version.
         """
-        relative = Path(name) / "linux" / "22.04" / "x86_64" / "release"
-        d = it.replace_package_dir(base, relative)
+        d = it.replace_package_dir(base, base / name / "linux" / "22.04" / "x86_64" / "release")
         (d / "release.yaml").write_text(f"version: {marker}\n", encoding="utf-8")
         return d
+
+
+def previous_version(release):
+    """Version the rollback record would restore, or None.
+
+    Moved here from `install_tree` when nothing but these tests read it; the
+    assertions keep asking the same question of the same record.
+    """
+    record = it._read_rollback(release)
+    name = record.get("to") if record else None
+    if not name or not (it.versions_dir(release) / name).is_dir():
+        return None
+    parsed = it._split_generation(name)
+    return parsed[1] if parsed else name
 
 
 class TestLegacyMigration(InstallTreeTestCase):
@@ -97,6 +110,149 @@ class TestLegacyMigration(InstallTreeTestCase):
             / "release.yaml"
         )
         self.assertEqual(moved.stat().st_ino, inode)
+
+
+class TestReplacePackageDir(InstallTreeTestCase):
+    """Whatever is where a package goes in a staged tree is replaced by an empty
+    directory, and nothing outside the staged tree is touched."""
+
+    PKG = Path("pkg1") / "linux" / "22.04" / "x86_64" / "release"
+
+    def _elsewhere(self):
+        """A directory outside the tree, with a file that must survive."""
+        other = self.release.parent / "elsewhere"
+        other.mkdir()
+        (other / "kept.txt").write_text("keep me", encoding="utf-8")
+        return other
+
+    def test_an_absent_path_becomes_an_empty_directory(self):
+        staging = self.release / "staging"
+        target = staging / self.PKG
+
+        self.assertEqual(it.replace_package_dir(staging, target), target)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_directory_is_emptied_and_the_live_version_keeps_its_file(self):
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "old")
+        it.commit_version(self.release, "1.0.0")
+        staging = it.stage_version(self.release, "2.0.0")
+
+        it.replace_package_dir(staging, staging / self.PKG)
+
+        self.assertEqual(list((staging / self.PKG).iterdir()), [])
+        live = self.release / "install" / self.PKG / "release.yaml"
+        self.assertIn("old", live.read_text(encoding="utf-8"))
+
+    def test_a_symlink_is_replaced_and_what_it_pointed_at_is_left_alone(self):
+        other = self._elsewhere()
+        staging = self.release / "staging"
+        target = staging / self.PKG
+        target.parent.mkdir(parents=True)
+        target.symlink_to(other, target_is_directory=True)
+
+        it.replace_package_dir(staging, target)
+
+        self.assertFalse(target.is_symlink())
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
+
+    def test_a_dangling_symlink_is_replaced(self):
+        staging = self.release / "staging"
+        target = staging / self.PKG
+        target.parent.mkdir(parents=True)
+        target.symlink_to(self.release.parent / "gone", target_is_directory=True)
+
+        it.replace_package_dir(staging, target)
+
+        self.assertFalse(target.is_symlink())
+        self.assertTrue(target.is_dir())
+
+    def test_a_file_is_replaced(self):
+        staging = self.release / "staging"
+        target = staging / self.PKG
+        target.parent.mkdir(parents=True)
+        target.write_text("not a directory", encoding="utf-8")
+
+        it.replace_package_dir(staging, target)
+
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_link_in_the_live_tree_becomes_a_directory_in_the_staged_one(self):
+        """Somebody pointed a package in the live tree at their own directory.
+
+        The clone carries the link into the staged tree. The new version gets
+        a real directory for the package; the live version keeps its link, and
+        the directory the link pointed at keeps its file.
+        """
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "old")
+        it.commit_version(self.release, "1.0.0")
+        other = self._elsewhere()
+        live_pkg = self.release / "versions" / "0001-1.0.0" / self.PKG
+        shutil.rmtree(live_pkg)
+        live_pkg.symlink_to(other, target_is_directory=True)
+
+        staging = it.stage_version(self.release, "2.0.0")
+        self.assertTrue((staging / self.PKG).is_symlink())  # what the clone does
+
+        it.replace_package_dir(staging, staging / self.PKG)
+
+        self.assertFalse((staging / self.PKG).is_symlink())
+        self.assertTrue((staging / self.PKG).is_dir())
+        self.assertTrue(live_pkg.is_symlink())
+        self.assertEqual((other / "kept.txt").read_text(encoding="utf-8"), "keep me")
+
+    def _elsewhere_with_a_build(self):
+        """Somebody's own build of pkg1: the same layout a package has."""
+        other = self._elsewhere()
+        build = other / "linux" / "22.04" / "x86_64" / "release"
+        build.mkdir(parents=True)
+        (build / "user_build.txt").write_text("theirs", encoding="utf-8")
+        return other, build
+
+    def test_a_link_at_the_package_directory_is_replaced_and_the_build_behind_it_is_kept(self):
+        """The link is the package directory itself, not its last component.
+
+        The path's end is then a real directory -- behind the link -- and
+        `rmtree` there would empty somebody's build without a word.
+        """
+        other, build = self._elsewhere_with_a_build()
+        staging = self.release / "staging"
+        staging.mkdir(parents=True)
+        (staging / "pkg1").symlink_to(other, target_is_directory=True)
+
+        it.replace_package_dir(staging, staging / self.PKG)
+
+        self.assertFalse((staging / "pkg1").is_symlink())
+        self.assertTrue((staging / self.PKG).is_dir())
+        self.assertEqual(list((staging / self.PKG).iterdir()), [])
+        self.assertEqual((build / "user_build.txt").read_text(encoding="utf-8"), "theirs")
+
+    def test_a_package_directory_linked_in_the_live_tree_becomes_a_directory_in_the_staged_one(self):
+        """Same as above, arriving the way it does on a robot: by the clone."""
+        self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "old")
+        it.commit_version(self.release, "1.0.0")
+        other, build = self._elsewhere_with_a_build()
+        live_pkg = self.release / "versions" / "0001-1.0.0" / "pkg1"
+        shutil.rmtree(live_pkg)
+        live_pkg.symlink_to(other, target_is_directory=True)
+
+        staging = it.stage_version(self.release, "2.0.0")
+        self.assertTrue((staging / "pkg1").is_symlink())  # what the clone does
+
+        it.replace_package_dir(staging, staging / self.PKG)
+
+        self.assertFalse((staging / "pkg1").is_symlink())
+        self.assertEqual(list((staging / self.PKG).iterdir()), [])
+        self.assertTrue(live_pkg.is_symlink())
+        self.assertEqual((build / "user_build.txt").read_text(encoding="utf-8"), "theirs")
+
+    def test_a_target_outside_the_staged_tree_is_refused(self):
+        """The walk stops at `staging`; a target not under it is a caller bug."""
+        with self.assertRaises(ValueError):
+            it.replace_package_dir(self.release / "staging", self.release / "other" / self.PKG)
 
 
 class TestStageAndCommit(InstallTreeTestCase):
@@ -154,7 +310,7 @@ class TestStageAndCommit(InstallTreeTestCase):
         self._write_pkg(it.stage_version(self.release, "2.0.0"), "pkg1", "new")
         it.commit_version(self.release, "2.0.0")
 
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertEqual(previous_version(self.release), "1.0.0")
 
     def test_abandoned_staging_leaves_the_live_tree_alone(self):
         self._write_pkg(it.stage_version(self.release, "1.0.0"), "pkg1", "old")
@@ -412,7 +568,7 @@ class TestTamperRecovery(InstallTreeTestCase):
         it.ensure_tree(self.release)
 
         self.assertEqual(it.current_version(self.release), "2.0.0")
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertEqual(previous_version(self.release), "1.0.0")
 
     def test_symlink_replaced_by_a_real_directory_is_absorbed(self):
         self._commit("1.0.0")
@@ -448,7 +604,7 @@ class TestTamperRecovery(InstallTreeTestCase):
         self._commit("2.0.0")
         shutil.rmtree(self.release / "versions" / "0001-1.0.0")
 
-        self.assertIsNone(it.previous_version(self.release))
+        self.assertIsNone(previous_version(self.release))
         # `rollback` was removed (raisin_master#123); `undo_last_commit` returns
         # what it did and the version restored, and the version is what this reads.
         self.assertIsNone(it.undo_last_commit(self.release)[1])
@@ -522,7 +678,7 @@ class TestRollback(InstallTreeTestCase):
         it.commit_version(self.release, "1.0.0")
 
         self.assertEqual(it.current_version(self.release), "1.0.0")
-        self.assertIsNone(it.previous_version(self.release))
+        self.assertIsNone(previous_version(self.release))
 
     def test_a_rollback_record_that_is_not_text_is_not_read_as_none(self):
         """Corrupted bytes are not "no version before": the live one stays.
@@ -559,37 +715,37 @@ class TestMultiCommitAttempt(InstallTreeTestCase):
     the attempt itself produced.
     """
 
-    def _commit(self, version, session=None, marker=None):
+    def _commit(self, version, marker=None):
         self._write_pkg(
             it.stage_version(self.release, version), "pkg1", marker or version
         )
-        return it.commit_version(self.release, version, session=session)
+        return it.commit_version(self.release, version)
 
     def test_second_commit_under_one_session_is_undone_on_its_own(self):
         """Changed from "keeps the original rollback target" (raisin_master#123).
 
         `--install-all` was removed in 46a940c, and it was the only caller that
-        committed twice for one install. `session` is now accepted and ignored:
-        a failed install keeps its session so the retry can resume it, and the
-        retry's commit was taken for the same install committing twice -- see
-        `TestRollbackUndoesTheLastCommitOnce`.
+        committed twice for one install. `session` was accepted and ignored,
+        then removed (raisin_master#124): a failed install keeps its session so
+        the retry can resume it, and the retry's commit was taken for the same
+        install committing twice -- see `TestRollbackUndoesTheLastCommitOnce`.
         """
         self._commit("1.0.0", marker="good")
-        self._commit("2.0.0-debug", session="s1", marker="debug")
-        self._commit("2.0.0", session="s1", marker="release")
+        self._commit("2.0.0-debug", marker="debug")
+        self._commit("2.0.0", marker="release")
 
         self.assertEqual(it.current_version(self.release), "2.0.0")
-        self.assertEqual(it.previous_version(self.release), "2.0.0-debug")
+        self.assertEqual(previous_version(self.release), "2.0.0-debug")
 
     def test_rollback_after_two_commits_under_one_session_undoes_the_last(self):
         """Changed from "restores the pre-attempt tree" (raisin_master#123).
 
         Same reason as the test above: `--install-all` was removed in 46a940c,
-        and `session` is accepted and ignored.
+        and `session` was accepted and ignored, then removed (raisin_master#124).
         """
         self._commit("1.0.0", marker="good")
-        self._commit("2.0.0-debug", session="s1", marker="debug")
-        self._commit("2.0.0", session="s1", marker="release")
+        self._commit("2.0.0-debug", marker="debug")
+        self._commit("2.0.0", marker="release")
 
         it.undo_last_commit(self.release)[1]
 
@@ -606,16 +762,16 @@ class TestMultiCommitAttempt(InstallTreeTestCase):
         self.assertIn("debug", content)
 
     def test_a_later_attempt_moves_the_rollback_target_forward(self):
-        self._commit("1.0.0", session="s1", marker="first")
-        self._commit("2.0.0", session="s2", marker="second")
+        self._commit("1.0.0", marker="first")
+        self._commit("2.0.0", marker="second")
 
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertEqual(previous_version(self.release), "1.0.0")
 
     def test_commits_without_a_session_behave_as_before(self):
         self._commit("1.0.0")
         self._commit("2.0.0")
 
-        self.assertEqual(it.previous_version(self.release), "1.0.0")
+        self.assertEqual(previous_version(self.release), "1.0.0")
 
 
 class TestRetention(InstallTreeTestCase):
@@ -766,11 +922,11 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
     rollback consumes it.
     """
 
-    def _commit(self, version, marker=None, session=None):
+    def _commit(self, version, marker=None):
         self._write_pkg(
             it.stage_version(self.release, version), "pkg1", marker or version
         )
-        return it.commit_version(self.release, version, session=session)
+        return it.commit_version(self.release, version)
 
     def _live_marker(self):
         return (
@@ -791,33 +947,11 @@ class TestRollbackUndoesTheLastCommitOnce(InstallTreeTestCase):
         self._commit("1.0.0", marker="good")
         for _ in range(3):
             it.ensure_tree(self.release)
-            self._commit("2.0.0", marker="bad", session="S")
+            self._commit("2.0.0", marker="bad")
 
             self.assertEqual(it.undo_last_commit(self.release)[1], "1.0.0")
             self.assertEqual(it.current_version(self.release), "1.0.0")
         self.assertIn("good", self._live_marker())
-
-    def test_a_session_is_accepted_and_ignored(self):
-        """`session` stays in the signature for the callers that pass it, and
-        nothing reads it.
-
-        It marked commits of one install, so that a second kept the first's
-        rollback target. A failed install keeps its session so the retry can
-        resume it, so the retry's commit was taken for the same install
-        committing twice and recorded nothing to go back to -- the defect above.
-        Telling one install from the next is not something a session can do,
-        and the only caller that committed twice for one install, `--all`, was
-        removed in 46a940c. So each commit is undone on its own, whatever
-        session it carries. `TestMultiCommitAttempt` above was changed to say
-        the same.
-        """
-        self._commit("1.0.0")
-        self._commit("2.0.0-debug", session="s1")
-        self._commit("2.0.0", session="s1")
-
-        self.assertEqual(it.previous_version(self.release), "2.0.0-debug")
-        self.assertEqual(it.undo_last_commit(self.release)[1], "2.0.0-debug")
-        self.assertIsNone(it.undo_last_commit(self.release)[1])
 
     def test_a_second_rollback_with_no_commit_between_changes_nothing(self):
         """Found in review: it took the restored version away, and pruning deleted it."""

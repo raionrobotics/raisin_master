@@ -6,7 +6,6 @@ and a provisioned key file. The core takes an identity and asks no questions,
 so this module answers them and hands the result to `ota_client.configure`.
 """
 
-import json
 import os
 import stat
 from pathlib import Path

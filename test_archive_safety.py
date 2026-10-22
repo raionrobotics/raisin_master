@@ -59,7 +59,7 @@ def test_unsafe_names_refuse_before_content_or_permission_effects(
     )
     if caller == "client":
         assert (
-            client._extract_and_read_deps(path, into, "fixture", "1.0.0", strict=True)
+            client._extract_and_read_deps(path, into.parent, into, "fixture", "1.0.0", strict=True)
             is None
         )
     else:
@@ -176,7 +176,7 @@ def test_valid_dot_prefix_and_permission_mask_keep_existing_contract(tmp_path):
             ("lib/plain", b"plain", 0o100644),
         ],
     )
-    assert client._extract_and_read_deps(path, into, "fixture", "1.0.0", strict=True)
+    assert client._extract_and_read_deps(path, into.parent, into, "fixture", "1.0.0", strict=True)
     assert (into / "bin" / "tool").read_bytes() == b"new executable"
     assert stat.S_IMODE((into / "bin" / "tool").stat().st_mode) == 0o755
     assert stat.S_IMODE((into / "lib" / "plain").stat().st_mode) == 0o644
@@ -311,5 +311,5 @@ def test_windows_normalization_aliases_are_rejected_before_effects(
     sentinel.write_bytes(b"keep")
     path = tmp_path / "package.zip"
     package(path, [(name, b"bad", 0o100755)])
-    assert client._extract_and_read_deps(path, into, "fixture", "1.0.0") is None
+    assert client._extract_and_read_deps(path, into.parent, into, "fixture", "1.0.0") is None
     assert sentinel.read_bytes() == b"keep"

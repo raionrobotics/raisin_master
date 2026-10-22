@@ -192,20 +192,6 @@ def current_version(release) -> Optional[str]:
     return parsed[1] if parsed else name
 
 
-def previous_version(release) -> Optional[str]:
-    """Version a rollback would restore, or None when it would restore none.
-
-    Deprecated: nothing outside tests calls it, and nothing has since before
-    the rollback record. Remove with the tests that read it.
-    """
-    record = _read_rollback(release)
-    name = record.get("to") if record else None
-    if not name or not (versions_dir(release) / name).is_dir():
-        return None
-    parsed = _split_generation(name)
-    return parsed[1] if parsed else name
-
-
 def rolls_back_to_none(release) -> bool:
     """Whether `undo_last_commit` would take the tree back to no version at all.
 
@@ -501,45 +487,60 @@ def _is_staging(version_dir: Path) -> bool:
     return (version_dir / _STAGING_MARKER).exists()
 
 
-def replace_package_dir(staging: Path, relative: Path) -> Path:
-    """Clear a package directory inside a staged tree before writing into it.
+def replace_package_dir(staging: Path, target: Path) -> Path:
+    """Clear a package's path inside a staged tree; return it as an empty directory.
 
-    A staged tree is hardlink-cloned from the live one, so its files share
-    inodes with the version a rollback would restore. Writing into an existing
-    file would edit that version too. Removing the directory first breaks the
-    link; the OTA extract path already does exactly this, and anything else
-    writing into a staged tree must too.
+    A staged tree is hardlink-cloned from the live one, so a file here shares
+    its inode with the version a rollback would restore, and writing into it
+    would edit that version too. Removing first breaks the link. Anything that
+    writes a package into a staged tree goes through here.
+
+    Whatever is on the way from `staging` down to `target` goes. A directory
+    at the end is removed. A file or a symlink met at any depth -- the package
+    directory itself, or the build-type directory at the end -- is unlinked
+    and never followed, so what it points at is left alone. The clone keeps
+    symlinks as symlinks, so a link somebody put in the live tree in a
+    package's place arrives in every staged tree, at whatever depth they put
+    it. Removing only the end handled neither: `rmtree` refused a link there,
+    and refused on every attempt, which left that robot unable to install
+    anything until a person found the link; a link higher up it followed, and
+    emptied the directory behind it. Replaced instead: the new version gets
+    the package the archive names, and the version with the link stays as it
+    was, for a rollback to restore. A link at `release/install` is a different
+    matter -- see `ensure_tree`, which leaves one it did not make alone,
+    because that one decides what runs. `staging` is this module's own
+    directory and is not checked.
     """
-    target = staging / relative
-    if target.exists():
+    path = staging
+    for part in target.relative_to(staging).parts:
+        path = path / part
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            path.unlink()
+            break
+    if target.is_dir():
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
     return target
 
 
 def _resolve_version_dir(release, version: str) -> Optional[Path]:
-    matches = [entry for gen, name, entry in _generations(release) if name == version]
+    matches = [entry for _, name, entry in _generations(release) if name == version]
     return matches[-1] if matches else None
 
 
-def commit_version(
-    release, version: str, session: Optional[str] = None
-) -> Optional[str]:
+def commit_version(release, version: str) -> Optional[str]:
     """Make a staged version live. Returns the directory now current.
 
     What was live before it is recorded first, so `undo_last_commit` can undo exactly
     this commit -- and when nothing was live, that is recorded too.
 
-    `session` is accepted for the callers that pass it and is not used. It used
-    to mark commits of one install, so that a second kept the first's rollback
-    target; but a failed install keeps its session so the retry can resume it,
-    and the retry's commit was taken for the same install committing twice --
-    it recorded nothing, and its rollback took a robot with a version back to
+    Each commit is undone on its own. A `session` argument used to mark the
+    commits of one install, so that a second kept the first's rollback target;
+    but a failed install keeps its session so the retry can resume it, and the
+    retry's commit was taken for the same install committing twice -- it
+    recorded nothing, and its rollback took a robot with a version back to
     none. The only caller that committed twice for one install was `--all`,
-    removed in 46a940c.
-
-    Deprecated: `session`. Remove once no caller passes it -- the two commits in
-    `client.py` and the tests that pass one.
+    removed in 46a940c; the argument went with its last callers.
     """
     target = _resolve_version_dir(release, version)
     if target is None:

@@ -18,10 +18,7 @@ import random
 import re
 import hashlib
 import shutil
-import stat
-import struct
 import subprocess
-import tempfile
 import time
 import uuid
 import zipfile
@@ -1172,25 +1169,6 @@ def _get_token_cache_path() -> Path:
     return _ctx().workspace / _TOKEN_CACHE_FILE
 
 
-def _is_jwt_expired(token: str) -> bool:
-    """Check if a JWT token is expired by decoding its payload.
-
-    Decodes the JWT payload (no signature verification — just reading
-    the ``exp`` claim) and returns True if the token expires within
-    30 seconds.
-    """
-    try:
-        payload_b64 = token.split(".")[1]
-        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
-        payload = json.loads(base64.b64decode(padded))
-        exp = payload.get("exp")
-        if exp is None:
-            return False
-        return time.time() > (exp - 30)
-    except Exception:
-        return True
-
-
 def _load_cached_token() -> Optional[str]:
     """Load token from persistent cache file if it's still valid.
 
@@ -1935,12 +1913,9 @@ class RotatedCredential(RobotCallOutcome):
 class ExchangedCredential(RobotCallOutcome):
     """The node-pinned credential returned for a legacy robot-wide one."""
 
-    robot_id: Optional[str] = None
     node_key: Optional[str] = None
     node_id: Optional[str] = None
     plain_key: Optional[str] = None
-    legacy_credential_expires_at: Optional[str] = None
-    already_exchanged: bool = False
 
     @property
     def ok(self) -> bool:
@@ -2176,14 +2151,9 @@ def exchange_robot_credential(
         )
 
     return ExchangedCredential(
-        robot_id=_response_optional_string(payload.get("robotId")),
         node_key=returned_key,
         node_id=node_id,
         plain_key=plain_key,
-        legacy_credential_expires_at=_response_optional_string(
-            payload.get("legacyCredentialExpiresAt")
-        ),
-        already_exchanged=payload.get("alreadyExchanged") is True,
         **outcome,
     )
 
@@ -2809,6 +2779,7 @@ def _write_install_metadata(
 
 def _extract_and_read_deps(
     download_file: Path,
+    staging: Path,
     install_dir: Path,
     package_name: str,
     version: str,
@@ -2817,14 +2788,14 @@ def _extract_and_read_deps(
 ) -> Optional[dict]:
     """Extract downloaded package and read dependencies.
 
+    `install_dir` is the package's place under the staged tree `staging`.
     Returns dict with 'version' and 'dependencies' on success, None on failure.
     """
     try:
         with zipfile.ZipFile(download_file, "r") as zip_ref:
             checked_members(zip_ref)
-            if install_dir.exists():
-                shutil.rmtree(install_dir)
-            install_dir.mkdir(parents=True, exist_ok=True)
+            # Remove, never overwrite: the staged tree shares inodes with the live one.
+            install_tree.replace_package_dir(staging, install_dir)
             zip_ref.extractall(install_dir)
             restore_modes(zip_ref, install_dir)
         download_file.unlink()
@@ -3274,11 +3245,7 @@ class PackageInstallTransaction:
                 )
                 print(f"❌ Staged packages are unusable: {', '.join(broken)}.")
                 return False
-        committed = install_tree.commit_version(
-            self.release,
-            self.version,
-            session=get_install_session_id(),
-        )
+        committed = install_tree.commit_version(self.release, self.version)
         if committed is None:
             note_install_failure("unpack", ERROR_UNKNOWN, "package tree commit failed")
             print(
@@ -3624,9 +3591,8 @@ def _download_package(
         download_file, download_file.stat().st_size
     ).hexdigest()
 
-    install_dir = _ctx().package_dir(
-        transaction.stage(actual_version), package_name, build_type
-    )
+    staging = transaction.stage(actual_version)
+    install_dir = _ctx().package_dir(staging, package_name, build_type)
 
     install_metadata = _build_archive_install_metadata(
         package_name=package_name,
@@ -3646,6 +3612,7 @@ def _download_package(
 
     result = _extract_and_read_deps(
         download_file,
+        staging,
         install_dir,
         package_name,
         version,
@@ -4125,6 +4092,7 @@ def download_all_from_archive(
 
         result = _extract_and_read_deps(
             download_file,
+            staging,
             install_dir,
             name,
             version,
@@ -4166,9 +4134,7 @@ def download_all_from_archive(
     # nothing was installed — and the health check below would read the tree
     # that is still live and pass, so silence here reports the previous
     # version's packages as a successful install of this one.
-    committed = install_tree.commit_version(
-        release, actual_version, session=install_session_id
-    )
+    committed = install_tree.commit_version(release, actual_version)
     if committed is None:
         print(
             f"⚠️ Could not switch release/install to '{archive_name}' "
@@ -4502,7 +4468,8 @@ def _download_package_at_timestamp(
                 f"using ZIP release.yaml version '{version}'."
             )
 
-        install_dir = _ctx().package_dir(transaction.stage(), package_name, build_type)
+        staging = transaction.stage()
+        install_dir = _ctx().package_dir(staging, package_name, build_type)
 
         install_metadata = {
             "schemaVersion": 1,
@@ -4524,6 +4491,7 @@ def _download_package_at_timestamp(
 
         result = _extract_and_read_deps(
             download_file,
+            staging,
             install_dir,
             package_name,
             version,
@@ -4544,60 +4512,3 @@ def _download_package_at_timestamp(
         print(f"⚠️ OTA server unreachable: {e}")
         return None
 
-
-def download_all_at_timestamp(
-    timestamp: str,
-    build_type: str,
-    install_base_path: Path,
-    package_filter: Optional[list] = None,
-) -> dict:
-    """Download all packages at a specific timestamp.
-
-    Fetches the list of all packages, then downloads each one's manifest
-    at the given timestamp.
-
-    Args:
-        timestamp: ISO 8601 timestamp (e.g., '2024-01-15').
-        build_type: "debug" or "release".
-        install_base_path: Path to release/install/ directory.
-        package_filter: Optional list of package names to download.
-
-    Returns:
-        dict mapping package_name to {'version': str, 'dependencies': list}
-        for successfully downloaded packages.
-    """
-    ctx = _get_auth_context()
-    if not ctx:
-        return {}
-    base, headers = ctx
-
-    try:
-        packages = _list_all_packages()
-        if packages is None:
-            return {}
-
-        if not packages:
-            print("⚠️ No packages found on OTA server.")
-            return {}
-
-        print(f"📦 Downloading packages at timestamp: {timestamp}")
-
-        results = {}
-        for pkg in packages:
-            name = pkg.get("name", "")
-            if not name:
-                continue
-            if package_filter and name not in package_filter:
-                continue
-
-            result = download_package_at_timestamp(
-                name, timestamp, build_type, install_base_path
-            )
-            if result:
-                results[name] = result
-
-        return results
-
-    except requests.RequestException as e:
-        print(f"⚠️ OTA server unreachable: {e}")
-        return {}
