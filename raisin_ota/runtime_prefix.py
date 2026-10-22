@@ -33,8 +33,24 @@ from typing import Collection, List
 
 from .client import OtaContext, safe_component
 
-_MANAGED_MAX_ENTRIES = 65536
+MANAGED_PREFIX_MAX_ENTRIES = 65536
 _MANAGED_ACL = {"system.posix_acl_access", "system.posix_acl_default"}
+_MANAGED_REASONS = frozenset({
+    "invalid_input", "unsafe_entry", "hardlinked_input", "extended_acl",
+    "acl_unavailable", "invalid_prefix", "invalid_marker", "invalid_build",
+    "missing_build", "no_packages", "entry_limit", "input_changed", "output_changed",
+})
+
+
+class RuntimePrefixError(ValueError):
+    """A fixed, path-free refusal at the managed population boundary."""
+
+    def __init__(self, reason_code="invalid_input"):
+        self.reason_code = (
+            reason_code if type(reason_code) is str and reason_code in _MANAGED_REASONS
+            else "invalid_input"
+        )
+        super().__init__("runtime_prefix_unverified:" + self.reason_code)
 
 
 def deploy_packages(
@@ -136,9 +152,9 @@ def _make_executable(directory: Path) -> None:
             os.chmod(os.path.join(root, file), 0o755)
 
 
-def _managed_require(condition):
+def _managed_require(condition, reason="invalid_input"):
     if not condition:
-        raise ValueError("runtime_prefix_unverified")
+        raise RuntimePrefixError(reason)
 
 
 def _managed_identity(info):
@@ -160,12 +176,10 @@ def _managed_identity(info):
 
 def _managed_node(path):
     info = path.lstat()
+    _managed_require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode), "unsafe_entry")
+    _managed_require(not stat.S_ISREG(info.st_mode) or info.st_nlink == 1, "hardlinked_input")
     _managed_require(
-        (
-            stat.S_ISDIR(info.st_mode)
-            or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
-        )
-        and not _MANAGED_ACL & set(os.listxattr(path, follow_symlinks=False))
+        not _MANAGED_ACL & set(os.listxattr(path, follow_symlinks=False)), "extended_acl"
     )
     return info
 
@@ -175,27 +189,28 @@ def _managed_real_directory(path):
     try:
         _managed_require(path.resolve(strict=True) == path)
     except RuntimeError:  # pathlib3.9/3.12 reports resolution loops this way.
-        raise ValueError("runtime_prefix_unverified") from None
+        raise RuntimePrefixError("unsafe_entry") from None
 
 
 def _managed_prefix(context, prefix, *, empty):
-    _managed_require(callable(getattr(os, "listxattr", None)))
+    _managed_require(callable(getattr(os, "listxattr", None)), "acl_unavailable")
     _managed_real_directory(Path(context.workspace))
-    _managed_require(prefix == Path(context.workspace) / "install")
+    _managed_require(prefix == Path(context.workspace) / "install", "invalid_prefix")
     _managed_real_directory(prefix)
     root = _managed_identity(prefix.lstat())
     owner = os.geteuid(), os.getegid()
-    _managed_require(root[2] == stat.S_IFDIR | 0o700 and root[3:5] == owner)
+    _managed_require(root[2] == stat.S_IFDIR | 0o700 and root[3:5] == owner, "invalid_prefix")
     if empty:
         with os.scandir(prefix) as entries:
             names = []
             for entry in entries:
                 names.append(entry.name)
-                _managed_require(len(names) <= 1)
-        _managed_require(names == [".incomplete"])
+                _managed_require(len(names) <= 1, "invalid_prefix")
+        _managed_require(names == [".incomplete"], "invalid_marker")
     marker = _managed_identity(_managed_node(prefix / ".incomplete"))
     _managed_require(
-        marker[2] == stat.S_IFREG | 0o600 and marker[3:5] == owner and marker[6] == 0
+        marker[2] == stat.S_IFREG | 0o600 and marker[3:5] == owner and marker[6] == 0,
+        "invalid_marker",
     )
     return root[:5], marker
 
@@ -203,19 +218,28 @@ def _managed_prefix(context, prefix, *, empty):
 def _managed_plan(context, selected, prefix, home, build_type):
     """Bound discovery as well as copied inputs; metadata, not authentication."""
     facts, copies, packages, overlays = {}, [], [], []
+    inspected = set()
 
-    def observe(path, *, optional=False):
-        if path not in facts:
-            _managed_require(len(facts) < _MANAGED_MAX_ENTRIES)
+    def inspect(path, *, optional=False):
+        if path not in inspected:
+            _managed_require(len(inspected) < MANAGED_PREFIX_MAX_ENTRIES, "entry_limit")
+            inspected.add(path)
         try:
             info = _managed_node(path)
         except FileNotFoundError:
             if not optional:
                 raise
             info = None
-        value = _managed_identity(info) if info is not None else None
-        _managed_require(path not in facts or facts[path] == value)
-        facts[path] = value
+        return info
+
+    def remember(path, kind, value):
+        key = path, kind
+        _managed_require(key not in facts or facts[key] == value, "input_changed")
+        facts[key] = value
+
+    def observe(path):
+        info = inspect(path)
+        remember(path, "metadata", _managed_identity(info))
         return info
 
     def children(path):
@@ -223,7 +247,7 @@ def _managed_plan(context, selected, prefix, home, build_type):
         with os.scandir(path) as entries:
             for entry in entries:
                 child = Path(entry.path)
-                observe(child)  # Includes ignored/discovery-only entries.
+                inspect(child)  # Budget and safety checks also cover ignored entries.
                 result.append(child)
         return sorted(result)
 
@@ -231,10 +255,12 @@ def _managed_plan(context, selected, prefix, home, build_type):
         _managed_real_directory(path)
         current = anchor
         _managed_require(path == anchor or anchor in path.parents)
-        observe(current)
+        remember(current, "identity", _managed_identity(inspect(current))[:5])
         for part in path.relative_to(anchor).parts:
             current /= part
-            _managed_require(stat.S_ISDIR(observe(current).st_mode))
+            info = inspect(current)
+            _managed_require(stat.S_ISDIR(info.st_mode), "unsafe_entry")
+            remember(current, "identity", _managed_identity(info)[:5])
 
     def tree(path):
         _managed_require(
@@ -249,31 +275,36 @@ def _managed_plan(context, selected, prefix, home, build_type):
     workspace = Path(context.workspace)
     _managed_require(selected.parent == workspace / "release/versions")
     directory(selected, workspace)
-    for package in children(selected):
+    selected_children = children(selected)
+    remember(selected, "members", tuple(path.name for path in selected_children))
+    for package in selected_children:
         if package.name == ".staging":
             info = observe(package)
             _managed_require(stat.S_ISREG(info.st_mode) and info.st_size == 0)
             continue
         safe_component(package.name, "package name")
         source = context.package_dir(selected, package.name, build_type)
-        directory(source, workspace)
+        try:
+            directory(source, workspace)
+        except FileNotFoundError:
+            raise RuntimePrefixError("missing_build") from None
         top = children(source)
         _managed_require(top and all(child.name != ".incomplete" for child in top))
         tree(source)
         packages.append(source)
         copies.extend((child, prefix / child.name) for child in top)
-    _managed_require(packages)
+    _managed_require(packages, "no_packages")
     _managed_require(home != prefix and prefix not in home.parents)
     directory(home, home)
     base = home / ".raisin"
-    if observe(base, optional=True) is not None:
+    if inspect(base, optional=True) is not None:
         directory(base, home)
         for package in children(base):
-            if not stat.S_ISDIR(observe(package).st_mode):
+            if not stat.S_ISDIR(inspect(package).st_mode):
                 continue
             safe_component(package.name, "resource package name")
             source = package / "resource"
-            if observe(source, optional=True) is None:
+            if inspect(source, optional=True) is None:
                 continue
             directory(source, home)
             tree(source)
@@ -291,6 +322,13 @@ def _managed_copy_file(source, target):
     return shutil.copy2(source, target)
 
 
+class _ManagedCopyFailure(Exception):
+    """Carry an original file I/O error through copytree's string aggregation."""
+
+    def __init__(self, error):
+        self.error = error
+
+
 def _managed_copy(source, target):
     info = _managed_node(source)
     try:
@@ -300,9 +338,15 @@ def _managed_copy(source, target):
     except FileNotFoundError:
         pass
     if stat.S_ISDIR(info.st_mode):
-        shutil.copytree(
-            source, target, dirs_exist_ok=True, copy_function=_managed_copy_file
-        )
+        def copy_file(source, target):
+            try:
+                return _managed_copy_file(source, target)
+            except OSError as error:
+                raise _ManagedCopyFailure(error) from None
+        try:
+            shutil.copytree(source, target, dirs_exist_ok=True, copy_function=copy_file)
+        except _ManagedCopyFailure as failure:
+            raise failure.error from None
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         _managed_copy_file(source, target)
@@ -324,7 +368,7 @@ def _managed_executables(prefix):
             with os.scandir(directory) as entries:
                 for entry in entries:
                     inspected += 1
-                    _managed_require(inspected <= _MANAGED_MAX_ENTRIES)
+                    _managed_require(inspected <= MANAGED_PREFIX_MAX_ENTRIES, "entry_limit")
                     path = Path(entry.path)
                     info = _managed_node(path)
                     if stat.S_ISDIR(info.st_mode):
@@ -353,12 +397,12 @@ def populate_marked(
     """
     prefix, selected_path, home = Path(prefix), Path(selected_path), Path(home)
     original = _managed_prefix(context, prefix, empty=True)
-    _managed_require(build_type in ("debug", "release"))
+    _managed_require(build_type in ("debug", "release"), "invalid_build")
     for component in (context.os_type, context.os_version, context.architecture):
         safe_component(component, "platform component")
         _managed_require(component not in (".", ".."))
     plan = _managed_plan(context, selected_path, prefix, home, build_type)
-    _managed_require(_managed_prefix(context, prefix, empty=True) == original)
+    _managed_require(_managed_prefix(context, prefix, empty=True) == original, "output_changed")
     packages, copies, overlays, _ = plan
     for source, target in copies:
         _managed_copy(source, target)
@@ -366,7 +410,8 @@ def populate_marked(
     for source, target in overlays:
         _managed_copy(source, target)
     _managed_require(
-        _managed_plan(context, selected_path, prefix, home, build_type) == plan
+        _managed_plan(context, selected_path, prefix, home, build_type) == plan,
+        "input_changed",
     )
-    _managed_require(_managed_prefix(context, prefix, empty=False) == original)
+    _managed_require(_managed_prefix(context, prefix, empty=False) == original, "output_changed")
     return packages

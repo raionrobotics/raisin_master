@@ -109,6 +109,142 @@ def populate(lab, **changes):
     return runtime.populate_marked(lab.context, **options)
 
 
+def test_exact_plan_budget_counts_unique_discovery_paths_not_snapshot_facts(marked, monkeypatch):
+    assert runtime.MANAGED_PREFIX_MAX_ENTRIES == 65536
+    expected = {marked.workspace, marked.workspace / "release",
+                marked.workspace / "release/versions", marked.selected,
+                marked.selected / ".staging", marked.home, marked.home / ".raisin"}
+    for package in ("primary", "library"):
+        source = marked.context.package_dir(marked.selected, package, "release")
+        expected.add(source)
+        expected.update(source.rglob("*"))
+        parent = source.parent
+        while parent != marked.selected:
+            expected.add(parent)
+            parent = parent.parent
+    for package in (marked.home / ".raisin").iterdir():
+        expected.add(package)
+        if package.is_dir():
+            source = package / "resource"
+            expected.add(source)  # Optional missing paths also spend discovery budget.
+            if source.exists():
+                expected.update(source.rglob("*"))
+    original = snapshot(marked.prefix)
+    monkeypatch.setattr(runtime, "MANAGED_PREFIX_MAX_ENTRIES", len(expected) - 1)
+    with pytest.raises(runtime.RuntimePrefixError, match="entry_limit"):
+        populate(marked)
+    assert snapshot(marked.prefix) == original
+    monkeypatch.setattr(runtime, "MANAGED_PREFIX_MAX_ENTRIES", len(expected))
+    assert populate(marked)
+
+
+@pytest.mark.parametrize("reason", [None, [], "bad/path", "entry_limit\nprivate"])
+def test_public_refusal_constructor_never_formats_unknown_reason(reason):
+    error = runtime.RuntimePrefixError(reason)
+    assert error.reason_code == "invalid_input"
+    assert str(error) == "runtime_prefix_unverified:invalid_input"
+
+
+@pytest.mark.parametrize("number", [13, 28])
+def test_nested_file_io_keeps_original_errno_instead_of_copytree_text(marked, monkeypatch, number):
+    failure = OSError(number, "fixture file failure")
+    before = identity(marked.prefix)[:5], identity(marked.marker)
+    def fail(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(runtime.shutil, "copy2", fail)
+    with pytest.raises(OSError) as caught:
+        populate(marked)
+    assert caught.value is failure
+    assert caught.value.errno == number
+    assert (identity(marked.prefix)[:5], identity(marked.marker)) == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["home", "workspace", "release", "ignored-file", "ignored-create", "no-resource"],
+)
+def test_unrelated_namespace_or_nonresource_changes_do_not_reject_copy(
+    marked, monkeypatch, change
+):
+    original, changed = runtime.shutil.copy2, []
+    root, marker = identity(marked.prefix)[:5], identity(marked.marker)
+
+    def copy(source, target, *args, **kwargs):
+        result = original(source, target, *args, **kwargs)
+        if not changed:
+            changed.append(True)
+            paths = {
+                "home": marked.home / "unrelated.log",
+                "workspace": marked.workspace / "unrelated.log",
+                "release": marked.workspace / "release/unrelated.log",
+                "ignored-file": marked.home / ".raisin/unrelated.json",
+                "ignored-create": marked.home / ".raisin/another.json",
+                "no-resource": marked.home / ".raisin/no-resource/params.yaml",
+            }
+            write(paths[change].parent, paths[change].name, b"not a runtime input")
+        return result
+
+    monkeypatch.setattr(runtime.shutil, "copy2", copy)
+    populate(marked)
+    assert changed
+    assert identity(marked.prefix)[:5] == root and identity(marked.marker) == marker
+    assert (marked.prefix / "lib/primary.so").read_bytes() == b"primary-release"
+    assert (marked.prefix / "resource/primary/resource/params.yaml").read_bytes() == b"local"
+    assert not (marked.prefix / "resource/no-resource").exists()
+
+
+@pytest.mark.parametrize("change", ["payload", "overlay", "new-overlay", "ancestor"])
+def test_relevant_inputs_and_ancestor_identity_still_cannot_change(
+    marked, monkeypatch, change
+):
+    original, changed = runtime.shutil.copy2, []
+    root, marker = identity(marked.prefix)[:5], identity(marked.marker)
+
+    def copy(source, target, *args, **kwargs):
+        result = original(source, target, *args, **kwargs)
+        if not changed:
+            changed.append(True)
+            if change == "payload":
+                write(marked.package, "release.txt", b"changed package")
+            elif change == "overlay":
+                write(marked.home, ".raisin/primary/resource/params.yaml", b"changed resource")
+            elif change == "new-overlay":
+                write(marked.home, ".raisin/new/resource/params.yaml", b"new resource")
+            else:
+                saved = marked.home.with_name("old-home")
+                marked.home.rename(saved)
+                runtime.shutil.copytree(saved, marked.home)
+        return result
+
+    monkeypatch.setattr(runtime.shutil, "copy2", copy)
+    with pytest.raises(ValueError):
+        populate(marked)
+    assert changed
+    assert identity(marked.prefix)[:5] == root and identity(marked.marker) == marker
+
+
+@pytest.mark.parametrize(
+    "fault,reason",
+    [("hardlink", "hardlinked_input"), ("symlink", "unsafe_entry"),
+     ("build", "missing_build"), ("limit", "entry_limit")],
+)
+def test_validation_refusal_has_a_fixed_reason_without_paths(marked, monkeypatch, fault, reason):
+    if fault == "hardlink":
+        os.link(marked.package / "release.txt", marked.package / "alias")
+    elif fault == "symlink":
+        (marked.package / "alias").symlink_to(marked.home)
+    elif fault == "build":
+        marked.package.rename(marked.package.with_name("not-release"))
+    else:
+        monkeypatch.setattr(runtime, "MANAGED_PREFIX_MAX_ENTRIES", 1, raising=False)
+    before = snapshot(marked.prefix)
+    with pytest.raises(ValueError) as caught:
+        populate(marked)
+    assert getattr(caught.value, "reason_code", None) == reason
+    assert str(marked.workspace) not in str(caught.value)
+    assert snapshot(marked.prefix) == before
+
+
 def test_explicit_generation_build_and_overrides_preserve_owned_root_and_marker(marked):
     root, marker = identity(marked.prefix)[:5], identity(marked.marker)
     before = snapshot(marked.selected), snapshot(marked.home)
@@ -279,7 +415,7 @@ def test_input_changed_during_copy_cannot_be_reported_as_success(marked, monkeyp
 
 @pytest.mark.parametrize("kind", ["ignored-files", "resource-less-directories"])
 def test_discovery_also_spends_the_bounded_scan_budget(marked, monkeypatch, kind):
-    monkeypatch.setattr(runtime, "_MANAGED_MAX_ENTRIES", 128, raising=False)
+    monkeypatch.setattr(runtime, "MANAGED_PREFIX_MAX_ENTRIES", 128)
     for index in range(256):
         path = marked.home / ".raisin" / ("unrelated-" + str(index))
         if kind == "ignored-files":
