@@ -1,0 +1,26 @@
+# Real robot: three OAK-D Pro W (PoE) attached to the AI PC.  Use with:  ai_main.py --cameras local --rig rig_real.yaml
+# Camera positions (xyz, m) are measured relative to the IMU (x forward, y left, z up); they are used as the offset from the
+# /Odometry/base pose, so this assumes the odometry frame sits at the IMU.  yaw: 0 = forward, +pi/2 = left, -pi/2 = right.
+# 192.168.1.101/.102 are the robot PC's locomotion cameras (not used here).
+topics:
+  odom: /Odometry/base
+  rgb: "{cam}/rgb"
+  depth: "{cam}/depth"
+cameras:
+  oak_front: {yaw: 0.0,                 ip: 192.168.1.105, xyz: [0.21431, 0.0, 1.16953]}
+  oak_left:  {yaw: 1.5707963267948966,  ip: 192.168.1.103, xyz: [0.13001, 0.08435, 1.16953]}
+  oak_right: {yaw: -1.5707963267948966, ip: 192.168.1.104, xyz: [0.13001, -0.08435, 1.16953]}
+mount_xyz: [0.17, 0.0, 1.16953]     # only used for a camera without `xyz`
+sensor_offset: 0.02
+color: {width: 1280, height: 800, fps: 5}    # OV9782 native (1280x800 / 1280x720 only); JPEG-encoded on the camera
+depth: {width: 640, height: 400}             # aligned to the colour sensor; same aspect as colour (DEPTH_SCALE is one factor)
+hfov: 1.696                                  # overwritten from the camera calibration at start-up
+stereo: {width: 1280, height: 800}           # mono input of the on-camera stereo (OV9282 native); depth output stays `depth`
+oak: {ir_dot: 0.6, mjpeg_quality: 90, color_ae_max_us: 8000, mono_ae_max_us: 8000, stereo_preset: ROBOTICS, depth_max_m: 8.0,
+      stereo_fps: 10}                        # depth at 10 Hz: always within 50 ms of a 5 fps colour frame
+# 2026-10-23: 1 ms made corridor images dark/noisy (ISO ~1200) and signs unreadable; 8 ms blurs ~1-2 px at 0.5 m/s or
+# 0.5 rad/s.  ir_dot: the OAK-D Pro W dot projector (0..1) gives the stereo texture on plain walls and doors.
+# exposure: auto exposure stays on; color_ae_max_us / mono_ae_max_us cap the exposure time (the gain rises instead).
+# Sweep 2026-10-22 (indoor, lights on): 1 ms keeps the brightness at ISO ~670-1230; 0.5 ms hits the ISO 1600 ceiling and
+# darkens. Raise the cap (2000-4000) in darker places or if the plates look noisy.
+# oak_local logs "exposure .. ms ISO .. mean grey .." per camera every 5 s.

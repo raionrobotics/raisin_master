@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Room Finder Map</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #d0d5dd;
+  --free: #ffffff; --occ: #1d2330; --unk: #c9ced6;
+  --robot: #1570ef; --trail: #53b1fd; --goal: #d92d20; --door: #b54708; --label: #079455; --sign: #dc6803; --dead: #98a2b3;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1218; --panel: #171b24; --text: #e6e8ec; --muted: #98a2b3; --line: #2b3240;
+    --free: #2a303c; --occ: #e6e8ec; --unk: #151922;
+    --robot: #53b1fd; --trail: #2e90fa; --goal: #f97066; --door: #fdb022; --label: #32d583; --sign: #fd853a; --dead: #667085;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1218; --panel: #171b24; --text: #e6e8ec; --muted: #98a2b3; --line: #2b3240;
+  --free: #2a303c; --occ: #e6e8ec; --unk: #151922;
+  --robot: #53b1fd; --trail: #2e90fa; --goal: #f97066; --door: #fdb022; --label: #32d583; --sign: #fd853a; --dead: #667085;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; }
+#app { display: flex; height: 100%; }
+#mapwrap { position: relative; flex: 1; min-width: 0; touch-action: none; }
+canvas { display: block; width: 100%; height: 100%; }
+#side { width: 320px; max-width: 40vw; overflow-y: auto; background: var(--panel); border-left: 1px solid var(--line); padding: 12px 14px; }
+h1 { font-size: 16px; margin: 0 0 8px; }
+h2 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.kv { display: grid; grid-template-columns: 88px 1fr; gap: 2px 8px; }
+.kv div:nth-child(odd) { color: var(--muted); }
+.big { font-size: 20px; font-weight: 700; }
+.ok { color: var(--label); } .bad { color: var(--goal); }
+#rooms { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; font-variant-numeric: tabular-nums; }
+.chip.hit { border-color: var(--goal); color: var(--goal); font-weight: 700; }
+#log { font: 12px/1.35 ui-monospace, Menlo, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+.legend span { display: inline-flex; align-items: center; gap: 4px; margin: 0 10px 4px 0; }
+.sw { width: 10px; height: 10px; display: inline-block; border-radius: 2px; }
+#tools { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+button { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+button.on { border-color: var(--robot); color: var(--robot); }
+#conn { position: absolute; bottom: 8px; left: 10px; font-size: 12px; color: var(--muted); background: var(--panel); padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); }
+@media (max-width: 700px) {
+  #app { flex-direction: column; }
+  #side { width: auto; max-width: none; height: 38%; border-left: 0; border-top: 1px solid var(--line); }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="mapwrap">
+    <canvas id="cv"></canvas>
+    <div id="tools">
+      <button id="follow" class="on">로봇 따라가기</button>
+      <button id="fit">전체 보기</button>
+      <button id="labels" class="on">글자</button>
+    </div>
+    <div id="conn">연결 중…</div>
+  </div>
+  <div id="side">
+    <h1>Room Finder</h1>
+    <div class="kv">
+      <div>목표 호실</div><div id="target" class="big">–</div>
+      <div>상태</div><div id="state">–</div>
+      <div>경과</div><div id="elapsed">–</div>
+      <div>이동 거리</div><div id="pathlen">–</div>
+      <div>현재 목표</div><div id="item">–</div>
+      <div>힌트</div><div id="hint">–</div>
+    </div>
+    <h2>찾은 호수</h2>
+    <div id="rooms"><span style="color:var(--muted)">없음</span></div>
+    <h2>랜드마크</h2>
+    <div class="kv">
+      <div>문</div><div id="ndoors">0</div>
+      <div>호수 판</div><div id="nlabels">0</div>
+      <div>표지판</div><div id="nsigns">0</div>
+    </div>
+    <h2>로그</h2>
+    <div id="log"></div>
+    <h2>범례</h2>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--robot)"></i>로봇</span>
+      <span><i class="sw" style="background:var(--trail)"></i>궤적</span>
+      <span><i class="sw" style="background:var(--goal)"></i>이동 목표</span>
+      <span><i class="sw" style="background:var(--door)"></i>문</span>
+      <span><i class="sw" style="background:var(--label)"></i>호수</span>
+      <span><i class="sw" style="background:var(--sign)"></i>표지판</span>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  let map = null, mapImg = null, mapKey = "", st = null;
+  let view = { cx: 0, cy: 0, scale: 30 };        // world (m) at canvas centre, px per m
+  let follow = true, showText = true, fitted = false;
+  const $ = id => document.getElementById(id);
+
+  function resize() {
+    const r = cv.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+    cv.width = Math.max(1, r.width * d); cv.height = Math.max(1, r.height * d);
+    ctx.setTransform(d, 0, 0, d, 0, 0);
+    draw();
+  }
+  const W = () => cv.width / (window.devicePixelRatio || 1), H = () => cv.height / (window.devicePixelRatio || 1);
+  const sx = x => W() / 2 + (x - view.cx) * view.scale;
+  const sy = y => H() / 2 - (y - view.cy) * view.scale;
+
+  function buildMapImage() {
+    if (!map) return;
+    const key = [map.w, map.h, map.x0, map.y0, css("--free"), css("--occ"), css("--unk"), map.data.length].join("|");
+    const raw = atob(map.data), n = raw.length;
+    const c = document.createElement("canvas"); c.width = map.w; c.height = map.h;
+    const g = c.getContext("2d"), img = g.createImageData(map.w, map.h);
+    const hex = h => { const v = parseInt(h.replace("#", ""), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; };
+    const F = hex(css("--free")), O = hex(css("--occ")), U = hex(css("--unk"));
+    const I = F.map((f, k) => Math.round(f * 0.6 + O[k] * 0.4));      // inflated band (99): between free and obstacle
+    for (let i = 0; i < n; i++) {
+      const v = raw.charCodeAt(i), row = Math.floor(i / map.w), col = i % map.w;
+      const j = ((map.h - 1 - row) * map.w + col) * 4;           // row 0 = lowest y -> bottom of the image
+      const p = v === 0 ? F : v === 100 ? O : v === 99 ? I : U;
+      img.data[j] = p[0]; img.data[j + 1] = p[1]; img.data[j + 2] = p[2]; img.data[j + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    mapImg = c; mapKey = key;
+  }
+
+  function fit() {
+    if (!map) return;
+    const w = map.w * map.res, h = map.h * map.res;
+    view.cx = map.x0 + w / 2; view.cy = map.y0 + h / 2;
+    view.scale = Math.max(2, Math.min(W() / w, H() / h) * 0.92);
+  }
+
+  function text(s, x, y, color, bold) {
+    if (!showText) return;
+    ctx.font = (bold ? "700 " : "600 ") + "12px system-ui, sans-serif";
+    ctx.lineWidth = 3; ctx.strokeStyle = css("--panel"); ctx.strokeText(s, x, y);
+    ctx.fillStyle = color; ctx.fillText(s, x, y);
+  }
+
+  function draw() {
+    ctx.fillStyle = css("--unk"); ctx.fillRect(0, 0, W(), H());
+    if (st && st.pose && follow) { view.cx = st.pose[0]; view.cy = st.pose[1]; }
+    if (mapImg && map) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(mapImg, sx(map.x0), sy(map.y0 + map.h * map.res), map.w * map.res * view.scale, map.h * map.res * view.scale);
+    }
+    // 1 m grid scale bar
+    const bar = Math.pow(10, Math.ceil(Math.log10(60 / view.scale)));
+    ctx.strokeStyle = css("--text"); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(W() - 20 - bar * view.scale, H() - 16); ctx.lineTo(W() - 20, H() - 16); ctx.stroke();
+    ctx.fillStyle = css("--text"); ctx.font = "12px system-ui"; ctx.textAlign = "right"; ctx.fillText(bar + " m", W() - 20, H() - 22);
+    ctx.textAlign = "left";
+    if (!st) return;
+    // trail
+    if (st.trail && st.trail.length > 1) {
+      ctx.strokeStyle = css("--trail"); ctx.lineWidth = 2; ctx.beginPath();
+      st.trail.forEach((p, i) => i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1])));
+      if (st.pose) ctx.lineTo(sx(st.pose[0]), sy(st.pose[1]));
+      ctx.stroke();
+    }
+    const v = st.viz || {}, reg = v.registry || {}, fin = v.finder || {};
+    const target = fin.target != null ? String(fin.target) : null;
+    const tm = target && target.toUpperCase().match(/^([A-Z]*)(\d+)/), tpre = tm ? tm[1] : "", tnum = tm ? +tm[2] : null;   // T138 -> T, 138
+    // signs + cues
+    (reg.signs || []).forEach(s => {
+      const col = s.dead ? css("--dead") : css("--sign"), x = sx(s.x), y = sy(s.y);
+      (s.cues || []).forEach(c => {
+        if (c.bearing == null) return;
+        const hit = tnum != null && c.lo != null && c.hi != null && (c.pre || "") === tpre && +c.lo <= tnum && tnum <= +c.hi;
+        const L = (hit ? 3.5 : 1.6) * view.scale, ex = x + L * Math.cos(c.bearing), ey = y - L * Math.sin(c.bearing);
+        ctx.strokeStyle = hit ? css("--goal") : col; ctx.lineWidth = hit ? 3 : 1.5; ctx.globalAlpha = hit ? 1 : 0.7;
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(ex, ey); ctx.stroke();
+        const a = Math.atan2(ey - y, ex - x);
+        ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex - 8 * Math.cos(a - 0.4), ey - 8 * Math.sin(a - 0.4));
+        ctx.lineTo(ex - 8 * Math.cos(a + 0.4), ey - 8 * Math.sin(a + 0.4)); ctx.closePath(); ctx.fillStyle = ctx.strokeStyle; ctx.fill();
+        ctx.globalAlpha = 1;
+        if (c.place) text(c.place, ex + 4, ey - 4, hit ? css("--goal") : col, hit);
+      });
+      ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x, y - 7); ctx.lineTo(x + 7, y); ctx.lineTo(x, y + 7); ctx.lineTo(x - 7, y); ctx.closePath(); ctx.fill();
+    });
+    // doors
+    (reg.doors || []).forEach(d => {
+      const x = sx(d.x), y = sy(d.y), w = Math.max(6, (d.width || 0.9) * view.scale);
+      ctx.save(); ctx.translate(x, y);
+      if (d.nrm) ctx.rotate(-Math.atan2(d.nrm[1], d.nrm[0]) + Math.PI / 2);
+      ctx.fillStyle = css("--door"); ctx.fillRect(-w / 2, -3, w, 6); ctx.restore();
+      if (d.label) text(String(d.label), x + 6, y - 6, String(d.label) === target ? css("--goal") : css("--door"), String(d.label) === target);
+    });
+    // number plates
+    (reg.labels || []).forEach(l => {
+      const x = sx(l.x), y = sy(l.y), hit = l.number && String(l.number) === target;
+      ctx.fillStyle = hit ? css("--goal") : css("--label");
+      ctx.beginPath(); ctx.arc(x, y, hit ? 7 : 5, 0, 2 * Math.PI); ctx.fill();
+      if (l.number) text(String(l.number), x + 8, y + 4, hit ? css("--goal") : css("--label"), hit);
+    });
+    // goal
+    if (st.goal) {
+      const x = sx(st.goal[0]), y = sy(st.goal[1]);
+      ctx.strokeStyle = css("--goal"); ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(x - 7, y - 7); ctx.lineTo(x + 7, y + 7); ctx.moveTo(x + 7, y - 7); ctx.lineTo(x - 7, y + 7); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, 10, 0, 2 * Math.PI); ctx.stroke();
+    }
+    // robot
+    if (st.pose) {
+      const [x, y, , yaw] = st.pose, X = sx(x), Y = sy(y);
+      ctx.save(); ctx.translate(X, Y); ctx.rotate(-yaw);
+      ctx.fillStyle = css("--robot"); ctx.strokeStyle = css("--panel"); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-9, 8); ctx.lineTo(-5, 0); ctx.lineTo(-9, -8); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function panel() {
+    const v = (st && st.viz) || {}, reg = v.registry || {}, fin = v.finder || {};
+    $("target").textContent = fin.target != null ? fin.target : "–";
+    const state = fin.state || "–";
+    $("state").innerHTML = fin.state === "DONE" ? (fin.found ? '<b class="ok">찾음</b>' : '<b class="bad">포기</b>') : state;
+    $("elapsed").textContent = fin.elapsed != null ? Math.round(fin.elapsed) + " s" : "–";
+    $("pathlen").textContent = fin.path_len != null ? fin.path_len + " m" : "–";
+    $("item").textContent = fin.item || "–";
+    $("hint").textContent = fin.hint || "–";
+    $("ndoors").textContent = (reg.doors || []).length;
+    $("nlabels").textContent = (reg.labels || []).filter(l => l.number).length + " / " + (reg.labels || []).length;
+    $("nsigns").textContent = (reg.signs || []).filter(s => !s.dead).length;
+    const nums = [...new Set((reg.labels || []).map(l => l.number).filter(Boolean).map(String))].sort();
+    $("rooms").innerHTML = nums.length ? nums.map(n => `<span class="chip${n === String(fin.target) ? " hit" : ""}">${n}</span>`).join("")
+                                       : '<span style="color:var(--muted)">없음</span>';
+    $("log").textContent = (fin.log || []).map(l => typeof l === "string" ? l : JSON.stringify(l)).join("\n");
+    let c = "로봇 PC 연결됨";
+    if (st) {
+      c += st.viz_age == null ? " · AI PC 데이터 없음" : st.viz_age > 5 ? ` · AI PC 데이터 ${Math.round(st.viz_age)} s 전` : " · AI PC 연결됨";
+      if (st.watchdog_fired) c += " · 워치독 정지";
+    }
+    $("conn").textContent = c;
+  }
+
+  async function pollState() {
+    try {
+      const r = await fetch("state.json", { cache: "no-store" });
+      st = await r.json(); panel(); draw();
+    } catch (e) { $("conn").textContent = "로봇 PC 연결 끊김"; }
+    setTimeout(pollState, 1000);
+  }
+  async function pollMap() {
+    try {
+      const r = await fetch("map.json", { cache: "no-store" });
+      const m = await r.json();
+      if (m) { map = m; buildMapImage(); if (!fitted && !follow) { fit(); } fitted = true; draw(); }
+    } catch (e) { /* keep the last map */ }
+    setTimeout(pollMap, 2000);
+  }
+
+  // pan / zoom (mouse + touch)
+  const pts = new Map(); let pinch = null;
+  cv.addEventListener("pointerdown", e => { cv.setPointerCapture(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]); });
+  cv.addEventListener("pointermove", e => {
+    if (!pts.has(e.pointerId)) return;
+    const prev = pts.get(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pts.size === 1) {
+      setFollow(false);
+      view.cx -= (e.clientX - prev[0]) / view.scale; view.cy += (e.clientY - prev[1]) / view.scale; draw();
+    } else if (pts.size === 2) {
+      const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      if (pinch) { view.scale = Math.min(400, Math.max(1, view.scale * d / pinch)); draw(); }
+      pinch = d;
+    }
+  });
+  const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+  cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", up);
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    const wx = view.cx + (mx - W() / 2) / view.scale, wy = view.cy - (my - H() / 2) / view.scale;
+    view.scale = Math.min(400, Math.max(1, view.scale * Math.exp(-e.deltaY * 0.0015)));
+    if (!follow) { view.cx = wx - (mx - W() / 2) / view.scale; view.cy = wy + (my - H() / 2) / view.scale; }
+    draw();
+  }, { passive: false });
+
+  function setFollow(on) { follow = on; $("follow").classList.toggle("on", on); }
+  $("follow").onclick = () => { setFollow(!follow); draw(); };
+  $("fit").onclick = () => { setFollow(false); fit(); draw(); };
+  $("labels").onclick = () => { showText = !showText; $("labels").classList.toggle("on", showText); draw(); };
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { buildMapImage(); draw(); });
+  window.addEventListener("resize", resize);
+  resize(); pollState(); pollMap();
+})();
+</script>
+</body>
+</html>
