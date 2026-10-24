@@ -1,17 +1,18 @@
 # Installed SDK CPU and Eigen ABI
 
-The host build selects a CPU profile with `RAISIN_MARCH`. On Linux with GNU or
-Clang, the top-level build uses that value for the producer, and
-`raisin_install()` exports the same `-march` requirement to consumers of
-targets that link `Eigen3::Eigen`. This is required because Eigen's
+The host build selects a CPU profile with `RAISIN_MARCH`. On non-Windows builds
+with a GNU/Clang-family compiler, the top-level build uses that value for the
+producer, and `raisin_install()` exports the same `-march` requirement to
+consumers of targets that link `Eigen3::Eigen`. This is required because Eigen's
 fixed-size vector alignment can change with the compiler target. A successful
 link alone does not prove that producer and consumer agree on that ABI.
 
 The installed prefix contains `share/raisin/raisin-sdk-build-profile.json`.
 It records the target system and processor, C/C++ compiler IDs and versions,
-the selected `RAISIN_MARCH`, and the observed `EIGEN_MAX_ALIGN_BYTES` when
-Eigen is available to the build-profile check. A `null` Eigen alignment means
-the build could not observe that value; it is not evidence that Eigen is
+the selected `RAISIN_MARCH`, the observed `EIGEN_MAX_ALIGN_BYTES`, and a
+fingerprint of the `Eigen/Core` entry header and imported target usage settings
+when Eigen is available to the build-profile check. A `null` Eigen alignment
+means the build could not observe that value; it is not evidence that Eigen is
 unused.
 
 ## Consumer rules
@@ -29,9 +30,9 @@ unused.
   `RAISIN_ALLOW_UNPORTABLE_NATIVE_SDK=ON`. That opt-in is only for a consumer
   on a CPU compatible with the producer; it does not create a portable CPU
   baseline or validate a different host.
-- The current export rule covers Linux GNU/Clang C++ targets linking the
-  canonical `Eigen3::Eigen` target. It does not establish a Windows, Apple,
-  other compiler, or arbitrary Eigen package support matrix.
+- The current export rule covers non-Windows GNU/Clang-family C++ targets
+  linking the canonical `Eigen3::Eigen` target. It does not establish a
+  Windows, Apple, other compiler, or arbitrary Eigen package support matrix.
 
 ## Rebuild boundary
 

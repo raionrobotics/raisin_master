@@ -113,11 +113,18 @@ function(raisin_install_build_profile)
         set(CMAKE_REQUIRED_LIBRARIES Eigen3::Eigen)
         get_target_property(_eigen_include_dirs Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
         foreach(_eigen_include IN LISTS _eigen_include_dirs)
-            if(NOT _eigen_include MATCHES "^\\$<" AND EXISTS "${_eigen_include}/Eigen/Core")
-                file(SHA256 "${_eigen_include}/Eigen/Core" _eigen_core_sha256)
-                string(APPEND _eigen_fingerprint "${_eigen_include}:${_eigen_core_sha256};")
+            string(REGEX REPLACE "^\\$<BUILD_INTERFACE:(.*)>$" "\\1"
+                    _resolved_eigen_include "${_eigen_include}")
+            if(NOT _resolved_eigen_include MATCHES "^\\$<"
+                    AND EXISTS "${_resolved_eigen_include}/Eigen/Core")
+                file(SHA256 "${_resolved_eigen_include}/Eigen/Core" _eigen_core_sha256)
+                string(APPEND _eigen_fingerprint "${_eigen_core_sha256};")
             endif()
         endforeach()
+        get_target_property(_eigen_compile_definitions Eigen3::Eigen INTERFACE_COMPILE_DEFINITIONS)
+        get_target_property(_eigen_compile_options Eigen3::Eigen INTERFACE_COMPILE_OPTIONS)
+        string(APPEND _eigen_fingerprint
+                "definitions:${_eigen_compile_definitions};options:${_eigen_compile_options}")
         if(RAISIN_MARCH AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
             string(APPEND CMAKE_REQUIRED_FLAGS " -march=${RAISIN_MARCH}")
         endif()
@@ -137,6 +144,13 @@ function(raisin_install_build_profile)
         set(CMAKE_REQUIRED_FLAGS "${_saved_required_flags}")
     endif()
 
+    if(NOT _eigen_fingerprint STREQUAL "")
+        string(SHA256 _eigen_fingerprint_sha256 "${_eigen_fingerprint}")
+        set(_eigen_fingerprint_json "\"${_eigen_fingerprint_sha256}\"")
+    else()
+        set(_eigen_fingerprint_json "null")
+    endif()
+
     set(_profile_path "${CMAKE_BINARY_DIR}/raisin-sdk-build-profile.json")
     file(WRITE "${_profile_path}"
             "{\n"
@@ -144,7 +158,7 @@ function(raisin_install_build_profile)
             "  \"target\": {\"system\": \"${_system}\", \"processor\": \"${_processor}\"},\n"
             "  \"compiler\": {\"c\": {\"id\": \"${_c_compiler}\", \"version\": \"${_c_compiler_version}\"}, \"cxx\": {\"id\": \"${_cxx_compiler}\", \"version\": \"${_cxx_compiler_version}\"}},\n"
             "  \"cpu\": {\"march\": \"${_march}\", \"profile_kind\": \"${_portability}\"},\n"
-            "  \"eigen\": {\"max_align_bytes\": ${_eigen_max_align_bytes}, \"alignment_policy\": \"Eigen defaults under the recorded compiler and CPU profile; no SDK-wide Eigen alignment override is applied\"}\n"
+            "  \"eigen\": {\"max_align_bytes\": ${_eigen_max_align_bytes}, \"core_header_and_usage_fingerprint_sha256\": ${_eigen_fingerprint_json}, \"alignment_policy\": \"Eigen defaults under the recorded compiler and CPU profile; no SDK-wide Eigen alignment override is applied\"}\n"
             "}\n")
     install(FILES "${_profile_path}" DESTINATION share/raisin)
     set_property(GLOBAL PROPERTY RAISIN_SDK_BUILD_PROFILE_EMITTED TRUE)

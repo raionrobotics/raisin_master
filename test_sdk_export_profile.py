@@ -1,6 +1,7 @@
 """Installed CMake consumers must inherit the SDK's selected CPU profile."""
 
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -12,11 +13,13 @@ HELPER = REPO / "cmake" / "raisin_helper.cmake"
 
 
 @unittest.skipUnless(
-    subprocess.run(["cmake", "--version"], capture_output=True).returncode == 0,
+    shutil.which("cmake") is not None,
     "CMake is required for installed SDK export tests",
 )
 class TestInstalledSdkCpuProfile(unittest.TestCase):
-    def configure_and_install(self, root: Path, march: str, uses_eigen: bool = True) -> Path:
+    def configure_and_install(
+        self, root: Path, march: str, uses_eigen: bool = True
+    ) -> Path:
         producer = root / "producer"
         producer.mkdir()
         (producer / "include").mkdir()
@@ -30,11 +33,20 @@ class TestInstalledSdkCpuProfile(unittest.TestCase):
             "if(NOT TARGET Eigen3::Eigen)\n"
             "  add_library(Eigen3::Eigen INTERFACE IMPORTED)\n"
             "endif()\n"
-            f'set_target_properties(Eigen3::Eigen PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "{eigen_include.parent}")\n'
+            'set_target_properties(Eigen3::Eigen PROPERTIES '
+            f'INTERFACE_INCLUDE_DIRECTORIES "{eigen_include.parent}")\n'
         )
-        link_eigen = "target_link_libraries(raisin_tf PUBLIC Eigen3::Eigen)" if uses_eigen else ""
+        link_eigen = (
+            "target_link_libraries(raisin_tf PUBLIC Eigen3::Eigen)"
+            if uses_eigen
+            else ""
+        )
         package_eigen = "find_package(Eigen3 CONFIG REQUIRED)" if uses_eigen else ""
-        install_eigen = "raisin_install(raisin_tf Eigen3)" if uses_eigen else "raisin_install(raisin_tf)"
+        install_eigen = (
+            "raisin_install(raisin_tf Eigen3)"
+            if uses_eigen
+            else "raisin_install(raisin_tf)"
+        )
         (producer / "CMakeLists.txt").write_text(
             "\n".join(
                 [
@@ -107,14 +119,14 @@ class TestInstalledSdkCpuProfile(unittest.TestCase):
         )
         build = root / f"{consumer.name}-build"
         command = [
-                "cmake",
-                "-S",
-                str(consumer),
-                "-B",
-                str(build),
-                "-DCMAKE_PREFIX_PATH=" + str(prefix),
-                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-            ]
+            "cmake",
+            "-S",
+            str(consumer),
+            "-B",
+            str(build),
+            "-DCMAKE_PREFIX_PATH=" + str(prefix),
+            "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        ]
         if allow_native:
             command.append("-DRAISIN_ALLOW_UNPORTABLE_NATIVE_SDK=ON")
         result = subprocess.run(
@@ -143,6 +155,10 @@ class TestInstalledSdkCpuProfile(unittest.TestCase):
             self.assertEqual(profile["cpu"]["march"], "x86-64-v3")
             self.assertEqual(profile["cpu"]["profile_kind"], "named-cpu-profile")
             self.assertEqual(profile["eigen"]["max_align_bytes"], 32)
+            self.assertRegex(
+                profile["eigen"]["core_header_and_usage_fingerprint_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
 
     def test_non_eigen_target_does_not_constrain_consumer_cpu(self):
         with tempfile.TemporaryDirectory(prefix="raisin-sdk-non-eigen-") as tmp:
