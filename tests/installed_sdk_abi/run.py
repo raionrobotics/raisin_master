@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -32,7 +33,9 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def run_checked(command: list[str], timeout: int) -> subprocess.CompletedProcess:
+def run_checked(
+    command: list[str], timeout: int, env: Optional[dict[str, str]] = None
+) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(
             command,
@@ -40,12 +43,30 @@ def run_checked(command: list[str], timeout: int) -> subprocess.CompletedProcess
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired as error:
         fail(f"command timed out after {timeout}s: {shlex.join(command)}")
     if result.returncode:
         fail(f"command failed ({result.returncode}): {shlex.join(command)}", result)
     return result
+
+
+def runtime_environment(prefix: Path) -> tuple[dict[str, str], list[str]]:
+    """Load SDK shared libraries from the qualified prefix before host paths."""
+    environment = os.environ.copy()
+    library_dirs = [
+        prefix / name for name in ("lib", "lib64") if (prefix / name).is_dir()
+    ]
+    existing_dirs = [
+        entry
+        for entry in environment.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+        if entry
+    ]
+    ordered_dirs = [str(path) for path in library_dirs] + existing_dirs
+    if ordered_dirs:
+        environment["LD_LIBRARY_PATH"] = os.pathsep.join(dict.fromkeys(ordered_dirs))
+    return environment, [str(path) for path in library_dirs]
 
 
 def _parse_output(output: str) -> dict:
@@ -190,7 +211,8 @@ def main() -> int:
 
     run_checked([cmake, "--build", str(build_dir), "--parallel", "1"], args.timeout)
     binary = build_dir / "tf_sdk_abi_probe"
-    executed = run_checked([str(binary)], args.timeout)
+    runtime_env, runtime_library_dirs = runtime_environment(prefix)
+    executed = run_checked([str(binary)], args.timeout, env=runtime_env)
     observation = _parse_output(executed.stdout)
     if observation.get("eigen_max_align") != max_align:
         fail(f"runtime Eigen max alignment differs from metadata: {observation!r}")
@@ -207,6 +229,7 @@ def main() -> int:
         "isometry3d_align_bytes": observation["eigen_alignment"],
         "pose_mod32": observation["pose_mod32"],
         "march_flags": march_flags,
+        "runtime_library_dirs": runtime_library_dirs,
         "raisin_tf_config_sha256": sha256(tf_config),
         "raisin_tf_library_sha256": sha256(tf_library),
         "sdk_profile_sha256": sha256(profile_path),
