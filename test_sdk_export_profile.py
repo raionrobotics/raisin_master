@@ -275,6 +275,82 @@ class TestInstalledSdkCpuProfile(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("RAISIN_SDK_CPU_PROFILE", result.stdout + result.stderr)
 
+    def test_nested_eigen_package_installs_root_build_profile(self):
+        with tempfile.TemporaryDirectory(prefix="raisin-sdk-nested-profile-") as tmp:
+            root = Path(tmp)
+            producer = root / "producer"
+            package = producer / "package"
+            package.mkdir(parents=True)
+            (package / "include").mkdir()
+            (package / "source.cpp").write_text("int sdk_symbol() { return 0; }\n")
+            eigen_package = root / "eigen-package"
+            eigen_include = eigen_package / "include" / "Eigen"
+            eigen_include.mkdir(parents=True)
+            (eigen_include / "Core").write_text("#define EIGEN_MAX_ALIGN_BYTES 32\n")
+            (eigen_package / "Eigen3Config.cmake").write_text(
+                "if(NOT TARGET Eigen3::Eigen)\n"
+                "  add_library(Eigen3::Eigen INTERFACE IMPORTED)\n"
+                '  set_target_properties(Eigen3::Eigen PROPERTIES '
+                f'INTERFACE_INCLUDE_DIRECTORIES "{eigen_include.parent}")\n'
+                "endif()\n"
+            )
+            (producer / "CMakeLists.txt").write_text(
+                "\n".join(
+                    [
+                        "cmake_minimum_required(VERSION 3.14)",
+                        "project(nested_profile LANGUAGES CXX)",
+                        'set(RAISIN_MARCH "x86-64-v3")',
+                        f'include("{HELPER}")',
+                        'add_subdirectory("package")',
+                        "raisin_install_build_profile()",
+                        "",
+                    ]
+                )
+            )
+            (package / "CMakeLists.txt").write_text(
+                "\n".join(
+                    [
+                        "find_package(Eigen3 CONFIG REQUIRED)",
+                        "add_library(raisin_tf SHARED source.cpp)",
+                        "target_link_libraries(raisin_tf PUBLIC Eigen3::Eigen)",
+                        "raisin_install(raisin_tf Eigen3)",
+                        "",
+                    ]
+                )
+            )
+            build = root / "producer-build"
+            prefix = root / "prefix"
+            subprocess.run(
+                [
+                    "cmake",
+                    "-S",
+                    str(producer),
+                    "-B",
+                    str(build),
+                    "-DEigen3_DIR=" + str(eigen_package),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["cmake", "--build", str(build)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["cmake", "--install", str(build), "--prefix", str(prefix)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            profile = json.loads(
+                (prefix / "share" / "raisin" / "raisin-sdk-build-profile.json").read_text()
+            )
+            self.assertEqual(profile["cpu"]["march"], "x86-64-v3")
+            self.assertEqual(profile["eigen"]["max_align_bytes"], 32)
+
 
 if __name__ == "__main__":
     unittest.main()
