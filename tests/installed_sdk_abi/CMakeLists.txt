@@ -1,0 +1,60 @@
+cmake_minimum_required(VERSION 3.14)
+project(raisin_installed_tf_abi_probe LANGUAGES CXX)
+
+find_package(Eigen3 CONFIG REQUIRED)
+find_package(raisin_tf CONFIG REQUIRED)
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL PROBE_EXPECTED_SYSTEM)
+    message(FATAL_ERROR "SDK system mismatch: expected ${PROBE_EXPECTED_SYSTEM}, got ${CMAKE_SYSTEM_NAME}")
+endif()
+if(NOT CMAKE_SYSTEM_PROCESSOR STREQUAL PROBE_EXPECTED_PROCESSOR)
+    message(FATAL_ERROR "SDK processor mismatch: expected ${PROBE_EXPECTED_PROCESSOR}, got ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL PROBE_EXPECTED_CXX_ID)
+    message(FATAL_ERROR "SDK C++ compiler mismatch: expected ${PROBE_EXPECTED_CXX_ID}, got ${CMAKE_CXX_COMPILER_ID}")
+endif()
+if(NOT CMAKE_CXX_COMPILER_VERSION STREQUAL PROBE_EXPECTED_CXX_VERSION)
+    message(FATAL_ERROR "SDK C++ compiler version mismatch: expected ${PROBE_EXPECTED_CXX_VERSION}, got ${CMAKE_CXX_COMPILER_VERSION}")
+endif()
+
+# Recompute the same Eigen identity captured by raisin_install_build_profile().
+get_target_property(_eigen_include_dirs Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
+set(_eigen_fingerprint "")
+foreach(_eigen_include IN LISTS _eigen_include_dirs)
+    string(REGEX REPLACE "^\\$<BUILD_INTERFACE:(.*)>$" "\\1"
+            _resolved_eigen_include "${_eigen_include}")
+    if(NOT _resolved_eigen_include MATCHES "^\\$<"
+            AND EXISTS "${_resolved_eigen_include}/Eigen/Core")
+        file(SHA256 "${_resolved_eigen_include}/Eigen/Core" _eigen_core_sha256)
+        string(APPEND _eigen_fingerprint "${_eigen_core_sha256};")
+    endif()
+endforeach()
+get_target_property(_eigen_compile_definitions Eigen3::Eigen INTERFACE_COMPILE_DEFINITIONS)
+get_target_property(_eigen_compile_options Eigen3::Eigen INTERFACE_COMPILE_OPTIONS)
+string(APPEND _eigen_fingerprint
+        "definitions:${_eigen_compile_definitions};options:${_eigen_compile_options}")
+string(SHA256 _actual_eigen_fingerprint "${_eigen_fingerprint}")
+if(NOT _actual_eigen_fingerprint STREQUAL PROBE_EXPECTED_EIGEN_FINGERPRINT)
+    message(FATAL_ERROR "Installed Eigen header/usage fingerprint does not match the SDK metadata")
+endif()
+
+get_target_property(_tf_config raisin_tf IMPORTED_CONFIGURATIONS)
+get_target_property(_tf_location raisin_tf IMPORTED_LOCATION)
+if(NOT _tf_location)
+    foreach(_config IN LISTS _tf_config)
+        string(TOUPPER "${_config}" _config_upper)
+        get_target_property(_tf_location raisin_tf "IMPORTED_LOCATION_${_config_upper}")
+        if(_tf_location)
+            break()
+        endif()
+    endforeach()
+endif()
+message(STATUS "RAISIN_TF_IMPORTED_LOCATION=${_tf_location}")
+
+add_executable(tf_sdk_abi_probe probe.cpp)
+target_compile_features(tf_sdk_abi_probe PRIVATE cxx_std_20)
+target_compile_definitions(tf_sdk_abi_probe PRIVATE
+        PROBE_EXPECTED_EIGEN_MAX_ALIGN_BYTES=${PROBE_EXPECTED_EIGEN_MAX_ALIGN_BYTES}
+        PROBE_EXPECTED_ISOMETRY3D_ALIGN_BYTES=${PROBE_EXPECTED_ISOMETRY3D_ALIGN_BYTES})
+target_compile_options(tf_sdk_abi_probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_link_libraries(tf_sdk_abi_probe PRIVATE raisin_tf)

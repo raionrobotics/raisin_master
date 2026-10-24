@@ -29,6 +29,9 @@ class TestInstalledSdkCpuProfile(unittest.TestCase):
         eigen_include = root / "eigen-package" / "include" / "Eigen"
         eigen_include.mkdir(parents=True)
         (eigen_include / "Core").write_text("#define EIGEN_MAX_ALIGN_BYTES 32\n")
+        (eigen_include / "Geometry").write_text(
+            '#include "Core"\nnamespace Eigen { struct alignas(32) Isometry3d { char value[32]; }; }\n'
+        )
         eigen_config.write_text(
             "if(NOT TARGET Eigen3::Eigen)\n"
             "  add_library(Eigen3::Eigen INTERFACE IMPORTED)\n"
@@ -155,6 +158,7 @@ class TestInstalledSdkCpuProfile(unittest.TestCase):
             self.assertEqual(profile["cpu"]["march"], "x86-64-v3")
             self.assertEqual(profile["cpu"]["profile_kind"], "named-cpu-profile")
             self.assertEqual(profile["eigen"]["max_align_bytes"], 32)
+            self.assertEqual(profile["eigen"]["isometry3d_align_bytes"], 32)
             self.assertRegex(
                 profile["eigen"]["core_header_and_usage_fingerprint_sha256"],
                 r"^[0-9a-f]{64}$",
@@ -287,6 +291,9 @@ class TestInstalledSdkCpuProfile(unittest.TestCase):
             eigen_include = eigen_package / "include" / "Eigen"
             eigen_include.mkdir(parents=True)
             (eigen_include / "Core").write_text("#define EIGEN_MAX_ALIGN_BYTES 32\n")
+            (eigen_include / "Geometry").write_text(
+                '#include "Core"\nnamespace Eigen { struct alignas(32) Isometry3d { char value[32]; }; }\n'
+            )
             (eigen_package / "Eigen3Config.cmake").write_text(
                 "if(NOT TARGET Eigen3::Eigen)\n"
                 "  add_library(Eigen3::Eigen INTERFACE IMPORTED)\n"
@@ -350,6 +357,7 @@ class TestInstalledSdkCpuProfile(unittest.TestCase):
             )
             self.assertEqual(profile["cpu"]["march"], "x86-64-v3")
             self.assertEqual(profile["eigen"]["max_align_bytes"], 32)
+            self.assertEqual(profile["eigen"]["isometry3d_align_bytes"], 32)
 
 
 if __name__ == "__main__":

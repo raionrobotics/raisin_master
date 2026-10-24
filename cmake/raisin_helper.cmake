@@ -105,6 +105,7 @@ function(raisin_install_build_profile)
     endif()
 
     set(_eigen_max_align_bytes "null")
+    set(_eigen_isometry3d_align_bytes "null")
     set(_eigen_fingerprint "")
     if(TARGET Eigen3::Eigen AND NOT WIN32)
         include(CheckCXXSourceCompiles)
@@ -140,6 +141,16 @@ function(raisin_install_build_profile)
                 break()
             endif()
         endforeach()
+        foreach(_candidate 64 32 16 8 4)
+            set(_check_var "RAISIN_EIGEN_ISOMETRY3D_ALIGNMENT_${_alignment_check_key}_${_candidate}")
+            check_cxx_source_compiles(
+                    "#include <Eigen/Geometry>\nstatic_assert(alignof(Eigen::Isometry3d) == ${_candidate}, \"unexpected Isometry3d alignment\");\nint main() { return 0; }"
+                    ${_check_var})
+            if(${_check_var})
+                set(_eigen_isometry3d_align_bytes "${_candidate}")
+                break()
+            endif()
+        endforeach()
         set(CMAKE_REQUIRED_LIBRARIES "${_saved_required_libraries}")
         set(CMAKE_REQUIRED_FLAGS "${_saved_required_flags}")
     endif()
@@ -158,7 +169,7 @@ function(raisin_install_build_profile)
             "  \"target\": {\"system\": \"${_system}\", \"processor\": \"${_processor}\"},\n"
             "  \"compiler\": {\"c\": {\"id\": \"${_c_compiler}\", \"version\": \"${_c_compiler_version}\"}, \"cxx\": {\"id\": \"${_cxx_compiler}\", \"version\": \"${_cxx_compiler_version}\"}},\n"
             "  \"cpu\": {\"march\": \"${_march}\", \"profile_kind\": \"${_portability}\"},\n"
-            "  \"eigen\": {\"max_align_bytes\": ${_eigen_max_align_bytes}, \"core_header_and_usage_fingerprint_sha256\": ${_eigen_fingerprint_json}, \"alignment_policy\": \"Eigen defaults under the recorded compiler and CPU profile; no SDK-wide Eigen alignment override is applied\"}\n"
+            "  \"eigen\": {\"max_align_bytes\": ${_eigen_max_align_bytes}, \"isometry3d_align_bytes\": ${_eigen_isometry3d_align_bytes}, \"core_header_and_usage_fingerprint_sha256\": ${_eigen_fingerprint_json}, \"alignment_policy\": \"Eigen defaults under the recorded compiler and CPU profile; no SDK-wide Eigen alignment override is applied\"}\n"
             "}\n")
     install(FILES "${_profile_path}" DESTINATION share/raisin)
     set_property(GLOBAL PROPERTY RAISIN_SDK_BUILD_PROFILE_EMITTED TRUE)
