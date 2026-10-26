@@ -2,8 +2,6 @@ alabaster==1.0.0
     # via sphinx
 babel==2.18.0
     # via sphinx
-black==25.9.0
-    # via -r requirements.in
 breathe==5.1.0
     # via -r requirements.in
 certifi==2025.10.5
@@ -15,16 +13,12 @@ cfgv==3.4.0
 charset-normalizer==3.4.4
     # via requests
 click==8.3.0
-    # via
-    #   -r requirements.in
-    #   black
+    # via -r requirements.in
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   click
     #   sphinx
 cryptography==41.0.7
-    # via -r requirements.in
-detect-secrets==1.5.0
     # via -r requirements.in
 distlib==0.4.0
     # via virtualenv
@@ -44,8 +38,6 @@ jinja2==3.1.6
     # via sphinx
 markupsafe==3.0.4
     # via jinja2
-mypy-extensions==1.1.0
-    # via black
 nanobind==2.9.2
     # via -r requirements.in
 nodeenv==1.9.1
@@ -53,31 +45,22 @@ nodeenv==1.9.1
 packaging==25.0
     # via
     #   -r requirements.in
-    #   black
     #   sphinx
-pathspec==0.12.1
-    # via black
 platformdirs==4.5.0
-    # via
-    #   black
-    #   virtualenv
+    # via virtualenv
 pre-commit==4.3.0
     # via -r requirements.in
 pycparser==3.11 ; implementation_name != 'PyPy'
     # via cffi
 pygments==2.21.0
     # via sphinx
-pytokens==0.3.0
-    # via black
 pyyaml==6.0.3
     # via
     #   -r requirements.in
-    #   detect-secrets
     #   pre-commit
 requests==2.32.5
     # via
     #   -r requirements.in
-    #   detect-secrets
     #   sphinx
 snowballstemmer==3.1.1
     # via sphinx
@@ -104,13 +87,9 @@ sphinxcontrib-qthelp==2.0.0
 sphinxcontrib-serializinghtml==2.0.0
     # via sphinx
 tomli==2.5.0 ; python_full_version < '3.11'
-    # via
-    #   black
-    #   sphinx
+    # via sphinx
 typing-extensions==4.16.0 ; python_full_version < '3.11'
-    # via
-    #   black
-    #   virtualenv
+    # via virtualenv
 urllib3==2.5.0
     # via requests
 virtualenv==20.35.4

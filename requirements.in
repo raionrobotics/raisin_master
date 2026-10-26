@@ -13,7 +13,6 @@ breathe==5.1.0
 sphinx_rtd_theme==3.1.0
 # raisin_network_py (built in this workspace) finds nanobind with this venv's python
 nanobind==2.9.2
-# pre-commit hooks
+# The commit hook (.githooks/pre-commit). pre-commit installs each hook's own tools itself, so
+# a hook that runs black or detect-secrets does not need them here.
 pre_commit==4.3.0
-black==25.9.0
-detect-secrets==1.5.0
