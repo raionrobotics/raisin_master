@@ -280,6 +280,51 @@ if [[ "${1:-}" == "--install" ]]; then
   echo ""
   echo "✅ Virtual environment created: ${install_env_path}"
 
+  # The commit hook (.githooks/pre-commit) runs .githooks/pre-commit-config.yaml, which regenerates
+  # requirements.txt when a commit changes requirements.in. It finds pre-commit at every commit,
+  # so it works from every environment that shares this repository.
+  # It is linked into .git/hooks only when no pre-commit hook is there. A hook already there is the
+  # developer's (their own script, or the one their `pre-commit install` wrote) and is left as it
+  # is: --install only says how to run the raisin_master hook from it, at every run until it does.
+  # A core.hooksPath the developer set is left alone too. Nothing waits for an answer: --install
+  # also runs without a terminal (raion-setup, CI).
+  echo ""
+  echo "🪝 Enabling the raisin_master commit hook..."
+  raisin_enable_commit_hook() {
+    local hooks_path git_common_dir hook raisin_hook="${SCRIPT_DIR}/.githooks/pre-commit"
+    if ! git_common_dir="$(git -C "${SCRIPT_DIR}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)"; then
+      echo "⚠️  ${SCRIPT_DIR} is not a git repository; skipped the commit hook."
+      return 0
+    fi
+    hooks_path="$(git -C "${SCRIPT_DIR}" config --get core.hooksPath 2> /dev/null || true)"
+    if [[ -n "${hooks_path}" ]]; then
+      echo "⚠️  core.hooksPath is set (${hooks_path}), so git does not run .git/hooks; left it as it is."
+      echo "   To enable the raisin_master commit hook there, run ${raisin_hook} from its pre-commit."
+      return 0
+    fi
+    hook="${git_common_dir}/hooks/pre-commit"
+    if [[ "$(readlink -f "${hook}" 2> /dev/null)" == "$(readlink -f "${raisin_hook}")" ]]; then
+      echo "✅ The commit hook is already enabled."
+      return 0
+    fi
+    if [[ -e "${hook}" || -L "${hook}" ]]; then
+      if grep -qF ".githooks/pre-commit" "${hook}" 2> /dev/null; then
+        echo "✅ Your pre-commit hook (${hook}) runs the raisin_master commit hook."
+        return 0
+      fi
+      echo "⚠️  A pre-commit hook is already there (${hook}); left it as it is, so the raisin_master"
+      echo "   commit hook, which regenerates requirements.txt from requirements.in, does not run."
+      echo "   To run it, add this line to that hook right after its first line (#!...):"
+      echo "     \"\$(git rev-parse --show-toplevel)/.githooks/pre-commit\" \"\$@\" || exit"
+      echo "   \`pre-commit install\` rewrites that file; add the line again after running it."
+      return 0
+    fi
+    mkdir -p "${git_common_dir}/hooks"
+    ln -s "${raisin_hook}" "${hook}"
+    echo "✅ Commit hook enabled: ${hook}"
+  }
+  raisin_enable_commit_hook
+
   # Add shell function for auto-activation
   echo ""
   echo "🔧 Configuring shell for venv auto-activation..."
