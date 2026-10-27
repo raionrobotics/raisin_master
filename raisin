@@ -250,15 +250,24 @@ if [[ "${1:-}" == "--install" ]]; then
   echo "Installed: ${install_path}"
   echo "Environment name: ${install_env_name}"
 
-  # On Debian-based systems, install the Python virtual environment packages
-  # needed to create the environment below.
-  if command -v apt-get >/dev/null 2>&1; then
-    echo ""
-    echo "📦 Installing Python virtual environment packages..."
-    if ! { sudo apt-get update && sudo apt-get install -y python3-venv python3-virtualenv python3-pip; }; then
-      echo "⚠️  Failed to install Python venv packages. You can install them manually:"
-      echo "   sudo apt update && sudo apt install python3-venv python3-virtualenv python3-pip"
-    fi
+  # Install the build tools in deps/apt.build*.txt that are missing; the venv packages among them
+  # are needed just below. The script calls sudo itself, only when something is missing.
+  # When it fails the install goes on, so the steps that do not need it still finish (a system
+  # without apt, tools installed by hand), and the failure is repeated when --install exits, also
+  # when a later step stops it: that step may have failed because of it, and the script's own
+  # error is far above by then.
+  echo ""
+  echo "📦 Installing system dependencies..."
+  sys_deps_script="${SCRIPT_DIR}/install_system_deps.sh"
+  raisin_report_sys_deps_failure() {
+    echo "" >&2
+    echo "⚠️  ${sys_deps_script} failed (its error is above), so build tools may be missing." >&2
+    echo "   A later step may have failed because of it. Fix that error, then re-run:" >&2
+    echo "     bash ${sys_deps_script} && ./raisin --install" >&2
+  }
+  if ! bash "${sys_deps_script}"; then
+    echo "⚠️  Some system dependencies were not installed. Continuing; the reason is repeated at the end."
+    trap raisin_report_sys_deps_failure EXIT
   fi
 
   # Create the virtual environment immediately
@@ -271,18 +280,50 @@ if [[ "${1:-}" == "--install" ]]; then
   echo ""
   echo "✅ Virtual environment created: ${install_env_path}"
 
-  # Install system dependencies (cmake, ninja, etc.)
+  # The commit hook (.githooks/pre-commit) runs .githooks/pre-commit-config.yaml, which regenerates
+  # requirements.txt when a commit changes requirements.in. It finds pre-commit at every commit,
+  # so it works from every environment that shares this repository.
+  # It is linked into .git/hooks only when no pre-commit hook is there. A hook already there is the
+  # developer's (their own script, or the one their `pre-commit install` wrote) and is left as it
+  # is: --install only says how to run the raisin_master hook from it, at every run until it does.
+  # A core.hooksPath the developer set is left alone too. Nothing waits for an answer: --install
+  # also runs without a terminal (raion-setup, CI).
   echo ""
-  echo "📦 Installing system dependencies..."
-  sys_deps_script="${SCRIPT_DIR}/install_system_deps.sh"
-  if [[ -f "${sys_deps_script}" ]]; then
-    if ! sudo bash "${sys_deps_script}"; then
-      echo "⚠️  Some system dependencies may not have installed correctly."
-      echo "   You can re-run: sudo bash ${sys_deps_script}"
+  echo "🪝 Enabling the raisin_master commit hook..."
+  raisin_enable_commit_hook() {
+    local hooks_path git_common_dir hook raisin_hook="${SCRIPT_DIR}/.githooks/pre-commit"
+    if ! git_common_dir="$(git -C "${SCRIPT_DIR}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)"; then
+      echo "⚠️  ${SCRIPT_DIR} is not a git repository; skipped the commit hook."
+      return 0
     fi
-  else
-    echo "⚠️  System dependencies script not found: ${sys_deps_script}"
-  fi
+    hooks_path="$(git -C "${SCRIPT_DIR}" config --get core.hooksPath 2> /dev/null || true)"
+    if [[ -n "${hooks_path}" ]]; then
+      echo "⚠️  core.hooksPath is set (${hooks_path}), so git does not run .git/hooks; left it as it is."
+      echo "   To enable the raisin_master commit hook there, run ${raisin_hook} from its pre-commit."
+      return 0
+    fi
+    hook="${git_common_dir}/hooks/pre-commit"
+    if [[ "$(readlink -f "${hook}" 2> /dev/null)" == "$(readlink -f "${raisin_hook}")" ]]; then
+      echo "✅ The commit hook is already enabled."
+      return 0
+    fi
+    if [[ -e "${hook}" || -L "${hook}" ]]; then
+      if grep -qF ".githooks/pre-commit" "${hook}" 2> /dev/null; then
+        echo "✅ Your pre-commit hook (${hook}) runs the raisin_master commit hook."
+        return 0
+      fi
+      echo "⚠️  A pre-commit hook is already there (${hook}); left it as it is, so the raisin_master"
+      echo "   commit hook, which regenerates requirements.txt from requirements.in, does not run."
+      echo "   To run it, add this line to that hook right after its first line (#!...):"
+      echo "     \"\$(git rev-parse --show-toplevel)/.githooks/pre-commit\" \"\$@\" || exit"
+      echo "   \`pre-commit install\` rewrites that file; add the line again after running it."
+      return 0
+    fi
+    mkdir -p "${git_common_dir}/hooks"
+    ln -s "${raisin_hook}" "${hook}"
+    echo "✅ Commit hook enabled: ${hook}"
+  }
+  raisin_enable_commit_hook
 
   # Add shell function for auto-activation
   echo ""

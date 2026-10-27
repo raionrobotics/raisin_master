@@ -146,16 +146,6 @@ def get_repo_name_from_path(path: Union[str, Path]) -> Optional[str]:
     return parts[0] if parts else None
 
 
-def is_root():
-    """
-    Check if the current user is root.
-
-    Returns:
-        bool: True if running as root, False otherwise
-    """
-    return os.geteuid() == 0
-
-
 # ============================================================================
 # Cross-architecture build helpers
 # ============================================================================

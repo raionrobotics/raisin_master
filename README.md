@@ -46,7 +46,9 @@ Follow these steps to configure and build your project.
 
 Run the install command to set up the RAISIN command-line tool. This:
 - Creates a Python virtual environment
-- Installs system dependencies (Python, CMake, Ninja, clang-format, pre-commit, gh)
+- Installs the build tools declared in `deps/apt.build*.txt` that are missing (Ubuntu only)
+- Installs the Python packages pinned in `requirements.txt` (pre-commit, documentation tools) into the virtual environment. To change them, edit `requirements.in`
+- Enables the raisin_master commit hook (links `.git/hooks/pre-commit` to `.githooks/pre-commit` when no pre-commit hook is there; a hook already there is left as it is, and `--install` prints the line that runs the raisin_master hook from it), which regenerates `requirements.txt` when a commit changes `requirements.in`. It finds pre-commit at every commit; where pre-commit is missing it warns and lets the commit through
 - Adds a shell function for auto-activation
 
 ```bash
@@ -55,7 +57,7 @@ Run the install command to set up the RAISIN command-line tool. This:
 
 After installation, **restart your terminal** (or run `source ~/.bashrc`) to enable the `raisin` command.
 
-> **Note:** The installer will prompt for sudo to install system dependencies. If you prefer to install them separately, you can run `sudo bash install_system_deps.sh` manually.
+> **Note:** The installer prompts for sudo only when a build tool is missing. To install them separately, run `bash install_system_deps.sh`. On systems other than Ubuntu, install the tools listed in `deps/apt.build.txt` yourself.
 
 ### 2. Project Configuration
 

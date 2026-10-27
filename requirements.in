@@ -1,0 +1,18 @@
+# The Python packages raisin_master uses directly. Edit this file, not requirements.txt: the commit
+# hook (.githooks/pre-commit-config.yaml) regenerates requirements.txt from it with every version pinned.
+# raisin CLI
+click==8.3.0
+packaging==25.0
+PyYAML==6.0.3
+# raisin_ota
+cryptography==41.0.7
+requests==2.32.5
+# raisin documentation (sphinx-build)
+Sphinx==8.1.3
+breathe==5.1.0
+sphinx_rtd_theme==3.1.0
+# raisin_network_py (built in this workspace) finds nanobind with this venv's python
+nanobind==2.9.2
+# The commit hook (.githooks/pre-commit). pre-commit installs each hook's own tools itself, so
+# a hook that runs black or detect-secrets does not need them here.
+pre_commit==4.3.0
