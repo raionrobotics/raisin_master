@@ -57,6 +57,12 @@ elif [[ ${#to_install[@]} -eq 0 ]]; then
     echo "✅ Build tools (deps/apt.build.txt) are already installed."
 else
     echo "📦 Installing build tools (deps/apt.build.txt): ${to_install[*]}"
+    # Installing needs root. Without sudo a non-root run would fail on every apt call, and the
+    # apt-get update warning below would hide why, so say it here.
+    if [[ -n "${SUDO}" ]] && ! command -v sudo >/dev/null 2>&1; then
+        echo "ERROR: installing these tools needs root, and sudo is not available. Run this script as root." >&2
+        exit 1
+    fi
     # A broken source (removed repository, expired key) fails the update for that source only;
     # the name check and apt install below decide whether the tools can be installed.
     if ! ${SUDO} apt-get update; then
