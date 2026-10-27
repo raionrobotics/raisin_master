@@ -1,0 +1,32 @@
+# Build tools of raisin_master on Ubuntu: what ./raisin (the launcher, raisin build, test and
+# cppcheck) runs, and the formatter developers edit with. apt package names separated by spaces or newlines (one per line by convention),
+# '#' starts a comment; version-specific packages go in apt.build.ubuntu-<version>.txt.
+# install_system_deps.sh (run by ./raisin --install) installs the ones that are missing.
+
+# The launcher creates the raisin virtual environment, and src/setup.sh (raisin-manifest)
+# a temporary one to install vcs into
+python3
+python3-venv
+python3-virtualenv
+python3-pip
+# raisin build
+cmake
+ninja-build
+# raisin build configures with the vcpkg toolchain, which bootstraps vcpkg; its
+# scripts/bootstrap.sh requires these four
+curl
+zip
+unzip
+tar
+# raisin setup and the git commands read Git LFS files
+git-lfs
+# GitHub CLI: developers log in to GitHub and read the private repositories' token with it, and
+# src/setup.sh (raisin-manifest) may call it. 22.04's gh (2.4.0) has no `gh auth token`
+gh
+# raisin cppcheck
+cppcheck
+# raisin test --coverage
+gcovr
+# Editors format C++ with it on save. The pre-commit hook does not use it: it fetches its own
+# pinned clang-format, so this one can differ in version (22.04 has 14, 24.04 has 18)
+clang-format
