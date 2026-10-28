@@ -12,7 +12,7 @@ from commands.fms_build_profile import (
     fms_runtime_cmake_args,
     write_fms_build_profile,
 )
-from commands.publish import _build_package, _create_archive
+from commands.publish import _build_package, _create_archive, _get_paths
 from commands.build import build_cli_command, build_command
 from commands.publish import publish_command
 
@@ -29,6 +29,59 @@ class FmsBuildProfileTest(unittest.TestCase):
         (package / "CMakeLists.txt").write_text(
             f'option({FMS_RUNTIME_OPTION} "Build FMS runtime" OFF)\n'
         )
+
+    def test_publish_resolves_package_nested_in_plugin_repository(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = (
+                Path(temp_dir)
+                / "src"
+                / "raisin_plugin"
+                / "raisin_behavior_tree_plugin"
+            )
+            package.mkdir(parents=True)
+            (package / "release.yaml").write_text("version: 0.0.2\n")
+            with patch.object(g, "script_directory", temp_dir):
+                self.assertEqual(
+                    _get_paths("raisin_behavior_tree_plugin", "release")["target_dir"],
+                    package,
+                )
+
+    def test_publish_prefers_direct_package_and_refuses_ambiguous_nested_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "src"
+            direct = source / "raisin_behavior_tree_plugin"
+            direct.mkdir(parents=True)
+            (direct / "release.yaml").write_text("version: 1.0.0\n")
+            (source / "raisin_plugin" / direct.name).mkdir(parents=True)
+            (source / "raisin_plugin" / direct.name / "release.yaml").write_text(
+                "version: 0.0.2\n"
+            )
+            with patch.object(g, "script_directory", temp_dir):
+                self.assertEqual(
+                    _get_paths(direct.name, "release")["target_dir"], direct
+                )
+
+            (direct / "release.yaml").unlink()
+            direct.rmdir()
+            (source / "raisin_plugin" / direct.name / "release.yaml").unlink()
+            (source / "raisin_plugin" / direct.name).rmdir()
+            (source / "raisin_plugin").rmdir()
+            for repository, version in (
+                ("raisin_plugin", "0.0.2"),
+                ("other_plugin", "0.0.3"),
+            ):
+                package = source / repository / direct.name
+                package.mkdir(parents=True)
+                (package / "release.yaml").write_text(f"version: {version}\n")
+            with patch.object(g, "script_directory", temp_dir):
+                with self.assertRaisesRegex(ValueError, "Ambiguous package target"):
+                    _get_paths(direct.name, "release")
+
+    def test_publish_rejects_package_target_path_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(g, "script_directory", temp_dir):
+                with self.assertRaisesRegex(ValueError, "Invalid package target"):
+                    _get_paths("../outside", "release")
 
     def test_disabled_does_not_require_fms_source_or_add_cmake_option(self):
         with tempfile.TemporaryDirectory() as temp_dir:

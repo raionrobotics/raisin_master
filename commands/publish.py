@@ -37,6 +37,41 @@ from commands.setup import (
 # ============================================================================
 
 
+def _resolve_target_dir(script_dir: Path, target: str) -> Path:
+    """Resolve a package root release.yaml, including packages nested in a repo."""
+    source_root = (script_dir / "src").resolve()
+    if not target or Path(target).name != target or target in {".", ".."}:
+        raise ValueError("Invalid package target")
+
+    direct = source_root / target
+    direct_resolved = direct.resolve()
+    try:
+        direct_resolved.relative_to(source_root)
+    except ValueError as exc:
+        raise ValueError("Package target escapes the source directory") from exc
+    if (direct / "release.yaml").is_file():
+        return direct
+
+    matches = []
+    if source_root.is_dir():
+        for release_file in source_root.rglob("release.yaml"):
+            package_dir = release_file.parent
+            if package_dir.name != target:
+                continue
+            resolved = package_dir.resolve()
+            try:
+                resolved.relative_to(source_root)
+            except ValueError:
+                continue
+            if resolved != direct_resolved:
+                matches.append(package_dir)
+
+    if len(matches) > 1:
+        paths = ", ".join(sorted(str(path) for path in matches))
+        raise ValueError(f"Ambiguous package target '{target}': {paths}")
+    return matches[0] if matches else direct
+
+
 def _get_paths(target: str, build_type: str) -> dict:
     """Get all relevant paths for a publish operation.
 
@@ -45,7 +80,7 @@ def _get_paths(target: str, build_type: str) -> dict:
     script_dir = Path(g.script_directory)
     return {
         "script_dir": script_dir,
-        "target_dir": script_dir / "src" / target,
+        "target_dir": _resolve_target_dir(script_dir, target),
         "install_dir": (
             script_dir
             / "release"
@@ -344,17 +379,17 @@ def publish(
         non-zero exit -- CI reads that exit code, and this is the only thing
         that produces the archives the OTA upload stage consumes.
     """
-    paths = _get_paths(target, build_type)
-
-    # Validate target
-    details = _validate_target(paths["target_dir"])
-    if not details:
-        return False
-
-    print(f"✅ Found release file for '{target}'.")
-    version = details.get("version", "0.0.0")
-
     try:
+        paths = _get_paths(target, build_type)
+
+        # Validate target
+        details = _validate_target(paths["target_dir"])
+        if not details:
+            return False
+
+        print(f"✅ Found release file for '{target}'.")
+        version = details.get("version", "0.0.0")
+
         # Build
         if not _build_package(target, build_type, paths, fms_runtime=fms_runtime):
             return False
