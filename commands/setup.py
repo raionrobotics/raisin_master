@@ -18,7 +18,7 @@ import subprocess
 import click
 from pathlib import Path
 from collections import defaultdict
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Optional, Union
 
 from commands.repo_dependency_check import guard_src_repo_release_yaml_dependencies
 from commands.sdk_target_config import TargetConfig, TargetConfigError
@@ -2110,7 +2110,7 @@ def setup(
     build_test_enabled=None,
     raisin_march: Optional[str] = None,
     target: Optional[TargetConfig] = None,
-    package_source_dir: Optional[str | Path] = None,
+    package_source_dir: Optional[Union[str, Path]] = None,
 ):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
