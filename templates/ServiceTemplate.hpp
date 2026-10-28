@@ -35,10 +35,12 @@ class Request {
   }
 
   inline void setBuffer([[maybe_unused]] std::vector<unsigned char> &buffer) const {
+    (void)getSize();
     @@REQUEST_SET_BUFFER_MEMBERS@@
   };
 
   inline unsigned char* setBuffer(unsigned char* buffer) const {
+    (void)getSize();
     @@REQUEST_SET_BUFFER_MEMBERS2@@
     return buffer;
   }
@@ -77,10 +79,12 @@ class Response {
   }
 
   inline void setBuffer([[maybe_unused]] std::vector<unsigned char> &buffer) const {
+    (void)getSize();
     @@RESPONSE_SET_BUFFER_MEMBERS@@
   };
 
   inline unsigned char* setBuffer(unsigned char* buffer) const {
+    (void)getSize();
     @@RESPONSE_SET_BUFFER_MEMBERS2@@
     return buffer;
   }

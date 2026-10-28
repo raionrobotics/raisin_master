@@ -48,8 +48,10 @@ def test_checked_lengths_preserve_wire_prefix_and_reject_overflow(
     assert "checkedSerializedByteLength" in point_header
     assert "sizeof(char16_t)" in point_header
     assert "temp +=" not in point_header
+    assert "(void)getSize();" in point_header
     assert "checkedSerializedSizeAdd" in echo_header
     assert "temp +=" not in echo_header
+    assert echo_header.count("(void)getSize();") == 4
     generated_base = generated_root / "include" / "raisin_serialization_base.hpp"
     generated_base.parent.mkdir(parents=True, exist_ok=True)
     generated_base.write_text(
@@ -75,6 +77,14 @@ int main() {
   constexpr std::size_t overhead = sizeof(std::int64_t) + sizeof(std::uint32_t);
   if (raisin::checkedSerializedLengthWithOverhead(max - overhead, overhead) != max) return 3;
   if (raisin::checkedBufferSize(max - 2, 2, max) != max) return 4;
+  const std::vector<unsigned char> empty_buffer;
+  bool wire_buffer_limit_rejected = false;
+  try {
+    (void)raisin::checkedBufferSize(max, 1, empty_buffer.max_size());
+  } catch (const std::length_error&) {
+    wire_buffer_limit_rejected = true;
+  }
+  if (!wire_buffer_limit_rejected) return 29;
   bool buffer_growth_rejected = false;
   try {
     (void)raisin::checkedBufferSize(max - 1, 2, max);

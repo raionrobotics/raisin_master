@@ -62,6 +62,11 @@ static inline std::size_t checkedSerializedSizeAdd(std::size_t current_size,
 static inline std::size_t checkedBufferSize(std::size_t current_size,
                                            std::size_t additional_size,
                                            std::size_t maximum_size) {
+  const auto wire_maximum = static_cast<std::size_t>(
+      std::numeric_limits<uint32_t>::max());
+  if (maximum_size > wire_maximum) {
+    maximum_size = wire_maximum;
+  }
   if (current_size > maximum_size ||
       additional_size > maximum_size - current_size) {
     throw std::length_error("serialized buffer size overflow");
@@ -89,7 +94,11 @@ setBuffer(std::vector<unsigned char>& buffer, const T& val) {
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::string& val) {
   const uint32_t size = checkedSerializedLength(val.size());
   setBuffer(buffer, size);
-  buffer.insert(buffer.end(), val.begin(), val.end());
+  const auto originalSize = buffer.size();
+  growBuffer(buffer, size);
+  if (!val.empty()) {
+    std::memcpy(buffer.data() + originalSize, val.data(), size);
+  }
 }
 
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::u16string& val) {
