@@ -105,31 +105,31 @@ int main() {
   const std::uint32_t legacy_string_size = 3;
   std::memcpy(expected_string.data(), &legacy_string_size, sizeof(legacy_string_size));
   std::memcpy(expected_string.data() + sizeof(legacy_string_size), "abc", 3);
-  if (bytes != expected_string) return 7;
+  if (bytes != expected_string) return 10;
   std::uint32_t string_size = 0;
   const unsigned char* cursor = raisin::getBuffer(bytes.data(), string_size);
-  if (string_size != 3 || std::string(reinterpret_cast<const char*>(cursor), string_size) != "abc") return 8;
+  if (string_size != 3 || std::string(reinterpret_cast<const char*>(cursor), string_size) != "abc") return 11;
 
   unsigned char raw_string[sizeof(std::uint32_t) + 3]{};
   unsigned char* raw_end = raisin::setBuffer(raw_string, std::string("abc"));
-  if (raw_end - raw_string != sizeof(raw_string)) return 9;
+  if (raw_end - raw_string != sizeof(raw_string)) return 12;
   std::string raw_round_trip;
   (void)raisin::getBuffer(raw_string, raw_round_trip);
-  if (raw_round_trip != "abc") return 10;
+  if (raw_round_trip != "abc") return 13;
 
   bytes.clear();
   const std::u16string u16_value = u"xy";
   raisin::setBuffer(bytes, u16_value);
   std::u16string u16_round_trip;
   (void)raisin::getBuffer(bytes.data(), u16_round_trip);
-  if (u16_round_trip != u16_value) return 11;
+  if (u16_round_trip != u16_value) return 14;
 
   bytes.clear();
   const std::wstring wide_value = L"xy";
   raisin::setBuffer(bytes, wide_value);
   std::wstring wide_round_trip;
   (void)raisin::getBuffer(bytes.data(), wide_round_trip);
-  if (wide_round_trip != wide_value) return 12;
+  if (wide_round_trip != wide_value) return 15;
 
   bytes.clear();
   raisin::setBuffer(bytes, std::vector<std::uint16_t>{7, 9});
@@ -138,24 +138,24 @@ int main() {
   const std::uint16_t legacy_vector_values[] = {7, 9};
   std::memcpy(expected_vector.data(), &legacy_vector_count, sizeof(legacy_vector_count));
   std::memcpy(expected_vector.data() + sizeof(legacy_vector_count), legacy_vector_values, sizeof(legacy_vector_values));
-  if (bytes != expected_vector) return 13;
+  if (bytes != expected_vector) return 16;
   std::uint32_t vector_count = 0;
   (void)raisin::getBuffer(bytes.data(), vector_count);
-  if (vector_count != 2) return 14;
+  if (vector_count != 2) return 17;
 
   bytes.clear();
   const std::vector<std::string> strings{"a", "bc"};
   raisin::setBuffer(bytes, strings);
   std::vector<std::string> strings_round_trip;
   (void)raisin::getBuffer(bytes.data(), strings_round_trip);
-  if (strings_round_trip != strings) return 15;
+  if (strings_round_trip != strings) return 18;
 
   bytes.clear();
   const std::vector<bool> flags{true, false};
   raisin::setBuffer(bytes, flags);
   std::vector<bool> flags_round_trip;
   (void)raisin::getBuffer(bytes.data(), flags_round_trip);
-  if (flags_round_trip != flags) return 16;
+  if (flags_round_trip != flags) return 19;
 
   bytes.clear();
   raisin::test_pkg::msg::Point point;
@@ -164,20 +164,20 @@ int main() {
   raisin::setBuffer(bytes, std::vector<raisin::test_pkg::msg::Point>{point});
   std::uint32_t message_count = 0;
   (void)raisin::getBuffer(bytes.data(), message_count);
-  if (message_count != 1) return 17;
-  if (point.getSize() != sizeof(std::uint32_t) + 1 + sizeof(point.value)) return 18;
+  if (message_count != 1) return 20;
+  if (point.getSize() != sizeof(std::uint32_t) + 1 + sizeof(point.value)) return 21;
 
   raisin::test_pkg::srv::Echo::Request request;
   request.text = "x";
   request.value = 42;
-  if (request.getSize() != sizeof(std::uint32_t) + 1 + sizeof(request.value)) return 19;
+  if (request.getSize() != sizeof(std::uint32_t) + 1 + sizeof(request.value)) return 22;
   raisin::test_pkg::srv::Echo::Response response;
   response.text = "xy";
-  if (response.getSize() != sizeof(std::uint32_t) + 2) return 20;
+  if (response.getSize() != sizeof(std::uint32_t) + 2) return 23;
 
   raisin::SerializedMessage message;
   message.msg.resize(2);
-  if (message.size() != sizeof(std::int64_t) + sizeof(std::uint32_t) + 2) return 21;
+  if (message.size() != sizeof(std::int64_t) + sizeof(std::uint32_t) + 2) return 24;
   return 0;
 }
 ''',
