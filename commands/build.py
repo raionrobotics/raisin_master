@@ -60,10 +60,7 @@ def build_command(
     """
     check_supported_architecture()
     script_directory = g.script_directory
-    try:
-        fms_cmake_args = fms_runtime_cmake_args(script_directory, fms_runtime)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+    fms_cmake_args = fms_runtime_cmake_args(script_directory, fms_runtime)
     developer_env = g.developer_env
     ninja_path = g.ninja_path
 

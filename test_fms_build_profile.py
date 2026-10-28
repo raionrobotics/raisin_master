@@ -68,10 +68,10 @@ class FmsBuildProfileTest(unittest.TestCase):
         for enabled, expected in ((False, "OFF"), (True, "ON")):
             with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as temp_dir:
                 self._write_plugin_option(temp_dir)
-                g.script_directory = temp_dir
-                g.developer_env = {}
-                g.ninja_path = ""
                 with (
+                    patch.object(g, "script_directory", temp_dir),
+                    patch.object(g, "developer_env", {}),
+                    patch.object(g, "ninja_path", ""),
                     patch("commands.build.check_supported_architecture"),
                     patch("commands.build._resolve_default_python", return_value=None),
                     patch("commands.build.stash_pure_cmake_build_dir"),
@@ -127,15 +127,17 @@ class FmsBuildProfileTest(unittest.TestCase):
             install_dir.mkdir()
             (install_dir / "release.yaml").write_text("version: 0.1.0\n")
             write_fms_build_profile(str(install_dir), enabled=True)
-            g.os_type = "ubuntu"
-            g.os_version = "24.04"
-            g.architecture = "x86_64"
-            archive = _create_archive(
-                "raisin_behavior_tree_plugin",
-                "0.1.0",
-                "release",
-                {"install_dir": install_dir, "release_dir": release_dir},
-            )
+            with (
+                patch.object(g, "os_type", "ubuntu"),
+                patch.object(g, "os_version", "24.04"),
+                patch.object(g, "architecture", "x86_64"),
+            ):
+                archive = _create_archive(
+                    "raisin_behavior_tree_plugin",
+                    "0.1.0",
+                    "release",
+                    {"install_dir": install_dir, "release_dir": release_dir},
+                )
             with zipfile.ZipFile(archive) as zipped:
                 data = json.loads(
                     zipped.read("share/raisin/build-profile.json").decode()
@@ -148,10 +150,10 @@ class FmsBuildProfileTest(unittest.TestCase):
     def test_build_cli_passes_explicit_opt_in(self, _setup, _targets, mock_build):
         with tempfile.TemporaryDirectory() as temp_dir:
             self._write_plugin_option(temp_dir)
-            g.script_directory = temp_dir
-            result = CliRunner().invoke(
-                build_cli_command, ["--type", "release", "--fms-runtime"]
-            )
+            with patch.object(g, "script_directory", temp_dir):
+                result = CliRunner().invoke(
+                    build_cli_command, ["--type", "release", "--fms-runtime"]
+                )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(mock_build.call_args.kwargs["fms_runtime"])
 
@@ -162,8 +164,10 @@ class FmsBuildProfileTest(unittest.TestCase):
         self, _setup, _targets, mock_build
     ):
         with tempfile.TemporaryDirectory() as temp_dir:
-            g.script_directory = temp_dir
-            result = CliRunner().invoke(build_cli_command, ["--type", "release"])
+            with patch.object(g, "script_directory", temp_dir):
+                result = CliRunner().invoke(
+                    build_cli_command, ["--type", "release"]
+                )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(mock_build.call_args.kwargs["fms_runtime"])
 
@@ -171,11 +175,16 @@ class FmsBuildProfileTest(unittest.TestCase):
     def test_publish_cli_passes_opt_in_for_plugin_archive(self, mock_publish):
         with tempfile.TemporaryDirectory() as temp_dir:
             self._write_plugin_option(temp_dir)
-            g.script_directory = temp_dir
-            result = CliRunner().invoke(
-                publish_command,
-                ["raisin_behavior_tree_plugin", "--type", "release", "--fms-runtime"],
-            )
+            with patch.object(g, "script_directory", temp_dir):
+                result = CliRunner().invoke(
+                    publish_command,
+                    [
+                        "raisin_behavior_tree_plugin",
+                        "--type",
+                        "release",
+                        "--fms-runtime",
+                    ],
+                )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(mock_publish.call_args.kwargs["fms_runtime"])
 
@@ -190,8 +199,12 @@ class FmsBuildProfileTest(unittest.TestCase):
     def test_publish_package_passes_opt_in_and_writes_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self._write_plugin_option(temp_dir)
-            g.script_directory = temp_dir
-            target_dir = Path(temp_dir) / "src" / "raisin_plugin" / "raisin_behavior_tree_plugin"
+            target_dir = (
+                Path(temp_dir)
+                / "src"
+                / "raisin_plugin"
+                / "raisin_behavior_tree_plugin"
+            )
             paths = {
                 "build_dir": Path(temp_dir) / "build",
                 "install_dir": Path(temp_dir) / "install",
@@ -199,6 +212,7 @@ class FmsBuildProfileTest(unittest.TestCase):
             }
             (target_dir / "release.yaml").write_text("version: 0.1.0\n")
             with (
+                patch.object(g, "script_directory", temp_dir),
                 patch("commands.publish.delete_directory"),
                 patch("commands.publish.setup"),
                 patch("commands.publish.platform.system", return_value="Linux"),
@@ -217,7 +231,10 @@ class FmsBuildProfileTest(unittest.TestCase):
                 build_linux.call_args.args[-1],
             )
             profile = json.loads(
-                (Path(temp_dir) / "install/share/raisin/build-profile.json").read_text()
+                (
+                    Path(temp_dir)
+                    / "install/share/raisin/build-profile.json"
+                ).read_text()
             )
             self.assertTrue(profile["features"]["fms_runtime"])
 
