@@ -52,6 +52,19 @@ def test_checked_lengths_preserve_wire_prefix_and_reject_overflow(
     assert "checkedSerializedSizeAdd" in echo_header
     assert "temp +=" not in echo_header
     assert echo_header.count("(void)getSize();") == 4
+    raw_base = TEMPLATE.read_text(encoding="utf-8")
+    raw_vector_start = raw_base.index(
+        "setBuffer(unsigned char* buffer, const std::vector<T>& val) {"
+    )
+    raw_vector_end = raw_base.index(
+        "\n}\n\ntemplate <typename T>", raw_vector_start
+    )
+    raw_vector_setter = raw_base[raw_vector_start:raw_vector_end]
+    assert (
+        "checkedSerializedVectorByteLength(val.size(), sizeof(T))"
+        in raw_vector_setter
+    )
+    assert "val.size() * sizeof(T)" not in raw_vector_setter
     generated_base = generated_root / "include" / "raisin_serialization_base.hpp"
     generated_base.parent.mkdir(parents=True, exist_ok=True)
     generated_base.write_text(
@@ -74,6 +87,20 @@ int main() {
   const auto max = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
   if (raisin::checkedSerializedLength(max) != std::numeric_limits<std::uint32_t>::max()) return 1;
   if (raisin::checkedSerializedByteLength(max / 2, 2) != max - 1) return 2;
+  const auto largest_vector_count =
+      (max - sizeof(std::uint32_t)) / sizeof(std::uint32_t);
+  const auto largest_vector_bytes = largest_vector_count * sizeof(std::uint32_t);
+  if (raisin::checkedSerializedVectorByteLength(
+          largest_vector_count, sizeof(std::uint32_t)) != largest_vector_bytes)
+    return 30;
+  bool vector_aggregate_overflow_rejected = false;
+  try {
+    (void)raisin::checkedSerializedVectorByteLength(
+        largest_vector_count + 1, sizeof(std::uint32_t));
+  } catch (const std::length_error&) {
+    vector_aggregate_overflow_rejected = true;
+  }
+  if (!vector_aggregate_overflow_rejected) return 31;
   constexpr std::size_t overhead = sizeof(std::int64_t) + sizeof(std::uint32_t);
   if (raisin::checkedSerializedLengthWithOverhead(max - overhead, overhead) != max) return 3;
   if (raisin::checkedBufferSize(max - 2, 2, max) != max) return 4;

@@ -47,6 +47,13 @@ static inline uint32_t checkedSerializedLengthWithOverhead(
   return static_cast<uint32_t>(payload_length + overhead);
 }
 
+static inline uint32_t checkedSerializedVectorByteLength(
+    std::size_t count, std::size_t element_size) {
+  const uint32_t payload_length = checkedSerializedByteLength(count, element_size);
+  (void)checkedSerializedLengthWithOverhead(payload_length, sizeof(uint32_t));
+  return payload_length;
+}
+
 static inline std::size_t checkedSerializedSizeAdd(std::size_t current_size,
                                                   std::size_t payload_size,
                                                   std::size_t overhead) {
@@ -215,8 +222,10 @@ template <typename T>
 static std::enable_if_t<
   std::is_trivially_copyable_v<T> && !std::is_same_v<T, bool>, unsigned char*>
 setBuffer(unsigned char* buffer, const std::vector<T>& val) {
-  buffer = setBuffer(buffer, checkedSerializedLength(val.size()));
-  const size_t bytes = val.size() * sizeof(T);
+  const uint32_t size = checkedSerializedLength(val.size());
+  const std::size_t bytes =
+    checkedSerializedVectorByteLength(val.size(), sizeof(T));
+  buffer = setBuffer(buffer, size);
   if (bytes > 0) {
     std::memcpy(buffer, val.data(), bytes);
     buffer += bytes;
