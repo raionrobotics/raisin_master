@@ -49,10 +49,14 @@ def test_checked_lengths_preserve_wire_prefix_and_reject_overflow(
     assert "sizeof(char16_t)" in point_header
     assert "temp +=" not in point_header
     assert "(void)getSize();" in point_header
+    assert point_header.count(
+        "checkedSerializedSizeAdd(total_size, item.getSize(), 0)"
+    ) == 2
     assert "checkedSerializedSizeAdd" in echo_header
     assert "temp +=" not in echo_header
     assert echo_header.count("(void)getSize();") == 4
     raw_base = TEMPLATE.read_text(encoding="utf-8")
+    assert "checkedSerializedValueSize(val)" in raw_base
     raw_vector_start = raw_base.index(
         "setBuffer(unsigned char* buffer, const std::vector<T>& val) {"
     )
@@ -64,7 +68,24 @@ def test_checked_lengths_preserve_wire_prefix_and_reject_overflow(
         "checkedSerializedVectorByteLength(val.size(), sizeof(T))"
         in raw_vector_setter
     )
+    assert raw_base.count(
+        "checkedSerializedVectorByteLength(val.size(), sizeof(T))"
+    ) == 2
     assert "val.size() * sizeof(T)" not in raw_vector_setter
+    raw_bool_vector_setter_start = raw_base.index(
+        "setBuffer(unsigned char* buffer,\n                             const std::vector<bool>& val) {"
+    )
+    raw_bool_vector_end = raw_base.index("\n}\n", raw_bool_vector_setter_start)
+    raw_bool_vector_setter = raw_base[
+        raw_bool_vector_setter_start:raw_bool_vector_end
+    ]
+    assert (
+        "checkedSerializedVectorByteLength(val.size(), sizeof(bool))"
+        in raw_bool_vector_setter
+    )
+    assert raw_base.count(
+        "checkedSerializedVectorByteLength(val.size(), sizeof(bool))"
+    ) == 2
     generated_base = generated_root / "include" / "raisin_serialization_base.hpp"
     generated_base.parent.mkdir(parents=True, exist_ok=True)
     generated_base.write_text(
@@ -85,6 +106,20 @@ r'''#include <cstdint>
 
 int main() {
   const auto max = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+  struct OversizeElement {
+    std::string marker;
+    std::uint32_t getSize() const {
+      return std::numeric_limits<std::uint32_t>::max();
+    }
+  };
+  bool nested_sequence_overflow_rejected = false;
+  try {
+    (void)raisin::checkedSerializedValueSize(
+        std::vector<OversizeElement>{OversizeElement{}});
+  } catch (const std::length_error&) {
+    nested_sequence_overflow_rejected = true;
+  }
+  if (!nested_sequence_overflow_rejected) return 34;
   if (raisin::checkedSerializedLength(max) != std::numeric_limits<std::uint32_t>::max()) return 1;
   if (raisin::checkedSerializedByteLength(max / 2, 2) != max - 1) return 2;
   const auto largest_vector_count =
@@ -101,6 +136,19 @@ int main() {
     vector_aggregate_overflow_rejected = true;
   }
   if (!vector_aggregate_overflow_rejected) return 31;
+  const auto largest_bool_count =
+      (max - sizeof(std::uint32_t)) / sizeof(bool);
+  if (raisin::checkedSerializedVectorByteLength(
+          largest_bool_count, sizeof(bool)) != largest_bool_count * sizeof(bool))
+    return 32;
+  vector_aggregate_overflow_rejected = false;
+  try {
+    (void)raisin::checkedSerializedVectorByteLength(
+        largest_bool_count + 1, sizeof(bool));
+  } catch (const std::length_error&) {
+    vector_aggregate_overflow_rejected = true;
+  }
+  if (!vector_aggregate_overflow_rejected) return 33;
   constexpr std::size_t overhead = sizeof(std::int64_t) + sizeof(std::uint32_t);
   if (raisin::checkedSerializedLengthWithOverhead(max - overhead, overhead) != max) return 3;
   if (raisin::checkedBufferSize(max - 2, 2, max) != max) return 4;
@@ -218,10 +266,57 @@ int main() {
 
   bytes.clear();
   const std::vector<std::string> strings{"a", "bc"};
+  const auto strings_size = raisin::checkedSerializedValueSize(strings);
+  if (!strings_size.has_value() || *strings_size !=
+      sizeof(std::uint32_t) * 3 + strings[0].size() + strings[1].size())
+    return 35;
   raisin::setBuffer(bytes, strings);
   std::vector<std::string> strings_round_trip;
   (void)raisin::getBuffer(bytes.data(), strings_round_trip);
   if (strings_round_trip != strings) return 18;
+
+  bytes.clear();
+  const std::vector<raisin::MessageInformation> information{
+      raisin::MessageInformation{123, "mission", "fms/test", 7}};
+  const auto information_size =
+      raisin::checkedSerializedValueSize(information.front());
+  if (!information_size.has_value() ||
+      *information_size != sizeof(std::int64_t) + sizeof(std::uint32_t) + 7 +
+                               sizeof(std::uint32_t) + 8 + sizeof(std::int32_t))
+    return 39;
+  raisin::setBuffer(bytes, information);
+  std::vector<raisin::MessageInformation> information_round_trip;
+  (void)raisin::getBuffer(bytes.data(), information_round_trip);
+  if (information_round_trip.size() != 1 ||
+      information_round_trip[0].timestamp != 123 ||
+      information_round_trip[0].title != "mission" ||
+      information_round_trip[0].dataType != "fms/test" ||
+      information_round_trip[0].id != 7)
+    return 36;
+
+  bytes.clear();
+  raisin::SerializedMessage serialized_message;
+  serialized_message.title = "m";
+  serialized_message.id = 8;
+  serialized_message.msg = {1, 2};
+  const auto serialized_message_size =
+      raisin::checkedSerializedValueSize(serialized_message);
+  if (!serialized_message_size.has_value() ||
+      *serialized_message_size != sizeof(std::uint32_t) + 1 +
+                                     sizeof(std::int32_t) +
+                                     sizeof(std::uint32_t) + 2)
+    return 37;
+  const std::vector<raisin::SerializedMessage> serialized_messages{
+      serialized_message};
+  raisin::setBuffer(bytes, serialized_messages);
+  std::vector<raisin::SerializedMessage> serialized_messages_round_trip(1);
+  (void)raisin::getBuffer(bytes.data(), serialized_messages_round_trip);
+  if (serialized_messages_round_trip.size() != 1 ||
+      serialized_messages_round_trip[0].title != "m" ||
+      serialized_messages_round_trip[0].id != 8 ||
+      serialized_messages_round_trip[0].msg !=
+          std::vector<unsigned char>({1, 2}))
+    return 38;
 
   bytes.clear();
   const std::vector<bool> flags{true, false};

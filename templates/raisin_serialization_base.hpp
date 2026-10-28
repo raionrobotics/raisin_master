@@ -14,9 +14,11 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace raisin {
@@ -64,6 +66,86 @@ static inline std::size_t checkedSerializedSizeAdd(std::size_t current_size,
     throw std::length_error("serialized size exceeds the 32-bit wire limit");
   }
   return current_size + overhead + payload_size;
+}
+
+namespace serialization_detail {
+
+template <typename T>
+struct IsSerializedVector : std::false_type {};
+
+template <typename T, typename Allocator>
+struct IsSerializedVector<std::vector<T, Allocator>> : std::true_type {};
+
+template <typename T>
+struct IsSerializedArray : std::false_type {};
+
+template <typename T, std::size_t N>
+struct IsSerializedArray<std::array<T, N>> : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSerializedGetSize : std::false_type {};
+
+template <typename T>
+struct HasSerializedGetSize<
+    T, std::void_t<decltype(std::declval<const T&>().getSize())>>
+    : std::true_type {};
+
+}  // namespace serialization_detail
+
+struct MessageInformation;
+struct SerializedMessage;
+static inline std::optional<std::size_t> checkedSerializedValueSize(
+    const MessageInformation& value);
+static inline std::optional<std::size_t> checkedSerializedValueSize(
+    const SerializedMessage& value);
+
+template <typename T>
+// Returns nullopt when a custom serializer has no size contract to preflight.
+static inline std::optional<std::size_t> checkedSerializedValueSize(
+    const T& value) {
+  using Value = std::decay_t<T>;
+  if constexpr (std::is_trivially_copyable_v<Value>) {
+    return sizeof(Value);
+  } else if constexpr (std::is_same_v<Value, std::string>) {
+    return checkedSerializedLengthWithOverhead(value.size(), sizeof(uint32_t));
+  } else if constexpr (std::is_same_v<Value, std::u16string>) {
+    const auto bytes = checkedSerializedByteLength(value.size(), sizeof(char16_t));
+    return checkedSerializedLengthWithOverhead(bytes, sizeof(uint32_t));
+  } else if constexpr (std::is_same_v<Value, std::wstring>) {
+    const auto bytes = checkedSerializedByteLength(value.size(), sizeof(wchar_t));
+    return checkedSerializedLengthWithOverhead(bytes, sizeof(uint32_t));
+  } else if constexpr (serialization_detail::IsSerializedVector<Value>::value) {
+    if constexpr (std::is_same_v<typename Value::value_type, bool>) {
+      const auto bytes = checkedSerializedByteLength(value.size(), sizeof(bool));
+      return checkedSerializedLengthWithOverhead(bytes, sizeof(uint32_t));
+    } else {
+      std::size_t total_size = sizeof(uint32_t);
+      for (const auto& element : value) {
+        const auto element_size = checkedSerializedValueSize(element);
+        if (!element_size.has_value()) {
+          return std::nullopt;
+        }
+        total_size = checkedSerializedSizeAdd(
+            total_size, *element_size, 0);
+      }
+      return total_size;
+    }
+  } else if constexpr (serialization_detail::IsSerializedArray<Value>::value) {
+    std::size_t total_size = 0;
+    for (const auto& element : value) {
+      const auto element_size = checkedSerializedValueSize(element);
+      if (!element_size.has_value()) {
+        return std::nullopt;
+      }
+      total_size = checkedSerializedSizeAdd(
+          total_size, *element_size, 0);
+    }
+    return total_size;
+  } else if constexpr (serialization_detail::HasSerializedGetSize<Value>::value) {
+    return checkedSerializedLength(value.getSize());
+  } else {
+    return std::nullopt;
+  }
 }
 
 static inline std::size_t checkedBufferSize(std::size_t current_size,
@@ -129,9 +211,10 @@ static inline std::enable_if_t<
   std::is_trivially_copyable<T>::value && !std::is_same_v<T, bool>, void>
 setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
   const uint32_t size = checkedSerializedLength(val.size());
+  const std::size_t bytes =
+    checkedSerializedVectorByteLength(val.size(), sizeof(T));
   setBuffer(buffer, size);
   const auto originalSize = buffer.size();
-  const auto bytes = checkedSerializedByteLength(size, sizeof(T));
   growBuffer(buffer, bytes);
   if (!val.empty()) {
     std::memcpy(buffer.data() + originalSize, val.data(), bytes);
@@ -142,6 +225,10 @@ template<typename T>
 static inline std::enable_if_t<
   !std::is_trivially_copyable<T>::value || std::is_same_v<T, bool>, void>
 setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
+  const auto size = checkedSerializedValueSize(val);
+  if (size.has_value()) {
+    (void)checkedSerializedLength(*size);
+  }
   setBuffer(buffer, checkedSerializedLength(val.size()));
   for (size_t i = 0; i<val.size(); i++) {
     setBuffer(buffer, val[i]);
@@ -167,9 +254,12 @@ setBuffer(std::vector<unsigned char>& buffer, const std::array<T, N>& val) {
 }
 
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::vector<bool>& val) {
-  setBuffer(buffer, checkedSerializedLength(val.size()));
+  const uint32_t count = checkedSerializedLength(val.size());
+  const std::size_t bytes =
+    checkedSerializedVectorByteLength(val.size(), sizeof(bool));
+  setBuffer(buffer, count);
   auto originalSize = buffer.size();
-  growBuffer(buffer, checkedSerializedByteLength(val.size(), sizeof(bool)));
+  growBuffer(buffer, bytes);
   for (size_t i = 0; i<val.size(); i++) {
     bool temp = val[i];
     std::memcpy(buffer.data() + originalSize + i, &temp, sizeof(bool));
@@ -237,7 +327,12 @@ template <typename T>
 static std::enable_if_t<
   !std::is_trivially_copyable_v<T> || std::is_same_v<T, bool>, unsigned char*>
 setBuffer(unsigned char* buffer, const std::vector<T>& val) {
-  buffer = setBuffer(buffer, checkedSerializedLength(val.size()));
+  const uint32_t count = checkedSerializedLength(val.size());
+  const auto size = checkedSerializedValueSize(val);
+  if (size.has_value()) {
+    (void)checkedSerializedLength(*size);
+  }
+  buffer = setBuffer(buffer, count);
   for (size_t i = 0; i < val.size(); i++) {
     buffer = setBuffer(buffer, val[i]);
   }
@@ -265,7 +360,9 @@ setBuffer(unsigned char* buffer, const std::array<T, N>& val) {
 
 static unsigned char* setBuffer(unsigned char* buffer,
                              const std::vector<bool>& val) {
-  buffer = setBuffer(buffer, checkedSerializedLength(val.size()));
+  const uint32_t count = checkedSerializedLength(val.size());
+  (void)checkedSerializedVectorByteLength(val.size(), sizeof(bool));
+  buffer = setBuffer(buffer, count);
   for (size_t i = 0; i < val.size(); i++) {
     bool temp = val[i];
     buffer = setBuffer(buffer, temp);
@@ -378,7 +475,24 @@ struct MessageInformation {
   int32_t id;
 };
 
+static inline std::optional<std::size_t> checkedSerializedValueSize(
+    const MessageInformation& value) {
+  std::size_t total_size = 0;
+  for (const auto field_size : {
+           checkedSerializedValueSize(value.timestamp),
+           checkedSerializedValueSize(value.title),
+           checkedSerializedValueSize(value.dataType),
+           checkedSerializedValueSize(value.id)}) {
+    if (!field_size.has_value()) {
+      return std::nullopt;
+    }
+    total_size = checkedSerializedSizeAdd(total_size, *field_size, 0);
+  }
+  return total_size;
+}
+
 static inline void setBuffer(std::vector<unsigned char>& buffer, const MessageInformation& val) {
+  (void)checkedSerializedLength(*checkedSerializedValueSize(val));
   setBuffer(buffer, val.timestamp);
   setBuffer(buffer, val.title);
   setBuffer(buffer, val.dataType);
@@ -409,8 +523,24 @@ struct SerializedMessage
   int32_t id;
 };
 
+static inline std::optional<std::size_t> checkedSerializedValueSize(
+    const SerializedMessage& value) {
+  std::size_t total_size = 0;
+  for (const auto field_size : {
+           checkedSerializedValueSize(value.title),
+           checkedSerializedValueSize(value.id),
+           checkedSerializedValueSize(value.msg)}) {
+    if (!field_size.has_value()) {
+      return std::nullopt;
+    }
+    total_size = checkedSerializedSizeAdd(total_size, *field_size, 0);
+  }
+  return total_size;
+}
+
 static inline void setBuffer(std::vector<unsigned char> & buffer, const SerializedMessage & val)
 {
+  (void)checkedSerializedLength(*checkedSerializedValueSize(val));
   setBuffer(buffer, val.title, val.id, val.msg);
 }
 

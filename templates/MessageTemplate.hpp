@@ -86,6 +86,11 @@ return msg.getBuffer(buffer);
 }
 
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::vector<@@PROJECT_NAME@@::msg::@@MESSAGE_NAME@@>& val) {
+  std::size_t total_size = sizeof(uint32_t);
+  for (const auto& item : val) {
+    total_size = checkedSerializedSizeAdd(total_size, item.getSize(), 0);
+  }
+  (void)checkedSerializedLength(total_size);
   setBuffer(buffer, checkedSerializedLength(val.size()));
   for (size_t i = 0; i<val.size(); i++) {
     setBuffer(buffer, val[i]);
@@ -100,6 +105,11 @@ static inline void setBuffer(std::vector<unsigned char>& buffer, const std::arra
 }
 
 static inline unsigned char* setBuffer(unsigned char* buffer, const std::vector<@@PROJECT_NAME@@::msg::@@MESSAGE_NAME@@>& val) {
+  std::size_t total_size = sizeof(uint32_t);
+  for (const auto& item : val) {
+    total_size = checkedSerializedSizeAdd(total_size, item.getSize(), 0);
+  }
+  (void)checkedSerializedLength(total_size);
   buffer = setBuffer(buffer, checkedSerializedLength(val.size()));
   for (size_t i = 0; i<val.size(); i++) {
     buffer = setBuffer(buffer, val[i]);
