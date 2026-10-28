@@ -9,6 +9,7 @@
 #define RAISIN_WS_SERIALIZATION_BASE_HPP_
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -46,6 +47,22 @@ static inline uint32_t checkedSerializedLengthWithOverhead(
   return static_cast<uint32_t>(payload_length + overhead);
 }
 
+static inline std::size_t checkedBufferSize(std::size_t current_size,
+                                           std::size_t additional_size,
+                                           std::size_t maximum_size) {
+  if (current_size > maximum_size ||
+      additional_size > maximum_size - current_size) {
+    throw std::length_error("serialized buffer size overflow");
+  }
+  return current_size + additional_size;
+}
+
+static inline void growBuffer(std::vector<unsigned char>& buffer,
+                              std::size_t additional_size) {
+  buffer.resize(checkedBufferSize(buffer.size(), additional_size,
+                                  buffer.max_size()));
+}
+
 //////////////////////////////////////
 /// getBuffer vector methods
 
@@ -53,7 +70,7 @@ template<typename T>
 static inline std::enable_if_t<std::is_trivially_copyable_v<T>, void>
 setBuffer(std::vector<unsigned char>& buffer, const T& val) {
   const auto originalSize = buffer.size();
-  buffer.resize(buffer.size() + sizeof(T));
+  growBuffer(buffer, sizeof(T));
   std::memcpy(buffer.data() + originalSize, &val, sizeof(T));
 }
 
@@ -67,7 +84,7 @@ static inline void setBuffer(std::vector<unsigned char>& buffer, const std::u16s
   const uint32_t size = checkedSerializedByteLength(val.size(), sizeof(char16_t));
   setBuffer(buffer, size);
   auto originalSize = buffer.size();
-  buffer.resize(buffer.size() + size);
+  growBuffer(buffer, size);
   std::memcpy(buffer.data() + originalSize, val.data(), size);
 }
 
@@ -75,7 +92,7 @@ static inline void setBuffer(std::vector<unsigned char>& buffer, const std::wstr
   const uint32_t size = checkedSerializedByteLength(val.size(), sizeof(wchar_t));
   setBuffer(buffer, size);
   auto originalSize = buffer.size();
-  buffer.resize(buffer.size() + size);
+  growBuffer(buffer, size);
   std::memcpy(buffer.data() + originalSize, val.data(), size);
 }
 
@@ -86,9 +103,10 @@ setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
   const uint32_t size = checkedSerializedLength(val.size());
   setBuffer(buffer, size);
   const auto originalSize = buffer.size();
-  buffer.resize(buffer.size() + size * sizeof(T));
+  const auto bytes = checkedSerializedByteLength(size, sizeof(T));
+  growBuffer(buffer, bytes);
   if (!val.empty()) {
-    std::memcpy(buffer.data() + originalSize, val.data(), static_cast<size_t>(size) * sizeof(T));
+    std::memcpy(buffer.data() + originalSize, val.data(), bytes);
   }
 }
 
@@ -106,7 +124,7 @@ template<typename T, size_t N>
 static inline std::enable_if_t<std::is_trivially_copyable_v<T>, void>
 setBuffer(std::vector<unsigned char>& buffer, const std::array<T, N>& val) {
   const auto originalSize = buffer.size();
-  buffer.resize(buffer.size() + sizeof(T) * N);
+  growBuffer(buffer, sizeof(T) * N);
   if (N > 0) {
     std::memcpy(buffer.data() + originalSize, val.data(), sizeof(T) * N);
   }
@@ -123,7 +141,7 @@ setBuffer(std::vector<unsigned char>& buffer, const std::array<T, N>& val) {
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::vector<bool>& val) {
   setBuffer(buffer, checkedSerializedLength(val.size()));
   auto originalSize = buffer.size();
-  buffer.resize(buffer.size() + val.size() * sizeof(bool));
+  growBuffer(buffer, checkedSerializedByteLength(val.size(), sizeof(bool)));
   for (size_t i = 0; i<val.size(); i++) {
     bool temp = val[i];
     std::memcpy(buffer.data() + originalSize + i, &temp, sizeof(bool));

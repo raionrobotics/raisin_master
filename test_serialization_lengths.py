@@ -60,6 +60,21 @@ int main() {
   if (raisin::checkedSerializedByteLength(max / 2, 2) != max - 1) return 2;
   constexpr std::size_t overhead = sizeof(std::int64_t) + sizeof(std::uint32_t);
   if (raisin::checkedSerializedLengthWithOverhead(max - overhead, overhead) != max) return 3;
+  if (raisin::checkedBufferSize(max - 2, 2, max) != max) return 4;
+  bool buffer_growth_rejected = false;
+  try {
+    (void)raisin::checkedBufferSize(max - 1, 2, max);
+  } catch (const std::length_error&) {
+    buffer_growth_rejected = true;
+  }
+  if (!buffer_growth_rejected) return 5;
+  buffer_growth_rejected = false;
+  try {
+    (void)raisin::checkedBufferSize(max, 1, max - 1);
+  } catch (const std::length_error&) {
+    buffer_growth_rejected = true;
+  }
+  if (!buffer_growth_rejected) return 6;
   bool rejected = false;
   if (max < std::numeric_limits<std::size_t>::max()) {
     try {
@@ -67,7 +82,7 @@ int main() {
     } catch (const std::length_error&) {
       rejected = true;
     }
-    if (!rejected) return 4;
+    if (!rejected) return 7;
   }
   rejected = false;
   try {
@@ -75,14 +90,14 @@ int main() {
   } catch (const std::length_error&) {
     rejected = true;
   }
-  if (!rejected) return 5;
+  if (!rejected) return 8;
   rejected = false;
   try {
     (void)raisin::checkedSerializedLengthWithOverhead(max - overhead + 1, overhead);
   } catch (const std::length_error&) {
     rejected = true;
   }
-  if (!rejected) return 6;
+  if (!rejected) return 9;
 
   std::vector<unsigned char> bytes;
   raisin::setBuffer(bytes, std::string("abc"));
