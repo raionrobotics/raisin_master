@@ -108,6 +108,30 @@ class FmsBuildProfileTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, FMS_RUNTIME_OPTION):
                 fms_runtime_cmake_args(temp_dir, enabled=True)
 
+    def test_cmake_command_name_is_case_insensitive_but_variable_is_exact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = (
+                Path(temp_dir)
+                / "src"
+                / "raisin_plugin"
+                / "raisin_behavior_tree_plugin"
+            )
+            package.mkdir(parents=True)
+            cmake_file = package / "CMakeLists.txt"
+            cmake_file.write_text(
+                f'OPTION({FMS_RUNTIME_OPTION} "Build FMS runtime" OFF)\n'
+            )
+            self.assertEqual(
+                fms_runtime_cmake_args(temp_dir, enabled=True),
+                [f"-D{FMS_RUNTIME_OPTION}=ON"],
+            )
+
+            cmake_file.write_text(
+                'option(raisin_build_fms_runtime "Build FMS runtime" OFF)\n'
+            )
+            with self.assertRaisesRegex(ValueError, FMS_RUNTIME_OPTION):
+                fms_runtime_cmake_args(temp_dir, enabled=True)
+
     def test_archive_profile_records_exact_boolean_choice(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             profile_path = write_fms_build_profile(temp_dir, enabled=True)

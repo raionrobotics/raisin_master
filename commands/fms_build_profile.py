@@ -29,7 +29,10 @@ def fms_runtime_cmake_args(script_directory: str, enabled: bool) -> list[str]:
 
     # CMake cache variable names are case-sensitive; a differently-cased
     # declaration would not be controlled by the exact -D option below.
-    option_pattern = rf"(?m)^[ \t]*option\s*\(\s*{re.escape(FMS_RUNTIME_OPTION)}\b"
+    option_pattern = (
+        rf"(?m)^[ \t]*(?i:option)\s*\(\s*"
+        rf"{re.escape(FMS_RUNTIME_OPTION)}\b"
+    )
     if not re.search(option_pattern, source):
         if not enabled:
             return []
