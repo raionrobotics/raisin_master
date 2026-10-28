@@ -48,9 +48,9 @@ inline const unsigned char *getBuffer(const std::vector<unsigned char>& buffer) 
 }
 
 [[nodiscard]] inline uint32_t getSize() const {
-  uint32_t temp = 0;
+  std::size_t temp = 0;
   @@BUFFER_SIZE_EXPRESSION@@
-  return temp;
+  return checkedSerializedLength(temp);
 }
 
 inline static std::string getDataType() {
@@ -84,7 +84,7 @@ return msg.getBuffer(buffer);
 }
 
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::vector<@@PROJECT_NAME@@::msg::@@MESSAGE_NAME@@>& val) {
-  setBuffer(buffer, static_cast<uint32_t>(val.size()));
+  setBuffer(buffer, checkedSerializedLength(val.size()));
   for (size_t i = 0; i<val.size(); i++) {
     setBuffer(buffer, val[i]);
   }
@@ -98,7 +98,7 @@ static inline void setBuffer(std::vector<unsigned char>& buffer, const std::arra
 }
 
 static inline unsigned char* setBuffer(unsigned char* buffer, const std::vector<@@PROJECT_NAME@@::msg::@@MESSAGE_NAME@@>& val) {
-  buffer = setBuffer(buffer, static_cast<uint32_t>(val.size()));
+  buffer = setBuffer(buffer, checkedSerializedLength(val.size()));
   for (size_t i = 0; i<val.size(); i++) {
     buffer = setBuffer(buffer, val[i]);
   }

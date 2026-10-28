@@ -54,9 +54,9 @@ class Request {
   }
 
   [[nodiscard]] inline uint32_t getSize() const {
-    uint32_t temp = 0;
+    std::size_t temp = 0;
     @@REQUEST_BUFFER_SIZE@@
-    return temp;
+    return checkedSerializedLength(temp);
   }
 
   inline static std::string getDataType() {
@@ -96,9 +96,9 @@ class Response {
   }
 
   [[nodiscard]] inline uint32_t getSize() const {
-    uint32_t temp = 0;
+    std::size_t temp = 0;
     @@RESPONSE_BUFFER_SIZE@@
-    return temp;
+    return checkedSerializedLength(temp);
   }
 
   inline static std::string getDataType() {

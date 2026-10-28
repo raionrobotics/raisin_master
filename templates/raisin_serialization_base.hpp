@@ -9,13 +9,42 @@
 #define RAISIN_WS_SERIALIZATION_BASE_HPP_
 
 #include <array>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
 
 namespace raisin {
+
+static inline uint32_t checkedSerializedLength(std::size_t length) {
+  if (length > std::numeric_limits<uint32_t>::max()) {
+    throw std::length_error("serialized length exceeds the 32-bit wire limit");
+  }
+  return static_cast<uint32_t>(length);
+}
+
+static inline uint32_t checkedSerializedByteLength(std::size_t count,
+                                                   std::size_t element_size) {
+  if (element_size != 0 &&
+      count > std::numeric_limits<uint32_t>::max() / element_size) {
+    throw std::length_error("serialized byte length exceeds the 32-bit wire limit");
+  }
+  return checkedSerializedLength(count * element_size);
+}
+
+static inline uint32_t checkedSerializedLengthWithOverhead(
+    std::size_t payload_length, std::size_t overhead) {
+  const auto maximum = static_cast<std::size_t>(
+      std::numeric_limits<uint32_t>::max());
+  if (overhead > maximum || payload_length > maximum - overhead) {
+    throw std::length_error("serialized size exceeds the 32-bit wire limit");
+  }
+  return static_cast<uint32_t>(payload_length + overhead);
+}
 
 //////////////////////////////////////
 /// getBuffer vector methods
@@ -29,13 +58,13 @@ setBuffer(std::vector<unsigned char>& buffer, const T& val) {
 }
 
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::string& val) {
-  const uint32_t size = val.size();
+  const uint32_t size = checkedSerializedLength(val.size());
   setBuffer(buffer, size);
   buffer.insert(buffer.end(), val.begin(), val.end());
 }
 
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::u16string& val) {
-  uint32_t size = val.size() * sizeof(char16_t);
+  const uint32_t size = checkedSerializedByteLength(val.size(), sizeof(char16_t));
   setBuffer(buffer, size);
   auto originalSize = buffer.size();
   buffer.resize(buffer.size() + size);
@@ -43,7 +72,7 @@ static inline void setBuffer(std::vector<unsigned char>& buffer, const std::u16s
 }
 
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::wstring& val) {
-  uint32_t size = val.size() * sizeof(wchar_t);
+  const uint32_t size = checkedSerializedByteLength(val.size(), sizeof(wchar_t));
   setBuffer(buffer, size);
   auto originalSize = buffer.size();
   buffer.resize(buffer.size() + size);
@@ -54,7 +83,7 @@ template<typename T>
 static inline std::enable_if_t<
   std::is_trivially_copyable<T>::value && !std::is_same_v<T, bool>, void>
 setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
-  const uint32_t size = static_cast<uint32_t>(val.size());
+  const uint32_t size = checkedSerializedLength(val.size());
   setBuffer(buffer, size);
   const auto originalSize = buffer.size();
   buffer.resize(buffer.size() + size * sizeof(T));
@@ -67,7 +96,7 @@ template<typename T>
 static inline std::enable_if_t<
   !std::is_trivially_copyable<T>::value || std::is_same_v<T, bool>, void>
 setBuffer(std::vector<unsigned char>& buffer, const std::vector<T>& val) {
-  setBuffer(buffer, static_cast<uint32_t>(val.size()));
+  setBuffer(buffer, checkedSerializedLength(val.size()));
   for (size_t i = 0; i<val.size(); i++) {
     setBuffer(buffer, val[i]);
   }
@@ -92,7 +121,7 @@ setBuffer(std::vector<unsigned char>& buffer, const std::array<T, N>& val) {
 }
 
 static inline void setBuffer(std::vector<unsigned char>& buffer, const std::vector<bool>& val) {
-  setBuffer(buffer, static_cast<uint32_t>(val.size()));
+  setBuffer(buffer, checkedSerializedLength(val.size()));
   auto originalSize = buffer.size();
   buffer.resize(buffer.size() + val.size() * sizeof(bool));
   for (size_t i = 0; i<val.size(); i++) {
@@ -121,7 +150,7 @@ static std::enable_if_t<std::is_trivially_copyable_v<T>, unsigned char*>
 
 static unsigned char* setBuffer(unsigned char* buffer,
                              const std::string& val) {
-  const uint32_t size = val.size();
+  const uint32_t size = checkedSerializedLength(val.size());
   buffer = setBuffer(buffer, size);
   std::memcpy(buffer, val.data(), size);
   return buffer + size;
@@ -129,7 +158,7 @@ static unsigned char* setBuffer(unsigned char* buffer,
 
 static unsigned char* setBuffer(unsigned char* buffer,
                              const std::u16string& val) {
-  const uint32_t size = val.size() * sizeof(char16_t);
+  const uint32_t size = checkedSerializedByteLength(val.size(), sizeof(char16_t));
   buffer = setBuffer(buffer, size);
   std::memcpy(buffer, val.data(), size);
   return buffer + size;
@@ -137,7 +166,7 @@ static unsigned char* setBuffer(unsigned char* buffer,
 
 static unsigned char* setBuffer(unsigned char* buffer,
                              const std::wstring& val) {
-  const uint32_t size = val.size() * sizeof(wchar_t);
+  const uint32_t size = checkedSerializedByteLength(val.size(), sizeof(wchar_t));
   buffer = setBuffer(buffer, size);
   std::memcpy(buffer, val.data(), size);
   return buffer + size;
@@ -147,7 +176,7 @@ template <typename T>
 static std::enable_if_t<
   std::is_trivially_copyable_v<T> && !std::is_same_v<T, bool>, unsigned char*>
 setBuffer(unsigned char* buffer, const std::vector<T>& val) {
-  buffer = setBuffer(buffer, static_cast<uint32_t>(val.size()));
+  buffer = setBuffer(buffer, checkedSerializedLength(val.size()));
   const size_t bytes = val.size() * sizeof(T);
   if (bytes > 0) {
     std::memcpy(buffer, val.data(), bytes);
@@ -160,7 +189,7 @@ template <typename T>
 static std::enable_if_t<
   !std::is_trivially_copyable_v<T> || std::is_same_v<T, bool>, unsigned char*>
 setBuffer(unsigned char* buffer, const std::vector<T>& val) {
-  buffer = setBuffer(buffer, static_cast<uint32_t>(val.size()));
+  buffer = setBuffer(buffer, checkedSerializedLength(val.size()));
   for (size_t i = 0; i < val.size(); i++) {
     buffer = setBuffer(buffer, val[i]);
   }
@@ -188,7 +217,7 @@ setBuffer(unsigned char* buffer, const std::array<T, N>& val) {
 
 static unsigned char* setBuffer(unsigned char* buffer,
                              const std::vector<bool>& val) {
-  buffer = setBuffer(buffer, static_cast<uint32_t>(val.size()));
+  buffer = setBuffer(buffer, checkedSerializedLength(val.size()));
   for (size_t i = 0; i < val.size(); i++) {
     bool temp = val[i];
     buffer = setBuffer(buffer, temp);
@@ -322,7 +351,8 @@ struct SerializedMessage
 
   uint32_t size()
   {
-    return sizeof(int64_t) + sizeof(uint32_t) + msg.size();
+    return checkedSerializedLengthWithOverhead(
+        msg.size(), sizeof(int64_t) + sizeof(uint32_t));
   }
 
   std::string title, dataType;
