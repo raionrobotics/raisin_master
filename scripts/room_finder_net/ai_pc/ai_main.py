@@ -320,8 +320,59 @@ def main():
                             "gdino_hz": float(os.environ.get("GDINO_HZ", "1.0")),
                             # the real cameras are 1280 px wide: a 40 cm strip sign is ~90 px at 2.5 m
                             "sign_min_px": float(os.environ.get("SIGN_MIN_PX", "70")),
-                            "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5"))},
+                            "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5")),
+                            "label_nearest_door": os.environ.get("LABEL_NEAREST_DOOR", "1") == "1",
+                            # detections beyond 5 m are ignored (door / plate / sign positions and sizes are least accurate there)
+                            "det_range": float(os.environ.get("DET_RANGE", "5.0")),
+                            "read_range": float(os.environ.get("READ_RANGE", "5.0")),
+                            "sign_range": float(os.environ.get("SIGN_RANGE", "5.0")),
+                            # an oblique view of a sign gives a wrong plane normal, and the arrow bearing is built from it
+                            "sign_max_angle_deg": float(os.environ.get("SIGN_MAX_ANGLE_DEG", "50"))},
         "room_finder": {"target": a.target, "out_dir": out + "/finder", "max_time": float(a.max_time), "policy": a.policy,
+                        # real robot: a door needs a mapped wall next to it; go to a door without turning to face it (3 cameras)
+                        "door_wall_max": float(os.environ.get("DOOR_WALL_MAX", "0.5")),
+                        "door_face": os.environ.get("DOOR_FACE", "0") == "1",
+                        # unread lobby signs / doors outscored every frontier; favour frontiers that lead toward the hint
+                        "frontier_hint_bonus": float(os.environ.get("FRONTIER_HINT_BONUS", "40")),
+                        # dwelling at a sign / door to read it must not count as "stuck" on the next goal (it blocks that goal for 150 s)
+                        "stuck_per_item": os.environ.get("STUCK_PER_ITEM", "1") == "1",
+                     # a door / sign within 2 m is already in view of the 3 cameras: mark it seen after a short dwell instead of driving to the viewpoint
+                     "view_obj_dist": float(os.environ.get("VIEW_OBJ_DIST", "2.0")),
+                     "view_dwell": float(os.environ.get("VIEW_DWELL", "1.0")),
+                     # optional: items behind the travel direction lose points (off; PASS_SEEN_S is the preferred fix for going back and forth)
+                     "backtrack_penalty": float(os.environ.get("BACKTRACK_PENALTY", "0")),
+                     # a sign / door that was within view_obj_dist for this long while driving by is already read: do not go back to it
+                     # exploring a frontier had no reward: unread signs (+27) and doors always won, so the robot circled the lobby
+                     "frontier_bonus": float(os.environ.get("FRONTIER_BONUS", "15")),
+                     # a stuck frontier (e.g. the far end of a corridor) is retried after 20 s instead of 150 s
+                     "frontier_block_s": float(os.environ.get("FRONTIER_BLOCK_S", "20")),
+                     # plates read near the target number give a direction (T101 -15 m, T103 -25 m -> T106 near -40 m): frontiers / doors toward it gain, away lose
+                     "trend_weight": float(os.environ.get("TREND_WEIGHT", "0")),
+                     # the VLM gets rules for reading sign entries / plates and its earlier answers; signs listing the target are photographed first
+                     "belief_guide": os.environ.get("BELIEF_GUIDE", "1") == "1",
+                     "belief_weight": float(os.environ.get("BELIEF_WEIGHT", "100")),
+                     # the VLM also names a map position for the goal (e.g. the hallway a T101~T126 sign points into): a blob in the confidence grid
+                     "belief_point": os.environ.get("BELIEF_POINT", "1") == "1",
+                     # the VLM put the T101~T126 goal in the open lobby north of the sign: the frontier openings are lettered on its map, it names the one
+                     # to drive through (a sign stands at the hallway it points into; plates read in a hallway beat an arrow)
+                     "belief_openings": os.environ.get("BELIEF_OPENINGS", "1") == "1",
+                     # unread signs scored 30 - path everywhere, so the lobby's decorations kept winning: lower base, plus the belief at the sign
+                     "sign_base": float(os.environ.get("SIGN_BASE", "10")),
+                     "sign_belief_w": float(os.environ.get("SIGN_BELIEF_W", "30")),
+                     # frontiers vanish when the lidar already sees down a corridor; the VLM's predicted place (belief peak) is a goal of its own
+                     "belief_peak": os.environ.get("BELIEF_PEAK", "1") == "1",
+                     # signs / doors in an area the robot has already been within 3 m of are not visited again
+                     "skip_looked": os.environ.get("SKIP_LOOKED", "0") == "1",       # old 3 m rule, off: the 2 m + camera view rule below is used
+                     # doors / signs / plates farther than 1 m from any traversable cell are ignored
+                     "det_reach_m": float(os.environ.get("DET_REACH_M", "1.0")),
+                     # corridor: the frontier ahead flickers away as the lidar sees further, and the only candidate left is a far one behind (turn around, then back)
+                     "frontier_match_m": float(os.environ.get("FRONTIER_MATCH_M", "6.0")),
+                     "frontier_hold_s": float(os.environ.get("FRONTIER_HOLD_S", "12")),
+                     # a person walking by can hold the robot up: only call it stuck after this many seconds without moving
+                     "stuck_s": float(os.environ.get("STUCK_S", "45")),
+                     "pass_seen_s": float(os.environ.get("PASS_SEEN_S", "0.5")),
+                     # seen = within VIEW_OBJ_DIST (2 m) and inside the 3 cameras' view (yaw 0 / +-90 deg, hfov 97 deg -> half angle ~138 deg)
+                     "view_half_fov": math.radians(float(os.environ.get("VIEW_HALF_FOV_DEG", "138"))),
                         "belief_signs": a.belief_signs,
                         "belief_commit": os.environ.get("BELIEF_COMMIT", "true").lower() == "true",
                         "belief_range": float(os.environ.get("BELIEF_RANGE", "25")),

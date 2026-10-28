@@ -16,8 +16,9 @@ color: {width: 1280, height: 800, fps: 5}    # OV9782 native (1280x800 / 1280x72
 depth: {width: 640, height: 400}             # aligned to the colour sensor; same aspect as colour (DEPTH_SCALE is one factor)
 hfov: 1.696                                  # overwritten from the camera calibration at start-up
 stereo: {width: 1280, height: 800}           # mono input of the on-camera stereo (OV9282 native); depth output stays `depth`
-oak: {ir_dot: 0.6, mjpeg_quality: 90, color_ae_max_us: 8000, mono_ae_max_us: 8000, stereo_preset: ROBOTICS, depth_max_m: 8.0,
+oak: {ir_dot: 0.6, mjpeg_quality: 90, color_ae_max_us: 16000, mono_ae_max_us: 16000, stereo_preset: ROBOTICS, depth_max_m: 8.0,
       stereo_fps: 10}                        # depth at 10 Hz: always within 50 ms of a 5 fps colour frame
+# 2026-10-28: cap raised 8 -> 16 ms (corridor crops were very dark at 8 ms; expect more motion blur).
 # 2026-10-23: 1 ms made corridor images dark/noisy (ISO ~1200) and signs unreadable; 8 ms blurs ~1-2 px at 0.5 m/s or
 # 0.5 rad/s.  ir_dot: the OAK-D Pro W dot projector (0..1) gives the stereo texture on plain walls and doors.
 # exposure: auto exposure stays on; color_ae_max_us / mono_ae_max_us cap the exposure time (the gain rises instead).

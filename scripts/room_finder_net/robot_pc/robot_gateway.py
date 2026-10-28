@@ -7,7 +7,7 @@ Runs next to the robot's raisin node and does the three things the AI PC should 
                    (the navigation plugin plans + drives).  Goals are sanity-checked (finite, within --max-goal-dist of the
                    robot) and a watchdog cancels the goal when the AI PC stops sending goals (link lost, crash, finished).
   2. exploration map : occupancy grid (unknown = -1, free 0, inflated 99, obstacle 100) accumulated here from the lidar_slam
-                   registered cloud like nav2's obstacle layer (rays <= 10 m, sector +-135 deg, obstacle band around the lidar
+                   registered cloud like nav2's obstacle layer (rays <= 5 m, sector +-135 deg, obstacle band around the lidar
                    height, 0.5 m inflation) and published as `room_finder/map` -- a compact grid instead of raw clouds.
   3. status      : `room_finder/status` JSON (pose, has_goal, watchdog state), 2 Hz.
   4. map viewer  : http://<robot PC>:8081 (--viz-port) -- map, robot trail, goal and the AI PC's landmarks (doors, room
@@ -327,7 +327,7 @@ def main():
     ap.add_argument("--map-hz", type=float, default=2.0)
     ap.add_argument("--map-bounds", type=float, nargs=4, default=[-52.0, -8.0, 30.0, 40.0], metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
                     help="area (m, navigation frame) the map covers; default = the simulated hospital")
-    ap.add_argument("--scan-range", type=float, default=10.0, help="rays / obstacle marking reach at most this far (m)")
+    ap.add_argument("--scan-range", type=float, default=5.0, help="rays / obstacle marking reach at most this far (m)")
     ap.add_argument("--scan-fov", type=float, default=135.0, help="scan sector: +-this many degrees around the robot's heading")
     ap.add_argument("--lidar-z", type=float, default=0.2238272514, help="height of the lidar above the odometry origin = the IMU (m)")
     ap.add_argument("--obstacle-below", type=float, default=0.3, help="obstacle band: this far below the lidar (m)")
