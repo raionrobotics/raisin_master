@@ -497,7 +497,7 @@ def create_service_file(srv_file, project_directory, install_dir):
 
 def build_string_size_expr(string_type, value_expr):
     if string_type == "std::u16string":
-        return f"{value_expr}.size() * sizeof(char16_t)"
+        return f"checkedSerializedByteLength({value_expr}.size(), sizeof(char16_t))"
     return f"{value_expr}.size()"
 
 
@@ -517,20 +517,37 @@ def normalize_cpp_constant(data_type, definition):
 def build_sequence_size_entry(is_vector, base_type, data_name, line_suffix):
     if base_type in STRING_TYPES:
         string_size_expr = build_string_size_expr(base_type, "v")
-        loop = f"for (const auto& v : {data_name}) temp += sizeof(uint32_t) + {string_size_expr};"
+        loop = (
+            f"for (const auto& v : {data_name}) temp = "
+            f"checkedSerializedSizeAdd(temp, {string_size_expr}, sizeof(uint32_t));"
+        )
         if is_vector:
-            return f"temp += sizeof(uint32_t); \n {loop}{line_suffix}"
+            return (
+                f"temp = checkedSerializedSizeAdd(temp, 0, sizeof(uint32_t));\n"
+                f"{loop}{line_suffix}"
+            )
         return f"{loop}{line_suffix}"
 
     if base_type in TYPE_MAPPING.values():
-        size_expr = f"{data_name}.size() * sizeof({base_type})"
+        size_expr = (
+            f"checkedSerializedByteLength({data_name}.size(), sizeof({base_type}))"
+        )
         if is_vector:
-            return f"temp += sizeof(uint32_t) + {size_expr};{line_suffix}"
-        return f"temp += {size_expr};{line_suffix}"
+            return (
+                f"temp = checkedSerializedSizeAdd(temp, {size_expr}, "
+                f"sizeof(uint32_t));{line_suffix}"
+            )
+        return f"temp = checkedSerializedSizeAdd(temp, {size_expr}, 0);{line_suffix}"
 
-    loop = f"for (const auto& v : {data_name}) temp += v.getSize();"
+    loop = (
+        f"for (const auto& v : {data_name}) temp = "
+        f"checkedSerializedSizeAdd(temp, v.getSize(), 0);"
+    )
     if is_vector:
-        return f"temp += sizeof(uint32_t); \n {loop}{line_suffix}"
+        return (
+            f"temp = checkedSerializedSizeAdd(temp, 0, sizeof(uint32_t));\n"
+            f"{loop}{line_suffix}"
+        )
 
     return f"{loop}{line_suffix}"
 
@@ -603,16 +620,23 @@ def process_service_content(content, project_name):
                         transformed_type, data_name
                     )
                     buffer_size.append(
-                        f"temp += sizeof(uint32_t) + {string_size_expr};\n"
+                        "temp = checkedSerializedSizeAdd("
+                        f"temp, {string_size_expr}, sizeof(uint32_t));\n"
                     )
                 elif (
                     transformed_type in TYPE_MAPPING.values()
                     and transformed_type != "std::string"
                     and transformed_type != "std::u16string"
                 ):
-                    buffer_size.append(f"temp += sizeof({data_name});\n")
+                    buffer_size.append(
+                        "temp = checkedSerializedSizeAdd("
+                        f"temp, sizeof({data_name}), 0);\n"
+                    )
                 else:
-                    buffer_size.append(f"temp += {data_name}.getSize();\n")
+                    buffer_size.append(
+                        "temp = checkedSerializedSizeAdd("
+                        f"temp, {data_name}.getSize(), 0);\n"
+                    )
 
         elif "=" in line:
             parts = line.split(" ", 1)
@@ -1342,16 +1366,23 @@ def create_message_file(msg_file, project_directory, install_dir):
                         transformed_type, data_name
                     )
                     buffer_size.append(
-                        f"temp += sizeof(uint32_t) + {string_size_expr};"
+                        "temp = checkedSerializedSizeAdd("
+                        f"temp, {string_size_expr}, sizeof(uint32_t));"
                     )
                 elif (
                     transformed_type in TYPE_MAPPING.values()
                     and transformed_type != "std::string"
                     and transformed_type != "std::u16string"
                 ):
-                    buffer_size.append(f"temp += sizeof({data_name});")
+                    buffer_size.append(
+                        "temp = checkedSerializedSizeAdd("
+                        f"temp, sizeof({data_name}), 0);"
+                    )
                 else:
-                    buffer_size.append(f"temp += {data_name}.getSize();")
+                    buffer_size.append(
+                        "temp = checkedSerializedSizeAdd("
+                        f"temp, {data_name}.getSize(), 0);"
+                    )
 
         elif "=" in line:
             parts = line.split(" ", 1)

@@ -25,7 +25,9 @@ def test_checked_lengths_preserve_wire_prefix_and_reject_overflow(
     monkeypatch.setattr(raisin_globals, "script_directory", str(REPOSITORY))
     monkeypatch.setattr(raisin_globals, "generated_dir", str(generated_root))
     (message_dir / "Point.msg").write_text(
-        "string text\nuint32 value\n", encoding="utf-8"
+        "string text\nuint32 value\nuint32[] samples\n"
+        "wstring wide\nwstring[] wide_samples\n",
+        encoding="utf-8",
     )
     (service_dir / "Echo.srv").write_text(
         "string text\nuint32 value\n---\nstring text\n", encoding="utf-8"
@@ -36,6 +38,18 @@ def test_checked_lengths_preserve_wire_prefix_and_reject_overflow(
     raisin_setup.create_service_file(
         str(service_dir / "Echo.srv"), str(source_project), str(install_root)
     )
+    point_header = (
+        generated_root / "include" / "test_pkg" / "msg" / "point.hpp"
+    ).read_text(encoding="utf-8")
+    echo_header = (
+        generated_root / "include" / "test_pkg" / "srv" / "echo.hpp"
+    ).read_text(encoding="utf-8")
+    assert "checkedSerializedSizeAdd" in point_header
+    assert "checkedSerializedByteLength" in point_header
+    assert "sizeof(char16_t)" in point_header
+    assert "temp +=" not in point_header
+    assert "checkedSerializedSizeAdd" in echo_header
+    assert "temp +=" not in echo_header
     generated_base = generated_root / "include" / "raisin_serialization_base.hpp"
     generated_base.parent.mkdir(parents=True, exist_ok=True)
     generated_base.write_text(
@@ -75,6 +89,28 @@ int main() {
     buffer_growth_rejected = true;
   }
   if (!buffer_growth_rejected) return 6;
+  if (raisin::checkedSerializedSizeAdd(max - 1, 1, 0) != max) return 25;
+  bool aggregate_size_rejected = false;
+  try {
+    (void)raisin::checkedSerializedSizeAdd(max - 1, 2, 0);
+  } catch (const std::length_error&) {
+    aggregate_size_rejected = true;
+  }
+  if (!aggregate_size_rejected) return 26;
+  aggregate_size_rejected = false;
+  try {
+    (void)raisin::checkedSerializedSizeAdd(max, 0, sizeof(std::uint32_t));
+  } catch (const std::length_error&) {
+    aggregate_size_rejected = true;
+  }
+  if (!aggregate_size_rejected) return 27;
+  aggregate_size_rejected = false;
+  try {
+    (void)raisin::checkedSerializedSizeAdd(max, max, 0);
+  } catch (const std::length_error&) {
+    aggregate_size_rejected = true;
+  }
+  if (!aggregate_size_rejected) return 28;
   bool rejected = false;
   if (max < std::numeric_limits<std::size_t>::max()) {
     try {
@@ -161,11 +197,18 @@ int main() {
   raisin::test_pkg::msg::Point point;
   point.text = "x";
   point.value = 42;
+  point.samples = {7, 9};
+  point.wide = u"xy";
+  point.wide_samples = {u"z"};
   raisin::setBuffer(bytes, std::vector<raisin::test_pkg::msg::Point>{point});
   std::uint32_t message_count = 0;
   (void)raisin::getBuffer(bytes.data(), message_count);
   if (message_count != 1) return 20;
-  if (point.getSize() != sizeof(std::uint32_t) + 1 + sizeof(point.value)) return 21;
+  if (point.getSize() != sizeof(std::uint32_t) + 1 + sizeof(point.value) +
+                             sizeof(std::uint32_t) + 2 * sizeof(std::uint32_t) +
+                             sizeof(std::uint32_t) + 2 * sizeof(char16_t) +
+                             sizeof(std::uint32_t) + sizeof(std::uint32_t) +
+                             sizeof(char16_t)) return 21;
 
   raisin::test_pkg::srv::Echo::Request request;
   request.text = "x";

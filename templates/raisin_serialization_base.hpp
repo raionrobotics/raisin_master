@@ -47,6 +47,18 @@ static inline uint32_t checkedSerializedLengthWithOverhead(
   return static_cast<uint32_t>(payload_length + overhead);
 }
 
+static inline std::size_t checkedSerializedSizeAdd(std::size_t current_size,
+                                                  std::size_t payload_size,
+                                                  std::size_t overhead) {
+  const auto maximum = static_cast<std::size_t>(
+      std::numeric_limits<uint32_t>::max());
+  if (current_size > maximum || overhead > maximum - current_size ||
+      payload_size > maximum - current_size - overhead) {
+    throw std::length_error("serialized size exceeds the 32-bit wire limit");
+  }
+  return current_size + overhead + payload_size;
+}
+
 static inline std::size_t checkedBufferSize(std::size_t current_size,
                                            std::size_t additional_size,
                                            std::size_t maximum_size) {
