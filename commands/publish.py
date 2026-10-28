@@ -269,6 +269,7 @@ def _build_package(
     print(f"\n--- Setting up build for '{target}' ---")
     setup(
         package_name=target,
+        package_source_dir=target_dir,
         build_type=build_type,
         build_dir=str(build_dir),
         build_test_enabled=False,

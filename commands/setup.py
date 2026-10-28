@@ -1511,7 +1511,8 @@ def _discover_pure_cmake_projects(
     projects = []
 
     for repo_dir in repo_dirs:
-        repo_name = repo_dir.name
+        repo_relative = repo_dir.relative_to(src_root)
+        repo_name = repo_relative.parts[0]
         if repo_ignore_set and repo_name in repo_ignore_set:
             continue
 
@@ -2109,6 +2110,7 @@ def setup(
     build_test_enabled=None,
     raisin_march: Optional[str] = None,
     target: Optional[TargetConfig] = None,
+    package_source_dir: Optional[str | Path] = None,
 ):
     """
     setup function to find project directories, msg, and srv files and generate message and service files.
@@ -2144,11 +2146,32 @@ def setup(
         install_dir = str(target.install_dir())
         packages_allowed = set(target.packages) | set(target.message_packages)
     elif package_name == "":
+        if package_source_dir is not None:
+            raise ValueError("package_source_dir requires package_name")
         src_dir = "src"
         install_dir = "install"
         packages_allowed = None
     else:
-        src_dir = "src/" + package_name
+        source_root = (Path(g.script_directory) / "src").resolve()
+        if package_source_dir is None:
+            source_reference = package_name
+        else:
+            candidate = Path(package_source_dir)
+            if not candidate.is_absolute():
+                candidate = Path(g.script_directory) / candidate
+            candidate = candidate.resolve()
+            try:
+                source_reference = candidate.relative_to(source_root).as_posix()
+            except ValueError as exc:
+                raise ValueError(
+                    "package_source_dir must stay inside the source directory"
+                ) from exc
+            if candidate.name != package_name or not candidate.is_dir():
+                raise ValueError(
+                    "package_source_dir must be an existing package directory "
+                    "whose name matches package_name"
+                )
+        src_dir = "src/" + source_reference
         install_dir = f"release/install/{package_name}/{g.os_type}/{g.os_version}/{g.architecture}/{build_type}"
         packages_allowed = None
 
@@ -2158,8 +2181,15 @@ def setup(
         source_packages, interface_sources = resolve_sdk_dependencies(
             target, packages_to_ignore, repos_to_ignore
         )
+    package_source_reference = (
+        source_reference if not cross and package_name else package_name
+    )
     guard_src_repo_lfs_assets(
-        setup_source_repositories(target, package_name, interface_sources if cross else None)
+        setup_source_repositories(
+            target,
+            package_source_reference,
+            interface_sources if cross else None,
+        )
     )
 
     delete_directory(g.generated_dir)  # Delete the whole 'include' directory
@@ -2179,7 +2209,7 @@ def setup(
         pure_cmake_built = build_pure_cmake_projects(
             install_dir,
             build_type,
-            package_name,
+            package_source_reference,
             packages_to_ignore,
             repos_to_ignore,
             raisin_march=raisin_march,

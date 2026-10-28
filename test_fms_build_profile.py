@@ -273,7 +273,7 @@ class FmsBuildProfileTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("only valid for raisin_behavior_tree_plugin", result.output)
 
-    def test_publish_package_passes_opt_in_and_writes_profile(self):
+    def test_publish_package_passes_nested_source_opt_in_and_writes_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self._write_plugin_option(temp_dir)
             target_dir = (
@@ -291,7 +291,7 @@ class FmsBuildProfileTest(unittest.TestCase):
             with (
                 patch.object(g, "script_directory", temp_dir),
                 patch("commands.publish.delete_directory"),
-                patch("commands.publish.setup"),
+                patch("commands.publish.setup") as mock_setup,
                 patch("commands.publish.platform.system", return_value="Linux"),
                 patch("commands.publish._build_linux") as build_linux,
             ):
@@ -306,6 +306,9 @@ class FmsBuildProfileTest(unittest.TestCase):
             self.assertIn(
                 f"-D{FMS_RUNTIME_OPTION}=ON",
                 build_linux.call_args.args[-1],
+            )
+            self.assertEqual(
+                mock_setup.call_args.kwargs["package_source_dir"], target_dir
             )
             profile = json.loads(
                 (
