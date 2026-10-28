@@ -3,21 +3,29 @@
 import json
 import re
 from pathlib import Path
+from typing import Optional, Union
 
 
 FMS_RUNTIME_PACKAGE = "raisin_behavior_tree_plugin"
 FMS_RUNTIME_OPTION = "RAISIN_BUILD_FMS_RUNTIME"
 
 
-def fms_runtime_cmake_args(script_directory: str, enabled: bool) -> list[str]:
+def fms_runtime_cmake_args(
+    script_directory: str,
+    enabled: bool,
+    package_source_dir: Optional[Union[str, Path]] = None,
+) -> list[str]:
     """Set the feature explicitly when declared; fail closed on unsupported opt-in."""
-    cmake_file = (
-        Path(script_directory)
-        / "src"
-        / "raisin_plugin"
-        / FMS_RUNTIME_PACKAGE
-        / "CMakeLists.txt"
-    )
+    if package_source_dir is None:
+        cmake_file = (
+            Path(script_directory)
+            / "src"
+            / "raisin_plugin"
+            / FMS_RUNTIME_PACKAGE
+            / "CMakeLists.txt"
+        )
+    else:
+        cmake_file = Path(package_source_dir) / "CMakeLists.txt"
     try:
         source = cmake_file.read_text(encoding="utf-8")
     except OSError as exc:

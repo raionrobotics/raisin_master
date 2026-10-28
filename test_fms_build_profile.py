@@ -117,6 +117,71 @@ class FmsBuildProfileTest(unittest.TestCase):
                 [f"-D{FMS_RUNTIME_OPTION}=ON"],
             )
 
+    def test_publish_checks_option_in_the_selected_package_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_plugin_option(temp_dir)
+            target_dir = (
+                Path(temp_dir)
+                / "src"
+                / "alternate_plugin_repo"
+                / "raisin_behavior_tree_plugin"
+            )
+            target_dir.mkdir(parents=True)
+            (target_dir / "CMakeLists.txt").write_text(
+                "project(raisin_behavior_tree_plugin)\n"
+            )
+            (target_dir / "release.yaml").write_text("version: 0.1.0\n")
+            paths = {
+                "build_dir": Path(temp_dir) / "build",
+                "install_dir": Path(temp_dir) / "install",
+                "target_dir": target_dir,
+            }
+            with (
+                patch.object(g, "script_directory", temp_dir),
+                patch("commands.publish.delete_directory") as delete_directory,
+                patch("commands.publish.setup"),
+                patch("commands.publish.platform.system", return_value="Linux"),
+                patch("commands.publish._build_linux"),
+            ):
+                with self.assertRaisesRegex(ValueError, FMS_RUNTIME_OPTION):
+                    _build_package(
+                        "raisin_behavior_tree_plugin",
+                        "Release",
+                        paths,
+                        fms_runtime=True,
+                    )
+            delete_directory.assert_not_called()
+
+    def test_non_fms_package_does_not_receive_fms_cmake_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_plugin_option(temp_dir)
+            target_dir = Path(temp_dir) / "src" / "raisin_network"
+            target_dir.mkdir(parents=True)
+            (target_dir / "CMakeLists.txt").write_text("project(raisin_network)\n")
+            (target_dir / "release.yaml").write_text("version: 1.0.0\n")
+            paths = {
+                "build_dir": Path(temp_dir) / "build",
+                "install_dir": Path(temp_dir) / "install",
+                "target_dir": target_dir,
+            }
+            with (
+                patch.object(g, "script_directory", temp_dir),
+                patch("commands.publish.delete_directory"),
+                patch("commands.publish.setup"),
+                patch("commands.publish.platform.system", return_value="Linux"),
+                patch("commands.publish._build_linux") as build_linux,
+            ):
+                self.assertTrue(
+                    _build_package("raisin_network", "Release", paths)
+                )
+            self.assertNotIn(
+                f"-D{FMS_RUNTIME_OPTION}=OFF",
+                build_linux.call_args.args[-1],
+            )
+            self.assertFalse(
+                (Path(temp_dir) / "install/share/raisin/build-profile.json").exists()
+            )
+
     def test_build_command_passes_on_and_off_to_cmake(self):
         for enabled, expected in ((False, "OFF"), (True, "ON")):
             with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as temp_dir:
@@ -252,6 +317,13 @@ class FmsBuildProfileTest(unittest.TestCase):
     def test_publish_cli_passes_opt_in_for_plugin_archive(self, mock_publish):
         with tempfile.TemporaryDirectory() as temp_dir:
             self._write_plugin_option(temp_dir)
+            (
+                Path(temp_dir)
+                / "src"
+                / "raisin_plugin"
+                / "raisin_behavior_tree_plugin"
+                / "release.yaml"
+            ).write_text("version: 0.1.0\n")
             with patch.object(g, "script_directory", temp_dir):
                 result = CliRunner().invoke(
                     publish_command,

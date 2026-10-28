@@ -256,7 +256,11 @@ def _build_package(
         raise ValueError(
             f"--fms-runtime is only valid for {FMS_RUNTIME_PACKAGE}"
         )
-    fms_cmake_args = fms_runtime_cmake_args(g.script_directory, fms_runtime)
+    fms_cmake_args = (
+        fms_runtime_cmake_args(g.script_directory, fms_runtime, target_dir)
+        if target == FMS_RUNTIME_PACKAGE
+        else []
+    )
 
     # Clean stale build directory to prevent cached cmake paths from
     # interfering (e.g., system zstd vs install/ zstd).
@@ -457,7 +461,13 @@ def publish_command(target, build_type, dry_run, fms_runtime):
             f"--fms-runtime is only valid for {FMS_RUNTIME_PACKAGE}"
         )
     try:
-        fms_runtime_cmake_args(g.script_directory, fms_runtime)
+        if fms_runtime:
+            package_source_dir = _resolve_target_dir(
+                Path(g.script_directory), target
+            )
+            fms_runtime_cmake_args(
+                g.script_directory, True, package_source_dir
+            )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
