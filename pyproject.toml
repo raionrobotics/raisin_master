@@ -48,3 +48,8 @@ tag_regex = "^raisin-ota-v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)$"
 # Only these tags describe this distribution; without the match, `git describe`
 # would pick up whatever else the repository comes to tag.
 git_describe_command = "git describe --dirty --tags --long --match raisin-ota-v*"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+# The tests import commands/ and raisin_ota/ from the repository root.
+pythonpath = ["."]
