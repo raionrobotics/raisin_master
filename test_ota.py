@@ -7590,3 +7590,87 @@ class TestPrepareThenCommit(unittest.TestCase):
         self.assertIsNone(self._prepare({"pkg1"}))
         self.assertEqual(self._staged_dirs(), [])
         self.assertIsNotNone(ota.pending_install_failure())
+
+    # -- kept past the lock it was prepared under ---------------------------
+
+    def _prepare_over_a_live_version(self):
+        """2026.2.0 live, 2026.3.0 prepared over it."""
+        self._run({"pkg1", "pkg2"})
+        ota._archive_cache.clear()
+        with patch.object(self, "MANIFEST", (self.MANIFEST[0], "arch-2", "2026.3.0")):
+            a, b, c, d = self._patched({"pkg1", "pkg2"})
+            with a, b, c, d:
+                return ota.prepare_archive_install(
+                    "release", self.live, archive_version="2026.3.0"
+                )
+
+    def _committed_generation(self, name):
+        (install_tree.versions_dir(self.release) / name).mkdir()
+
+    def test_a_preparation_records_the_generation_it_was_cloned_from(self):
+        prepared = self._prepare_over_a_live_version()
+
+        self.assertEqual(prepared.base, "0001-2026.2.0")
+        self.assertEqual(install_tree.current_generation(self.release), prepared.base)
+        self.assertTrue(ota.prepared_install_usable(prepared))
+
+    def test_a_preparation_over_a_live_version_that_moved_is_not_switched_to(self):
+        """Another install went live in between: switching would undo it."""
+        prepared = self._prepare_over_a_live_version()
+        self._committed_generation("0009-2026.9.0")
+        install_tree._point_current_at(self.release, "0009-2026.9.0")
+
+        self.assertFalse(ota.prepared_install_usable(prepared))
+        with patch("raisin_ota.client.report_software_snapshot", return_value=True):
+            self.assertEqual(ota.commit_prepared_install(prepared), {})
+        self.assertEqual(install_tree.current_generation(self.release), "0009-2026.9.0")
+        self.assertFalse(prepared.staging.exists())
+        self.assertIsNotNone(ota.pending_install_failure())
+
+    def test_a_preparation_whose_tree_was_pruned_is_not_usable(self):
+        prepared = self._prepare_over_a_live_version()
+        shutil.rmtree(prepared.staging)
+
+        self.assertFalse(ota.prepared_install_usable(prepared))
+
+    def test_a_preparation_whose_version_now_names_a_newer_tree_is_not_usable(self):
+        """Commit and discard find a tree by version, and would find that one."""
+        prepared = self._prepare_over_a_live_version()
+        newer = install_tree.versions_dir(self.release) / "0009-2026.3.0"
+        newer.mkdir()
+
+        self.assertFalse(ota.prepared_install_usable(prepared))
+        ota.discard_prepared_install(prepared)
+        self.assertFalse(prepared.staging.exists())
+        self.assertTrue(newer.is_dir())
+
+    def test_discarding_a_preparation_that_went_live_leaves_it(self):
+        prepared = self._prepare_over_a_live_version()
+        with patch("raisin_ota.client.report_software_snapshot", return_value=True):
+            ota.commit_prepared_install(prepared)
+
+        ota.discard_prepared_install(prepared)
+
+        self.assertTrue(prepared.staging.is_dir())
+        self.assertEqual(install_tree.current_generation(self.release), prepared.staging.name)
+
+    def test_preparing_removes_staged_trees_earlier_preparations_left(self):
+        """An agent restarted while its download waited leaves its tree behind."""
+        self._run({"pkg1", "pkg2"})
+        left = install_tree.versions_dir(self.release) / "0005-2026.3.0"
+        left.mkdir()
+        install_tree._mark_staging(left)
+        live = install_tree.current_generation(self.release)
+        ota._archive_cache.clear()
+
+        with patch.object(self, "MANIFEST", (self.MANIFEST[0], "arch-2", "2026.3.0")):
+            a, b, c, d = self._patched({"pkg1", "pkg2"})
+            with a, b, c, d:
+                prepared = ota.prepare_archive_install(
+                    "release", self.live, archive_version="2026.3.0"
+                )
+
+        self.assertIsNotNone(prepared)
+        self.assertFalse(left.exists())
+        self.assertEqual(self._staged_dirs(), [live, prepared.staging.name])
+        self.assertEqual(install_tree.current_generation(self.release), live)

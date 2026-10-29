@@ -183,6 +183,11 @@ def ensure_tree(release) -> Optional[str]:
     return None
 
 
+def current_generation(release) -> Optional[str]:
+    """Directory name of the live generation (`0007-1.0.239`), or None."""
+    return _current_dir_name(release)
+
+
 def current_version(release) -> Optional[str]:
     """Version the live symlink points at, or None if nothing is committed."""
     name = _current_dir_name(release)
@@ -672,6 +677,28 @@ def discard_staging(release, version: str) -> None:
     if target is None or target.name == _current_dir_name(release):
         return
     shutil.rmtree(target, ignore_errors=True)
+
+
+def discard_abandoned_staging(release) -> List[str]:
+    """Remove every staged tree that is neither live nor a rollback target.
+
+    For an install about to stage its own tree, under the install-state lock.
+    A staged tree outlives the process that made it when that process dies, and
+    one a caller kept on purpose across lock holds (a prepared archive waiting
+    for its machine) goes too: its holder finds it gone and prepares again,
+    which is what it would do after anyone else's install anyway. Not left for
+    `prune_versions`, which only runs on a commit: a machine that is switched
+    off every night while its download waits leaves a whole tree behind each
+    time, and may go days without committing anything.
+    """
+    record = _read_rollback(release)
+    protected = {_current_dir_name(release), record and record["to"]}
+    removed = []
+    for _, _, entry in _generations(release):
+        if _is_staging(entry) and entry.name not in protected:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed.append(entry.name)
+    return removed
 
 
 def prune_versions(release, keep: int = 2) -> List[str]:
