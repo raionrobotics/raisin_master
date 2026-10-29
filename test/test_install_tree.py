@@ -19,7 +19,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from raisin_ota import install_tree as it  # noqa: E402
 from raisin_ota import durable  # noqa: E402

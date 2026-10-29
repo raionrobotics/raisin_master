@@ -7,8 +7,8 @@ with install.py / publish.py. All external dependencies (HTTP, subprocess,
 filesystem) are mocked so the tests run offline.
 
 Usage:
-    python test_ota.py
-    python -m pytest test_ota.py -v
+    python -m pytest test/test_ota.py
+    python -m pytest test/test_ota.py -v
 """
 
 import base64

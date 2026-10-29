@@ -9,8 +9,8 @@ server actually serves, and verifies the body it is given -- and a mock of
 already assumed.
 
 Usage:
-    python test_build_machine.py
-    python -m pytest test_build_machine.py -v
+    python -m pytest test/test_build_machine.py
+    python -m pytest test/test_build_machine.py -v
 """
 
 import hashlib
