@@ -277,6 +277,26 @@ raisin build -t release raisin_network
 
 Alternatively, advanced users can use standard CMake commands in the `cmake-build-debug/` or `cmake-build-release/` directories.
 
+#### Package Config Files (`install/config` and `~/.raisin`)
+
+Parameters are read in two layers. The package default comes first and a user override, when present, is applied on top of it key by key:
+
+| Layer | Path | Maintained by |
+|-------|------|---------------|
+| Package default | `install/config/<pkg>/config/<file>` | `raisin build` / `raisin setup`, from `src/.../<pkg>/config/` |
+| User override | `~/.raisin/<pkg>/<file>` | You; never touched by the build |
+
+By default `install/config/<pkg>/config` is a symlink to the package's `config/` in `src/`, so an edit to a source default takes effect on the next process start without rebuilding. Because the link points at tracked source, editing a file under `install/config` changes the source too: keep robot- or user-specific values in `~/.raisin/<pkg>/` instead. If an edit to a source default seems to have no effect, check whether `~/.raisin/<pkg>/<file>` overrides that key.
+
+Use `--copy-config` to copy the files instead, e.g. when `install/` is used without the `src/` next to it (a container mounting only `install/`, or `install/` copied to another machine):
+
+```bash
+raisin build -t release -i --copy-config
+raisin setup --copy-config
+```
+
+`raisin publish` and SDK builds always copy, since their archives must hold real files.
+
 #### Using raisin Python Packages (e.g. `raisin_network_py`)
 
 Pass `--raisin-py-exec` to target a specific Python interpreter when building Python extension modules:
