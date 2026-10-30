@@ -101,16 +101,30 @@ class TestSetupDeploy(unittest.TestCase):
         imu = source_repo / "messages" / "sensor_msgs" / "msg" / "Imu.msg"
         imu.parent.mkdir(parents=True)
         imu.write_text("float32 angular_velocity_x\n", encoding="utf-8")
+        action = source_repo / "messages" / "sensor_msgs" / "action" / "Inspect.action"
+        action.parent.mkdir(parents=True)
+        action.write_text(
+            "string frame\n---\nbool success\n---\nfloat32 progress\n",
+            encoding="utf-8",
+        )
         unrelated_repo = self.root / "src" / "ignored_dependency"
         unrelated = unrelated_repo / "messages" / "other_msgs" / "msg" / "MustNotShip.msg"
         unrelated.parent.mkdir(parents=True)
         unrelated.write_text("int32 value\n", encoding="utf-8")
+        stale_temp = self.root / "temp" / "stale_action_package" / "msg" / "Stale.msg"
+        stale_temp.parent.mkdir(parents=True)
+        stale_temp.write_text("uint8 value\n", encoding="utf-8")
 
         templates = Path(__file__).parent / "templates"
         (self.root / "templates").mkdir()
-        for name in ("MessageTemplate.hpp", "raisin_serialization_base.hpp"):
+        for name in (
+            "ActionTemplate.hpp", "MessageTemplate.hpp", "ServiceTemplate.hpp",
+            "raisin_serialization_base.hpp",
+        ):
             (self.root / "templates" / name).write_bytes((templates / name).read_bytes())
-        self.ignored = {"raisin_ros2_messages", "ignored_dependency"}
+        # The unrelated repo is active: package publishing must still scope
+        # interfaces to the selected package's own source repository.
+        self.ignored = {"raisin_ros2_messages"}
         (self.root / "configuration_setting.yaml").write_text(
             "user_type: devel\npackages_to_ignore: []\nrepos_to_ignore: []\n",
             encoding="utf-8",
@@ -135,6 +149,11 @@ class TestSetupDeploy(unittest.TestCase):
             / "24.04" / "x86_64" / "release" / "messages" / "sensor_msgs" / "msg" / "Imu.msg"
         )
         self.assertEqual(packaged.read_text(encoding="utf-8"), "float32 angular_velocity_x\n")
+        generated_action_msg = packaged.parents[0] / "InspectGoal.msg"
+        self.assertEqual(
+            generated_action_msg.read_text(encoding="utf-8"),
+            "string frame",
+        )
         self.assertEqual(projects, [])
         unrelated_output = packaged.parents[2] / "other_msgs" / "msg" / "MustNotShip.msg"
         self.assertFalse(unrelated_output.exists())
@@ -150,6 +169,13 @@ class TestSetupDeploy(unittest.TestCase):
         )
         with zipfile.ZipFile(archive) as published:
             self.assertIn("messages/sensor_msgs/msg/Imu.msg", published.namelist())
+            self.assertIn("messages/sensor_msgs/msg/InspectGoal.msg", published.namelist())
+            self.assertNotIn(
+                "messages/other_msgs/msg/MustNotShip.msg", published.namelist()
+            )
+            self.assertNotIn(
+                "messages/stale_action_package/msg/Stale.msg", published.namelist()
+            )
 
 
 if __name__ == "__main__":
