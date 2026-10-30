@@ -255,6 +255,42 @@ class FmsBuildProfileTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, FMS_RUNTIME_OPTION):
                 fms_runtime_cmake_args(temp_dir, enabled=True)
 
+    def test_bracket_comments_and_string_arguments_do_not_count_as_options(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = (
+                Path(temp_dir)
+                / "src"
+                / "raisin_plugin"
+                / "raisin_behavior_tree_plugin"
+            )
+            package.mkdir(parents=True)
+            (package / "CMakeLists.txt").write_text(
+                "#[=[\n"
+                f'option({FMS_RUNTIME_OPTION} "comment only" OFF)\n'
+                "]=]\n"
+                f'message(\n  "option({FMS_RUNTIME_OPTION} string only)"\n)\n'
+            )
+            with self.assertRaisesRegex(ValueError, FMS_RUNTIME_OPTION):
+                fms_runtime_cmake_args(temp_dir, enabled=True)
+
+    def test_actual_option_after_multiline_command_is_detected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = (
+                Path(temp_dir)
+                / "src"
+                / "raisin_plugin"
+                / "raisin_behavior_tree_plugin"
+            )
+            package.mkdir(parents=True)
+            (package / "CMakeLists.txt").write_text(
+                'message("not an option")\n'
+                f'OPTION("{FMS_RUNTIME_OPTION}" "Build FMS runtime" OFF)\n'
+            )
+            self.assertEqual(
+                fms_runtime_cmake_args(temp_dir, enabled=True),
+                [f"-D{FMS_RUNTIME_OPTION}=ON"],
+            )
+
     def test_cmake_command_name_is_case_insensitive_but_variable_is_exact(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             package = (
