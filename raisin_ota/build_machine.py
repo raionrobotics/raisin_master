@@ -35,6 +35,8 @@ no layout translation.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -223,8 +225,9 @@ def fetch_archive(
 ) -> dict:
     """Put the named packages of one archive into one prefix.
 
-    Returns `{package_name: {"packageId": ..., "version": ...}}` for what was
-    unpacked, so a caller can print or record it.
+    Returns package identity and verified byte digests for what was unpacked.
+    The content hash is computed from the exact downloaded ZIP, after the shared
+    downloader has checked it against the server's X-Content-Hash header.
     """
     key = key or package_key()
     into = Path(into)
@@ -287,6 +290,11 @@ def fetch_archive(
             raise FetchRefused(f"Downloading '{name}' failed [{error_code}].")
 
         try:
+            digest = hashlib.sha256()
+            with download_path.open("rb") as package_file:
+                for chunk in iter(lambda: package_file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            blob_sha256 = digest.hexdigest()
             _unpack(download_path, into)
         finally:
             download_path.unlink(missing_ok=True)
@@ -294,7 +302,19 @@ def fetch_archive(
         fetched[name] = {
             "packageId": package_id,
             "version": entry.get("tagName") or archive.get("version"),
+            "manifestHash": entry.get("manifestHash"),
+            "blobSha256": blob_sha256,
         }
+        # Emit machine-readable, non-secret evidence. Do not log archive/package
+        # IDs: package names, versions, manifest digests and exact body digests
+        # are sufficient to reproduce the SDK input without exposing identifiers.
+        evidence = {
+            "package": name,
+            "version": fetched[name]["version"],
+            "manifest_sha256": fetched[name]["manifestHash"],
+            "blob_sha256": blob_sha256,
+        }
+        print("SDK_PACKAGE_DIGEST " + json.dumps(evidence, sort_keys=True))
         print(f"✅ {name} {fetched[name]['version']} -> {into}")
 
     return fetched

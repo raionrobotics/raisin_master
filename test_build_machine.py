@@ -13,6 +13,7 @@ Usage:
     python -m pytest test_build_machine.py -v
 """
 
+import contextlib
 import hashlib
 import io
 import json
@@ -162,11 +163,22 @@ class BuildMachineFetch(unittest.TestCase):
                 "version": "1.0.188",
                 "platform": "ubuntu-24.04-x86_64",
                 "packages": [
-                    {"packageId": SDK_ID, "packageName": "raisin",
-                     "tagName": "1.0.188"},
-                    {"packageId": THIRD_PARTY_ID,
-                     "packageName": "raisin_third_party_common",
-                     "tagName": "1.0.188"},
+                    {
+                        "packageId": SDK_ID,
+                        "packageName": "raisin",
+                        "tagName": "1.0.188",
+                        "manifestHash": hashlib.sha256(
+                            b"raisin-manifest"
+                        ).hexdigest(),
+                    },
+                    {
+                        "packageId": THIRD_PARTY_ID,
+                        "packageName": "raisin_third_party_common",
+                        "tagName": "1.0.188",
+                        "manifestHash": hashlib.sha256(
+                            b"common-manifest"
+                        ).hexdigest(),
+                    },
                 ],
             }
         ]
@@ -225,6 +237,21 @@ class BuildMachineFetch(unittest.TestCase):
         # are the contract with the fixture build.
         self.assertTrue((self.into / "sdk" / "include" / "raisin" / "version.hpp").is_file())
         self.assertTrue((self.into / "sdk" / "lib" / "libraisin.so").is_file())
+
+    def test_reports_digest_of_the_exact_verified_package_bytes(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            fetched = self.fetch(packages=["raisin"])
+
+        expected_blob_hash = hashlib.sha256(SDK_ZIP).hexdigest()
+        expected_manifest_hash = hashlib.sha256(b"raisin-manifest").hexdigest()
+        self.assertEqual(fetched["raisin"]["blobSha256"], expected_blob_hash)
+        self.assertEqual(fetched["raisin"]["manifestHash"], expected_manifest_hash)
+        self.assertIn(expected_blob_hash, output.getvalue())
+        self.assertIn(expected_manifest_hash, output.getvalue())
+        self.assertIn('"package": "raisin"', output.getvalue())
+        self.assertNotIn(SDK_ID, output.getvalue())
+        self.assertNotIn(ARCHIVE_ID, output.getvalue())
 
     def test_merges_two_packages_into_one_prefix(self):
         # The reason this tool exists rather than the robot's: one prefix, not a
