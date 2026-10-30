@@ -16,6 +16,12 @@ option(RAISIN_RELEASE_BUILD "Build unit tests for the project" OFF)
 @@RAISIN_BUILD_TEST_OVERRIDE@@
 option(RAISIN_BUILD_TEST "Build unit tests for the project" ON)
 
+if(RAISIN_BUILD_TEST)
+    enable_testing()
+    file(WRITE ${CMAKE_BINARY_DIR}/CTestCustom.cmake
+        "set(CTEST_CUSTOM_TESTS_IGNORE fullbench fuzzer zstreamtest playTests mbgl-expression-test)\n")
+endif()
+
 if(NOT RAISIN_RELEASE_BUILD)
     set(CMAKE_INSTALL_PREFIX "@@SCRIPT_DIR@@/install")
 endif()
