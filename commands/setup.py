@@ -2193,9 +2193,26 @@ def setup(
         click.echo(f"🎯 target: {target.slug} (profile '{target.profile}')")
         click.echo(f"📦 packages: {', '.join(sorted(packages_allowed))}")
 
-    interface_dirs = [str(path) for path in source_packages.values()] if cross else ["src"]
+    if cross:
+        interface_dirs = [str(path) for path in source_packages.values()]
+        interface_repos_to_ignore = repos_to_ignore
+    elif package_name:
+        # Package publishing reads only this checkout. A repository can be
+        # excluded from the aggregate workspace build while still being the
+        # source of the package currently being published (for example,
+        # raisin_ros2_messages). Keep it excluded from CMake discovery above,
+        # but allow its interface definitions into this package's archive.
+        interface_dirs = ["src"]
+        source_repo = Path(package_name).parts[0]
+        interface_repos_to_ignore = [
+            repo for repo in repos_to_ignore if repo != source_repo
+        ]
+    else:
+        interface_dirs = ["src"]
+        interface_repos_to_ignore = repos_to_ignore
     action_files = find_interface_files(
-        interface_dirs, ["action"], packages_to_ignore, repos_to_ignore, packages_allowed
+        interface_dirs, ["action"], packages_to_ignore,
+        interface_repos_to_ignore, packages_allowed
     )[0]
 
     project_dirs = [f"src/{name}" for name in target.source_repositories] if cross else [src_dir]
@@ -2211,7 +2228,8 @@ def setup(
 
     temp_dirs = [f"temp/{name}" for name in source_packages] if cross else ["temp"]
     msg_files, srv_files = find_interface_files(
-        interface_dirs + temp_dirs, ["msg", "srv"], packages_to_ignore, repos_to_ignore,
+        interface_dirs + temp_dirs, ["msg", "srv"], packages_to_ignore,
+        interface_repos_to_ignore,
         packages_allowed
     )
 

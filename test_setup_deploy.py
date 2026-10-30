@@ -8,6 +8,8 @@ each deployed package's generated headers are collected for that build.
 import sys
 import tempfile
 import unittest
+import zipfile
+from contextlib import chdir
 from unittest.mock import patch
 from pathlib import Path
 
@@ -93,6 +95,61 @@ class TestSetupDeploy(unittest.TestCase):
 
         with self.assertRaises(OSError):
             cli_setup.deploy_install_packages()
+
+    def test_package_publish_includes_interfaces_from_its_ignored_source_repo(self):
+        source_repo = self.root / "src" / "raisin_ros2_messages"
+        imu = source_repo / "messages" / "sensor_msgs" / "msg" / "Imu.msg"
+        imu.parent.mkdir(parents=True)
+        imu.write_text("float32 angular_velocity_x\n", encoding="utf-8")
+        unrelated_repo = self.root / "src" / "ignored_dependency"
+        unrelated = unrelated_repo / "messages" / "other_msgs" / "msg" / "MustNotShip.msg"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("int32 value\n", encoding="utf-8")
+
+        templates = Path(__file__).parent / "templates"
+        (self.root / "templates").mkdir()
+        for name in ("MessageTemplate.hpp", "raisin_serialization_base.hpp"):
+            (self.root / "templates" / name).write_bytes((templates / name).read_bytes())
+        self.ignored = {"raisin_ros2_messages", "ignored_dependency"}
+        (self.root / "configuration_setting.yaml").write_text(
+            "user_type: devel\npackages_to_ignore: []\nrepos_to_ignore: []\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(cli_setup, "check_supported_architecture"), \
+                patch.object(cli_setup, "guard_src_repo_lfs_assets"), \
+                patch.object(cli_setup, "deploy_install_packages"), \
+                patch.object(cli_setup, "guard_src_repo_release_yaml_dependencies"), \
+                patch.object(cli_setup, "build_pure_cmake_projects", return_value=[]), \
+                patch.object(cli_setup, "update_cmake_file"), \
+                patch.object(cli_setup, "get_commit_hash", return_value=None), \
+                patch.object(cli_setup, "collect_src_vcpkg_dependencies"), \
+                patch.object(cli_setup, "generate_vcpkg_json"):
+            with chdir(self.root):
+                projects = cli_setup.setup(
+                    package_name="raisin_ros2_messages", build_type="release"
+                )
+
+        packaged = (
+            self.root / "release" / "install" / "raisin_ros2_messages" / "ubuntu"
+            / "24.04" / "x86_64" / "release" / "messages" / "sensor_msgs" / "msg" / "Imu.msg"
+        )
+        self.assertEqual(packaged.read_text(encoding="utf-8"), "float32 angular_velocity_x\n")
+        self.assertEqual(projects, [])
+        unrelated_output = packaged.parents[2] / "other_msgs" / "msg" / "MustNotShip.msg"
+        self.assertFalse(unrelated_output.exists())
+
+        from commands.publish import _create_archive
+
+        archive = _create_archive(
+            "raisin_ros2_messages", "0.1.2", "release",
+            {
+                "install_dir": packaged.parents[3],
+                "release_dir": self.root / "archives",
+            },
+        )
+        with zipfile.ZipFile(archive) as published:
+            self.assertIn("messages/sensor_msgs/msg/Imu.msg", published.namelist())
 
 
 if __name__ == "__main__":
