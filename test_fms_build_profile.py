@@ -367,6 +367,36 @@ class FmsBuildProfileTest(unittest.TestCase):
     @patch("commands.build.build_command")
     @patch("commands.setup.process_build_targets")
     @patch("commands.setup.setup")
+    def test_build_cli_resolves_plugin_source_during_setup_before_validation(
+        self, mock_setup, _targets, mock_build
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = (
+                Path(temp_dir)
+                / "src"
+                / "raisin_plugin"
+                / "raisin_behavior_tree_plugin"
+            )
+
+            def resolve_plugin_source(**_kwargs):
+                package.mkdir(parents=True, exist_ok=True)
+                (package / "CMakeLists.txt").write_text(
+                    f'option({FMS_RUNTIME_OPTION} "Build FMS runtime" OFF)\n'
+                )
+
+            mock_setup.side_effect = resolve_plugin_source
+            with patch.object(g, "script_directory", temp_dir):
+                result = CliRunner().invoke(
+                    build_cli_command, ["--type", "release", "--fms-runtime"]
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_setup.assert_called_once()
+        self.assertTrue(mock_build.call_args.kwargs["fms_runtime"])
+
+    @patch("commands.build.build_command")
+    @patch("commands.setup.process_build_targets")
+    @patch("commands.setup.setup")
     def test_build_cli_keeps_opt_in_disabled_by_default(
         self, _setup, _targets, mock_build
     ):

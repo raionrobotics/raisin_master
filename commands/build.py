@@ -334,11 +334,6 @@ def build_cli_command(
 
     targets = list(targets)
 
-    try:
-        fms_runtime_cmake_args(g.script_directory, fms_runtime)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-
     process_build_targets(targets)
 
     if not g.build_pattern:
@@ -357,6 +352,11 @@ def build_cli_command(
         raisin_march=raisin_march,
         build_test_enabled=build_test_enabled,
     )
+
+    try:
+        fms_runtime_cmake_args(g.script_directory, fms_runtime)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     # Then build
     build_types = list(build_types) if build_types else []
