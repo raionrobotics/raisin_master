@@ -28,7 +28,7 @@ import yaml
 from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from . import install_tree
 from .install_tree import InstallTreeUnusable, safe_component
@@ -3844,7 +3844,7 @@ def download_all_from_archive(
     source_packages: Optional[set] = None,
     require_desired_state: bool = False,
     _defer_commit: bool = False,
-) -> dict:
+) -> Union[dict, "PreparedArchiveInstall"]:
     """Download all packages from an archive.
 
     Args:
