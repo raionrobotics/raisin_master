@@ -21,6 +21,7 @@ from commands.utils import (
     get_build_jobs,
     get_default_portable_march,
 )
+from commands.fms_build_profile import fms_runtime_cmake_args
 
 
 def _resolve_default_python(script_directory):
@@ -38,7 +39,14 @@ def _resolve_default_python(script_directory):
     return str(candidate) if candidate.is_file() else None
 
 
-def build_command(build_types, to_install=False, raisin_march=None, python_executable=None, sanitizer="off"):
+def build_command(
+    build_types,
+    to_install=False,
+    raisin_march=None,
+    python_executable=None,
+    sanitizer="off",
+    fms_runtime=False,
+):
     """
     Build the project with CMake and Ninja.
 
@@ -48,9 +56,11 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
         raisin_march (str): Optional CPU target override passed to CMake
         python_executable (str): Python interpreter for raisin Python packages
         sanitizer (str): Sanitizer mode for test targets ('off'|'address'|'thread'|'undefined')
+        fms_runtime (bool): Enable the opt-in FMS Mission runtime in its plugin package
     """
     check_supported_architecture()
     script_directory = g.script_directory
+    fms_cmake_args = fms_runtime_cmake_args(script_directory, fms_runtime)
     developer_env = g.developer_env
     ninja_path = g.ninja_path
 
@@ -95,6 +105,7 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
                     cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
                 if sanitizer and sanitizer != "off":
                     cmake_command.append(f"-DRAISIN_SANITIZER={sanitizer}")
+                cmake_command.extend(fms_cmake_args)
                 # Under QEMU, use compiler wrappers that retry on segfault
                 cmake_env = None
                 use_retry = (
@@ -162,6 +173,7 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
                 ]
                 if python_executable:
                     cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
+                cmake_command.extend(fms_cmake_args)
                 subprocess.run(cmake_command, check=True, text=True, env=developer_env)
 
             except subprocess.CalledProcessError as e:
@@ -272,6 +284,11 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     help="Install artifacts to install/ directory after building",
 )
 @click.option(
+    "--fms-runtime",
+    is_flag=True,
+    help="Build the opt-in FMS Mission runtime; requires a plugin source that declares the feature",
+)
+@click.option(
     "--raisin-py-exec",
     "python_executable",
     default=None,
@@ -292,7 +309,7 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
 )
 @click.argument("targets", nargs=-1)
 def build_cli_command(
-    build_types, install, python_executable, test, asan, tsan, targets
+    build_types, install, fms_runtime, python_executable, test, asan, tsan, targets
 ):
     """
     Compile the project using CMake and Ninja.
@@ -306,6 +323,7 @@ def build_cli_command(
         raisin build -t debug --test                 # Tests, no sanitizer
         raisin build -t debug --asan                 # Tests + ASan+UBSan (ASan/TSan are mutually exclusive)
         raisin build -t debug --tsan                 # Tests + ThreadSanitizer (ASan/TSan are mutually exclusive)
+        raisin build -t release --fms-runtime        # Opt in to the FMS Mission runtime
 
     \b
     Note: This command first runs setup, then compiles.
@@ -335,6 +353,11 @@ def build_cli_command(
         build_test_enabled=build_test_enabled,
     )
 
+    try:
+        fms_runtime_cmake_args(g.script_directory, fms_runtime)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     # Then build
     build_types = list(build_types) if build_types else []
 
@@ -343,4 +366,11 @@ def build_cli_command(
         click.echo("   Example: raisin build --type release")
         sys.exit(1)
 
-    build_command(build_types, to_install=install, raisin_march=raisin_march, python_executable=python_executable, sanitizer=sanitizer)
+    build_command(
+        build_types,
+        to_install=install,
+        raisin_march=raisin_march,
+        python_executable=python_executable,
+        sanitizer=sanitizer,
+        fms_runtime=fms_runtime,
+    )

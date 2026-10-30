@@ -16,6 +16,11 @@ import click
 import yaml
 
 from commands import globals as g
+from commands.fms_build_profile import (
+    FMS_RUNTIME_PACKAGE,
+    fms_runtime_cmake_args,
+    write_fms_build_profile,
+)
 from commands.utils import (
     delete_directory,
     is_qemu_emulated,
@@ -32,6 +37,41 @@ from commands.setup import (
 # ============================================================================
 
 
+def _resolve_target_dir(script_dir: Path, target: str) -> Path:
+    """Resolve a package root release.yaml, including packages nested in a repo."""
+    source_root = (script_dir / "src").resolve()
+    if not target or Path(target).name != target or target in {".", ".."}:
+        raise ValueError("Invalid package target")
+
+    direct = source_root / target
+    direct_resolved = direct.resolve()
+    try:
+        direct_resolved.relative_to(source_root)
+    except ValueError as exc:
+        raise ValueError("Package target escapes the source directory") from exc
+    if (direct / "release.yaml").is_file():
+        return direct
+
+    matches = []
+    if source_root.is_dir():
+        for release_file in source_root.rglob("release.yaml"):
+            package_dir = release_file.parent
+            if package_dir.name != target:
+                continue
+            resolved = package_dir.resolve()
+            try:
+                resolved.relative_to(source_root)
+            except ValueError:
+                continue
+            if resolved != direct_resolved:
+                matches.append(package_dir)
+
+    if len(matches) > 1:
+        paths = ", ".join(sorted(str(path) for path in matches))
+        raise ValueError(f"Ambiguous package target '{target}': {paths}")
+    return matches[0] if matches else direct
+
+
 def _get_paths(target: str, build_type: str) -> dict:
     """Get all relevant paths for a publish operation.
 
@@ -40,7 +80,7 @@ def _get_paths(target: str, build_type: str) -> dict:
     script_dir = Path(g.script_directory)
     return {
         "script_dir": script_dir,
-        "target_dir": script_dir / "src" / target,
+        "target_dir": _resolve_target_dir(script_dir, target),
         "install_dir": (
             script_dir
             / "release"
@@ -102,6 +142,7 @@ def _build_linux(
     install_dir: Path,
     build_type: str,
     raisin_march: str,
+    extra_cmake_args: list[str],
 ):
     """Run CMake + Ninja build on Linux."""
     cmake_cmd = [
@@ -117,6 +158,7 @@ def _build_linux(
         "-DRAISIN_RELEASE_BUILD=ON",
         f"-DRAISIN_MARCH={raisin_march}",
     ]
+    cmake_cmd.extend(extra_cmake_args)
 
     # Under QEMU, use compiler wrappers that retry on segfault
     cmake_env = None
@@ -155,7 +197,12 @@ def _build_linux(
                 raise
 
 
-def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
+def _build_windows(
+    build_dir: Path,
+    install_dir: Path,
+    build_type: str,
+    extra_cmake_args: list[str],
+):
     """Run CMake + build on Windows."""
     cmake_cmd = [
         "cmake",
@@ -169,6 +216,7 @@ def _build_windows(build_dir: Path, install_dir: Path, build_type: str):
         f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         "-DRAISIN_RELEASE_BUILD=ON",
     ]
+    cmake_cmd.extend(extra_cmake_args)
     if g.ninja_path:
         cmake_cmd.append(f"-DCMAKE_MAKE_PROGRAM={g.ninja_path}")
 
@@ -194,6 +242,7 @@ def _build_package(
     target: str,
     build_type: str,
     paths: dict,
+    fms_runtime: bool = False,
 ) -> bool:
     """Build the package using CMake + Ninja.
 
@@ -203,6 +252,15 @@ def _build_package(
     install_dir = paths["install_dir"]
     target_dir = paths["target_dir"]
     raisin_march = _get_publish_march()
+    if fms_runtime and target != FMS_RUNTIME_PACKAGE:
+        raise ValueError(
+            f"--fms-runtime is only valid for {FMS_RUNTIME_PACKAGE}"
+        )
+    fms_cmake_args = (
+        fms_runtime_cmake_args(g.script_directory, fms_runtime, target_dir)
+        if target == FMS_RUNTIME_PACKAGE
+        else []
+    )
 
     # Clean stale build directory to prevent cached cmake paths from
     # interfering (e.g., system zstd vs install/ zstd).
@@ -215,6 +273,7 @@ def _build_package(
     print(f"\n--- Setting up build for '{target}' ---")
     setup(
         package_name=target,
+        package_source_dir=target_dir,
         build_type=build_type,
         build_dir=str(build_dir),
         build_test_enabled=False,
@@ -224,9 +283,9 @@ def _build_package(
 
     print("⚙️  Running CMake...")
     if platform.system().lower() == "linux":
-        _build_linux(build_dir, install_dir, build_type, raisin_march)
+        _build_linux(build_dir, install_dir, build_type, raisin_march, fms_cmake_args)
     else:
-        _build_windows(build_dir, install_dir, build_type)
+        _build_windows(build_dir, install_dir, build_type, fms_cmake_args)
 
     print(f"✅ Build for '{target}' complete!")
 
@@ -234,6 +293,8 @@ def _build_package(
     install_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(target_dir / "release.yaml", install_dir / "release.yaml")
     _copy_dependency_declaration(target_dir, install_dir)
+    if target == FMS_RUNTIME_PACKAGE and fms_runtime:
+        write_fms_build_profile(str(install_dir), enabled=True)
 
     return True
 
@@ -296,7 +357,12 @@ def _create_archive(
 # ============================================================================
 
 
-def publish(target: str, build_type: str, dry_run: bool = False) -> bool:
+def publish(
+    target: str,
+    build_type: str,
+    dry_run: bool = False,
+    fms_runtime: bool = False,
+) -> bool:
     """Build a package and archive it into release/.
 
     This does not upload. The OTA server takes a manifest only from Jenkins:
@@ -311,25 +377,26 @@ def publish(target: str, build_type: str, dry_run: bool = False) -> bool:
         build_type: Build type (debug/release)
         dry_run: Accepted and ignored. Kept so CI, which still passes it, keeps
             working; there is no upload left for it to suppress.
+        fms_runtime: Enable the opt-in runtime for the designated BT plugin archive.
 
     Returns:
         True when the archive was produced. The caller turns a False into a
         non-zero exit -- CI reads that exit code, and this is the only thing
         that produces the archives the OTA upload stage consumes.
     """
-    paths = _get_paths(target, build_type)
-
-    # Validate target
-    details = _validate_target(paths["target_dir"])
-    if not details:
-        return False
-
-    print(f"✅ Found release file for '{target}'.")
-    version = details.get("version", "0.0.0")
-
     try:
+        paths = _get_paths(target, build_type)
+
+        # Validate target
+        details = _validate_target(paths["target_dir"])
+        if not details:
+            return False
+
+        print(f"✅ Found release file for '{target}'.")
+        version = details.get("version", "0.0.0")
+
         # Build
-        if not _build_package(target, build_type, paths):
+        if not _build_package(target, build_type, paths, fms_runtime=fms_runtime):
             return False
 
         # Archive
@@ -373,7 +440,12 @@ def publish(target: str, build_type: str, dry_run: bool = False) -> bool:
     is_flag=True,
     help="Deprecated and ignored: this command never uploads.",
 )
-def publish_command(target, build_type, dry_run):
+@click.option(
+    "--fms-runtime",
+    is_flag=True,
+    help="Build the opt-in FMS Mission runtime (only for raisin_behavior_tree_plugin)",
+)
+def publish_command(target, build_type, dry_run, fms_runtime):
     """
     Build a package and archive it into release/ for CI to upload.
 
@@ -381,8 +453,24 @@ def publish_command(target, build_type, dry_run):
     Examples:
         raisin publish raisin_network                # Build and archive
         raisin publish raisin_network --type release # Release build only
+        raisin publish raisin_behavior_tree_plugin --type release --fms-runtime
         raisin publish my_package -t release
     """
+    if fms_runtime and target != FMS_RUNTIME_PACKAGE:
+        raise click.ClickException(
+            f"--fms-runtime is only valid for {FMS_RUNTIME_PACKAGE}"
+        )
+    try:
+        if fms_runtime:
+            package_source_dir = _resolve_target_dir(
+                Path(g.script_directory), target
+            )
+            fms_runtime_cmake_args(
+                g.script_directory, True, package_source_dir
+            )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     build_types = (
         ["release", "debug"] if build_type.lower() == "both" else [build_type.lower()]
     )
@@ -393,7 +481,7 @@ def publish_command(target, build_type, dry_run):
     # in release/ already.
     succeeded = True
     for bt in build_types:
-        if not publish(target, bt, dry_run):
+        if not publish(target, bt, dry_run, fms_runtime=fms_runtime):
             succeeded = False
     if not succeeded:
         raise click.exceptions.Exit(code=1)
