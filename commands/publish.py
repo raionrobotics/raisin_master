@@ -293,8 +293,8 @@ def _build_package(
     install_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(target_dir / "release.yaml", install_dir / "release.yaml")
     _copy_dependency_declaration(target_dir, install_dir)
-    if target == FMS_RUNTIME_PACKAGE:
-        write_fms_build_profile(str(install_dir), fms_runtime)
+    if target == FMS_RUNTIME_PACKAGE and fms_runtime:
+        write_fms_build_profile(str(install_dir), enabled=True)
 
     return True
 

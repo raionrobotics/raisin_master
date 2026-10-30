@@ -182,6 +182,35 @@ class FmsBuildProfileTest(unittest.TestCase):
                 (Path(temp_dir) / "install/share/raisin/build-profile.json").exists()
             )
 
+    def test_disabled_plugin_archive_does_not_add_fms_profile(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_plugin_option(temp_dir)
+            target_dir = (
+                Path(temp_dir)
+                / "src"
+                / "raisin_plugin"
+                / "raisin_behavior_tree_plugin"
+            )
+            (target_dir / "release.yaml").write_text("version: 0.0.2\n")
+            paths = {
+                "build_dir": Path(temp_dir) / "build",
+                "install_dir": Path(temp_dir) / "install",
+                "target_dir": target_dir,
+            }
+            with (
+                patch.object(g, "script_directory", temp_dir),
+                patch("commands.publish.delete_directory"),
+                patch("commands.publish.setup"),
+                patch("commands.publish.platform.system", return_value="Linux"),
+                patch("commands.publish._build_linux"),
+            ):
+                self.assertTrue(
+                    _build_package("raisin_behavior_tree_plugin", "Release", paths)
+                )
+            self.assertFalse(
+                (Path(temp_dir) / "install/share/raisin/build-profile.json").exists()
+            )
+
     def test_build_command_passes_on_and_off_to_cmake(self):
         for enabled, expected in ((False, "OFF"), (True, "ON")):
             with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as temp_dir:
