@@ -38,6 +38,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -265,6 +266,20 @@ def fetch_archive(
             f"Archive '{archive_name}' {archive.get('version')} carries no packages."
         )
 
+    # The archive API contract requires a canonical manifest SHA-256 for every
+    # package. Keep provenance fail-closed: a valid ZIP digest alone identifies
+    # bytes, but without this source-manifest reference the SDK support tuple is
+    # incomplete and must not be emitted as complete.
+    for entry in wanted:
+        manifest_hash = entry.get("manifestHash")
+        if not isinstance(manifest_hash, str) or not re.fullmatch(
+            r"[a-fA-F0-9]{64}", manifest_hash
+        ):
+            raise FetchRefused(
+                f"Archive package '{entry.get('packageName')}' has no valid "
+                "manifest SHA-256."
+            )
+
     into.mkdir(parents=True, exist_ok=True)
     base = read_base(endpoint)
     archive_id = archive.get("id")
@@ -303,7 +318,7 @@ def fetch_archive(
         fetched[name] = {
             "packageId": package_id,
             "version": entry.get("tagName") or archive.get("version"),
-            "manifestHash": entry.get("manifestHash"),
+            "manifestHash": entry["manifestHash"].lower(),
             "blobSha256": blob_sha256,
         }
         # Emit machine-readable, non-secret evidence. Do not log archive/package

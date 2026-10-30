@@ -253,6 +253,22 @@ class BuildMachineFetch(unittest.TestCase):
         self.assertNotIn(SDK_ID, output.getvalue())
         self.assertNotIn(ARCHIVE_ID, output.getvalue())
 
+    def test_refuses_missing_or_malformed_manifest_hash_before_download(self):
+        for manifest_hash in (None, "not-a-sha256", "sha256:" + "a" * 64):
+            with self.subTest(manifest_hash=manifest_hash):
+                FakeOta.archives[0]["packages"][0]["manifestHash"] = manifest_hash
+                target = self.into / "invalid-manifest"
+                with self.assertRaises(bm.FetchRefused) as refused:
+                    bm.fetch_archive(
+                        "raisin-robot", "ubuntu-24.04-x86_64", target,
+                        packages=["raisin"], key=GOOD_KEY, endpoint=self.endpoint,
+                    )
+                self.assertIn("manifest SHA-256", str(refused.exception))
+                self.assertFalse(target.exists())
+                FakeOta.archives[0]["packages"][0]["manifestHash"] = hashlib.sha256(
+                    b"raisin-manifest"
+                ).hexdigest()
+
     def test_refuses_to_report_a_verified_digest_when_server_hash_is_missing(self):
         class HashlessOta(FakeOta):
             def do_GET(self):
