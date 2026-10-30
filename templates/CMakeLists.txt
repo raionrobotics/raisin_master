@@ -74,6 +74,10 @@ install(DIRECTORY generated/include/
 
 @@SUB_PROJECT@@
 
+# Leave a machine-readable record beside the installed SDK so a package
+# consumer can identify the build profile that its imported targets export.
+raisin_install_build_profile()
+
 
 if (WIN32)
     install(DIRECTORY "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/"
