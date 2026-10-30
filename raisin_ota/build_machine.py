@@ -285,6 +285,7 @@ def fetch_archive(
             download_path,
             headers=_headers(key),
             error_context=name,
+            require_content_hash=True,
         )
         if not ok:
             raise FetchRefused(f"Downloading '{name}' failed [{error_code}].")

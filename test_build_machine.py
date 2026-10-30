@@ -253,6 +253,68 @@ class BuildMachineFetch(unittest.TestCase):
         self.assertNotIn(SDK_ID, output.getvalue())
         self.assertNotIn(ARCHIVE_ID, output.getvalue())
 
+    def test_refuses_to_report_a_verified_digest_when_server_hash_is_missing(self):
+        class HashlessOta(FakeOta):
+            def do_GET(self):
+                url = urlparse(self.path)
+                parts = [p for p in url.path.split("/") if p]
+                if parts and parts[-1] == "download":
+                    blob = FakeOta.blobs[SDK_ID]
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(blob)))
+                    self.end_headers()
+                    self.wfile.write(blob)
+                    return
+                FakeOta.do_GET(self)
+
+        server = HTTPServer(("127.0.0.1", 0), HashlessOta)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        host, port = server.server_address
+        target = self.into / "hashless"
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(bm.FetchRefused) as refused:
+                bm.fetch_archive(
+                    "raisin-robot", "ubuntu-24.04-x86_64", target,
+                    packages=["raisin"], key=GOOD_KEY,
+                    endpoint=f"http://{host}:{port}/api",
+                )
+
+        self.assertIn("Downloading 'raisin' failed", str(refused.exception))
+        self.assertNotIn("SDK_PACKAGE_DIGEST", output.getvalue())
+        self.assertEqual(list(target.glob("**/*download*")), [])
+        self.assertEqual(list(target.glob("**/*.part")), [])
+
+    def test_shared_downloader_keeps_optional_hash_behavior_by_default(self):
+        class HashlessOta(FakeOta):
+            def do_GET(self):
+                blob = FakeOta.blobs[SDK_ID]
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(blob)))
+                self.end_headers()
+                self.wfile.write(blob)
+
+        server = HTTPServer(("127.0.0.1", 0), HashlessOta)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        host, port = server.server_address
+        destination = self.into / "optional-hash.zip"
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok, error = bm._download_to_path(
+                f"http://{host}:{port}/api/raisin-package",
+                destination,
+            )
+
+        self.assertTrue(ok)
+        self.assertIsNone(error)
+        self.assertEqual(destination.read_bytes(), SDK_ZIP)
+
     def test_merges_two_packages_into_one_prefix(self):
         # The reason this tool exists rather than the robot's: one prefix, not a
         # directory per package.
