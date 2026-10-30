@@ -80,6 +80,10 @@ install(DIRECTORY generated/include/
 
 @@SUB_PROJECT@@
 
+if(RAISIN_BUILD_TEST)
+    raisin_register_unregistered_tests()
+endif()
+
 
 if (WIN32)
     install(DIRECTORY "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/"
