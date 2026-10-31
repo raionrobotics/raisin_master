@@ -324,6 +324,7 @@ function(raisin_collect_tests dir out_targets out_tests)
 endfunction()
 
 # Registers every *_unittest / *_inttest executable that its package did not register with add_test().
+# A package keeps an executable out by setting the target property RAISIN_NO_AUTO_TEST to ON.
 function(raisin_register_unregistered_tests)
     raisin_collect_tests(${CMAKE_SOURCE_DIR} targets tests)
     foreach(target IN LISTS targets)
@@ -331,7 +332,8 @@ function(raisin_register_unregistered_tests)
             continue()
         endif()
         get_target_property(type ${target} TYPE)
-        if(type STREQUAL "EXECUTABLE")
+        get_target_property(skip ${target} RAISIN_NO_AUTO_TEST)
+        if(type STREQUAL "EXECUTABLE" AND NOT skip)
             get_target_property(binary_dir ${target} BINARY_DIR)
             add_test(NAME ${target} COMMAND ${target} WORKING_DIRECTORY ${binary_dir})
         endif()
