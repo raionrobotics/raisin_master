@@ -398,6 +398,15 @@ def main():
                         "belief_alpha": float(os.environ.get("BELIEF_ALPHA", "0.92")),
                         "exit_when_done": bool(a.exit_when_done)},
     }
+    for kv in filter(None, os.environ.get("RF_PARAMS", "").split(",")):   # RF_PARAMS="room_finder.sign_seek=100,room_finder.sign_lock=true"
+        k, v = kv.split("=", 1)
+        node, name = k.split(".", 1)
+        v = {"true": True, "false": False}.get(v.lower(), v)
+        try:
+            v = float(v) if isinstance(v, str) else v
+        except ValueError:
+            pass
+        rosless.Node.param_overrides.setdefault(node, {})[name] = v
     import room_perception  # noqa: E402
     import room_finder  # noqa: E402
     perception = room_perception.RoomPerception()
