@@ -379,7 +379,8 @@ def main():
                      "belief_peak": os.environ.get("BELIEF_PEAK", "1") == "1",
                      # signs / doors in an area the robot has already been within 3 m of are not visited again
                      "skip_looked": os.environ.get("SKIP_LOOKED", "0") == "1",       # old 3 m rule, off: the 2 m + camera view rule below is used
-                     # doors / signs / plates farther than this from any traversable cell are ignored. The gateway inflates walls by
+                     # doors / signs farther than this from any traversable cell are ignored (room plates are always kept, ReasonNav
+                     # 3450477). The gateway inflates walls by
                      # 0.5 m and the finder keeps 0.3 m clearance, so traversable cells start ~0.8 m from a wall: at 1.0 m the plates
                      # on the walls were dropped (11-04 T145: T146 next to the target, T101/T102 in the west corridor). 1.5 m = ~0.7 m
                      # beyond the wall line
