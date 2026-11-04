@@ -376,6 +376,9 @@ def main():
                      "frontier_on_free": os.environ.get("FRONTIER_ON_FREE", "1") == "1",
                      # VLM goals inside the looked-at area are moved on along robot -> goal (no confidence lands on looked cells)
                      "goal_unlooked": os.environ.get("GOAL_UNLOOKED", "1") == "1",
+                     # a VLM goal gets the weight (answers among the last 4 that point within 10 m of it) / 4 (11-04 T113: three answers
+                     # in a row claimed the numbers grow eastward and sent the robot into the wrong wing); 0 = off
+                     "belief_consensus": int(os.environ.get("BELIEF_CONSENSUS", "4")),
                      # unread signs scored 30 - path everywhere, so the lobby's decorations kept winning: lower base, plus the belief at the sign
                      "sign_base": float(os.environ.get("SIGN_BASE", "10")),
                      "sign_belief_w": float(os.environ.get("SIGN_BELIEF_W", "30")),
