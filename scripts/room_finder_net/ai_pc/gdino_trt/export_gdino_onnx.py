@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Export Grounding DINO (HF transformers) to ONNX with the prompt and the image size baked in (static shapes for TensorRT).
 
-    python export_gdino_onnx.py --out gdino_1280x800.onnx [--model IDEA-Research/grounding-dino-base] [--w 1280 --h 800]
+    python export_gdino_onnx.py --out gdino_1280x800.onnx [--model IDEA-Research/grounding-dino-base] [--w 1280 --h 800] [--short 800]
 
 The perception node always sends one fixed prompt and 1280x800 frames, so the text branch is a constant and the only
-input is pixel_values [1,3,H',W'] (the processor's resize of WxH: shortest side 800, longest <= 1333).
+input is pixel_values [1,3,H',W'] (the processor's resize of WxH: shortest side --short (800), longest <= 1333).
+--short 720 with --w 960 --h 720 keeps a 4:3 frame at 960x720 (the default would upscale it to 1066x800); the value goes
+into the meta (proc_size) so the server preprocesses the same way.
 Outputs: logits [1,900,256], pred_boxes [1,900,4] (cx,cy,w,h normalised) -- what post_process_grounded_object_detection reads.
 Also writes <out>.meta.json (prompt, input_ids, processed size) for the TensorRT server."""
 import argparse
@@ -61,10 +63,13 @@ def main():
     ap.add_argument("--out", default="gdino.onnx")
     ap.add_argument("--w", type=int, default=1280)
     ap.add_argument("--h", type=int, default=800)
+    ap.add_argument("--short", type=int, default=800, help="processor resize: shortest side (px)")
     ap.add_argument("--prompt", default=PROMPT)
     ap.add_argument("--opset", type=int, default=17)
     a = ap.parse_args()
     proc = AutoProcessor.from_pretrained(a.model)
+    proc_size = {"shortest_edge": a.short, "longest_edge": 1333}
+    proc.image_processor.size = proc_size
     model = AutoModelForZeroShotObjectDetection.from_pretrained(a.model).eval()
     img = Image.fromarray(np.random.randint(0, 255, (a.h, a.w, 3), np.uint8))
     inp = proc(images=img, text=a.prompt, return_tensors="pt")
@@ -78,7 +83,7 @@ def main():
                           opset_version=a.opset, do_constant_folding=True, dynamo=False)
     print("bool constants rewritten:", bool_constants_to_cast(a.out))
     json.dump({"model": a.model, "prompt": a.prompt, "input_ids": text["input_ids"].tolist(),
-               "pixel_values_shape": list(pv.shape), "image_size": [a.w, a.h]}, open(a.out + ".meta.json", "w"))
+               "pixel_values_shape": list(pv.shape), "image_size": [a.w, a.h], "proc_size": proc_size}, open(a.out + ".meta.json", "w"))
     np.savez(a.out + ".check.npz", pixel_values=pv.numpy(), logits=ref[0].numpy(), pred_boxes=ref[1].numpy())
     print("wrote", a.out)
 

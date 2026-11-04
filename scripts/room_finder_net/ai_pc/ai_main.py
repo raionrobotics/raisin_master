@@ -311,15 +311,26 @@ def main():
     if not yolo:   # the copy shipped in the ReasonNav checkout, else the training machine's path
         cand = os.path.abspath(os.path.join(a.mmdev, "..", "..", "room_finder_assets", "weights", "doordetect_oi", "best.pt"))
         yolo = cand if os.path.exists(cand) else "/home/user/yolo_ws/runs/doordetect_oi/weights/best.pt"
+        # a TensorRT fp16 build of it next to it wins (Jetson: 42 vs 60 ms per 12 MP frame, and it leaves GPU time to GDINO):
+        # yolo export model=best.pt format=engine half=True imgsz=960 -> rename to best_960_fp16.engine
+        trt = os.path.join(os.path.dirname(yolo), "best_960_fp16.engine")
+        yolo = trt if os.path.exists(trt) else yolo
     if not a.env_key:   # a stale OPENAI_API_KEY in the shell must not shadow mm_dev/config/.env
         os.environ.pop("OPENAI_API_KEY", None)
         os.environ.setdefault("REASONNAV_ENV", os.path.join(a.mmdev, "config", ".env"))   # the VLM's own default is the dev PC's path
     rosless.Node.param_overrides = {
         "room_perception": {"out_dir": out + "/perception", "yolo_weights": yolo,
-                            # one camera per call, round robin; the loop sleeps 1/gdino_hz and then waits for the reply
-                            "gdino_hz": float(os.environ.get("GDINO_HZ", "1.0")),
-                            # the real cameras are 1280 px wide: a 40 cm strip sign is ~90 px at 2.5 m
-                            "sign_min_px": float(os.environ.get("SIGN_MIN_PX", "70")),
+                            # one camera per call, round robin. 0 = no wait: each camera's newest frame once, GDINO_WORKERS requests in
+                            # flight (~1 Hz per camera with the 960x720 engine: gdino_trt/build_engine.sh, W=960 H=720 SHORT=720)
+                            "gdino_hz": float(os.environ.get("GDINO_HZ", "0")),
+                            "gdino_workers": int(os.environ.get("GDINO_WORKERS", "2")),
+                            "gdino_width": int(os.environ.get("GDINO_WIDTH", "960")),   # must match the engine's image size
+                            # pixel thresholds are given at 1280 px width; IMX378 (82.7 deg) at 1280 px: a 40 cm strip sign is ~116 px at 2.5 m.
+                            # 90 keeps the OV9782's cut (70 at 97 deg): signs count from ~3.2 m
+                            "sign_min_px": float(os.environ.get("SIGN_MIN_PX", "90")),
+                            # Tesseract word-count gate before the VLM sign read: off. On the 10-28 crops it passed 1 of 33 signs the VLM
+                            # read correctly (the T1xx~T1xx strips, Korean text), and three misses mark a sign "not a sign" for good
+                            "sign_ocr_words": int(os.environ.get("SIGN_OCR_WORDS", "0")),
                             "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5")),
                             "label_nearest_door": os.environ.get("LABEL_NEAREST_DOOR", "1") == "1",
                             # detections beyond 5 m are ignored (door / plate / sign positions and sizes are least accurate there)
@@ -371,8 +382,8 @@ def main():
                      # a person walking by can hold the robot up: only call it stuck after this many seconds without moving
                      "stuck_s": float(os.environ.get("STUCK_S", "45")),
                      "pass_seen_s": float(os.environ.get("PASS_SEEN_S", "0.5")),
-                     # seen = within VIEW_OBJ_DIST (2 m) and inside the 3 cameras' view (yaw 0 / +-90 deg, hfov 97 deg -> half angle ~138 deg)
-                     "view_half_fov": math.radians(float(os.environ.get("VIEW_HALF_FOV_DEG", "138"))),
+                     # seen = within VIEW_OBJ_DIST (2 m) and inside the 3 cameras' view (yaw 0 / +-90 deg, IMX378 lens edges at +-47 deg -> half angle ~137 deg)
+                     "view_half_fov": math.radians(float(os.environ.get("VIEW_HALF_FOV_DEG", "137"))),
                         "belief_signs": a.belief_signs,
                         "belief_commit": os.environ.get("BELIEF_COMMIT", "true").lower() == "true",
                         "belief_range": float(os.environ.get("BELIEF_RANGE", "25")),

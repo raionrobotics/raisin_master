@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Grounding DINO -> ONNX (fixed prompt, 1280x800) -> TensorRT fp16 engine, then a detection check against PyTorch.
 #   build_engine.sh [OUT_DIR=~/gdino_trt] [frames for the check: *.jpg ...]
+#   W=960 H=720 SHORT=720 build_engine.sh ~/gdino_trt_960x720   (4:3 frames of the IMX378 cameras, processed at 960x720)
 # Run with the venv that has torch + transformers + onnx; trtexec from JetPack (/usr/src/tensorrt/bin) or PATH.
 # onnx:  pip install onnx && pip install "numpy==1.26.4"   (onnx pulls numpy 2.x; the Jetson torch wheel wants 1.26.
 #        onnx 1.23 + ml_dtypes 0.6 + numpy 1.26 imports fine; pip check still warns about ml_dtypes)
@@ -12,7 +13,7 @@ OUT=${1:-$HOME/gdino_trt}; shift || true
 PY=${PY:-$HOME/room_finder_venv/bin/python}
 TRTEXEC=${TRTEXEC:-$(command -v trtexec || echo /usr/src/tensorrt/bin/trtexec)}
 mkdir -p "$OUT"
-[ -f "$OUT/gdino.onnx" ] || "$PY" "$HERE/export_gdino_onnx.py" --out "$OUT/gdino.onnx"
+[ -f "$OUT/gdino.onnx" ] || "$PY" "$HERE/export_gdino_onnx.py" --out "$OUT/gdino.onnx" --w "${W:-1280}" --h "${H:-800}" --short "${SHORT:-800}"
 [ -f "$OUT/gdino_fp16.engine" ] || "$TRTEXEC" --onnx="$OUT/gdino.onnx" --saveEngine="$OUT/gdino_fp16.engine" --fp16 | tee "$OUT/trtexec_fp16.log" | grep -E "Throughput|GPU Compute Time|Error"
 cp "$OUT/gdino.onnx.meta.json" "$OUT/gdino_fp16.engine.meta.json"
 [ $# -gt 0 ] && "$PY" "$HERE/parity.py" --engine "$OUT/gdino_fp16.engine" --meta "$OUT/gdino.onnx.meta.json" --trtexec "$TRTEXEC" "$@"

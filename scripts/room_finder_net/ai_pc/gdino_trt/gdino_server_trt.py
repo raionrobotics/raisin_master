@@ -39,8 +39,10 @@ if not meta_path:
     raise SystemExit("no meta.json for %s (use --meta)" % a.engine)
 meta = json.load(open(meta_path))
 proc = AutoProcessor.from_pretrained(meta["model"])
+if meta.get("proc_size"):     # engines built for another processed size (e.g. 960x720 for 4:3 frames)
+    proc.image_processor.size = meta["proc_size"]
 input_ids = torch.tensor(meta["input_ids"])
-lock = threading.Lock()
+lock = threading.Lock()     # only the GPU step: preprocessing and post-processing of concurrent requests overlap it
 
 
 class Engine:
@@ -84,14 +86,16 @@ def detect(img, prompt, box_thr, text_thr):
     if prompt == meta["prompt"]:
         pv = proc.image_processor(images=img, return_tensors="pt")["pixel_values"]
         if list(pv.shape) == meta["pixel_values_shape"]:
-            lg, bx = engine(pv.cuda())
+            with lock:
+                lg, bx = engine(pv.cuda())
             return post(lg, bx, input_ids, img, box_thr, text_thr), "trt"
-    if torch_model is None:
-        from transformers import AutoModelForZeroShotObjectDetection
-        torch_model = AutoModelForZeroShotObjectDetection.from_pretrained(meta["model"]).cuda().eval()
-    inputs = proc(images=img, text=prompt, return_tensors="pt").to("cuda")
-    with torch.autocast("cuda", dtype=torch.float16):
-        o = torch_model(**inputs)
+    with lock:
+        if torch_model is None:
+            from transformers import AutoModelForZeroShotObjectDetection
+            torch_model = AutoModelForZeroShotObjectDetection.from_pretrained(meta["model"]).cuda().eval()
+        inputs = proc(images=img, text=prompt, return_tensors="pt").to("cuda")
+        with torch.autocast("cuda", dtype=torch.float16):
+            o = torch_model(**inputs)
     return post(o.logits.float().cpu(), o.pred_boxes.float().cpu(), inputs.input_ids.cpu(), img, box_thr, text_thr), "torch"
 
 
@@ -116,8 +120,7 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             img = Image.open(io.BytesIO(base64.b64decode(req["image"]))).convert("RGB")
             t0 = time.time()
-            with lock:
-                dets, backend = detect(img, req["prompt"], float(req.get("box_thr", 0.25)), float(req.get("text_thr", 0.2)))
+            dets, backend = detect(img, req["prompt"], float(req.get("box_thr", 0.25)), float(req.get("text_thr", 0.2)))
             self._send({"dets": dets, "ms": (time.time() - t0) * 1e3, "backend": backend})
         except Exception as e:  # noqa: BLE001
             self._send({"error": repr(e)}, 500)
