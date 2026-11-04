@@ -305,7 +305,8 @@ def main():
     apply_rig(rig)
     if a.dummy_vlm:
         install_dummy_vlm()
-    out = a.out_dir or os.path.expanduser("~/raisin_ws/log/room_finder_net/%s_T%s" % (time.strftime("%Y%m%d_%H%M%S"), a.target))
+    ws = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))   # the workspace holding this script
+    out = a.out_dir or os.path.join(ws, "log", "room_finder_net", "%s_T%s" % (time.strftime("%Y%m%d_%H%M%S"), a.target))
     os.makedirs(out, exist_ok=True)
     if oak is not None:
         oak.expo_file = open(os.path.join(out, "camera_exposure.jsonl"), "a")

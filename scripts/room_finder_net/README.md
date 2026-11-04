@@ -67,6 +67,48 @@ HF_HUB_OFFLINE=1 GDINO_VENV=~/room_finder_venv ~/room_finder_deploy/ReasonNav/ro
 * `--dummy-vlm`: no OpenAI call. Plate reads answer "no plate", sign reads "no cues", belief queries "no region": the finder explores
   frontiers and detects doors / signs, but cannot confirm a room number (no success without a VLM or another number reader).
 
+## Real robot runs (Raibo2, KR-RND-2508-001, as of 2026-11-04)
+The defaults in `ai_main.py` / `rig_real.yaml` are the real-robot settings; nothing needs to be set for a normal run. Run from the
+workspace that holds these scripts (logs go to `<workspace>/log/room_finder_net/<time>_T<target>/`).
+```
+# robot PC (after standing the robot up and starting mapping)
+cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
+  ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -60 -60 60 60
+# AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames), then the finder
+HF_HUB_OFFLINE=1 ~/room_finder_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/gdino_trt/gdino_server_trt.py --engine ~/gdino_trt/gdino_fp16.engine
+cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
+  RF_PARAMS=room_finder.belief_sign_steer=true,room_finder.sign_seek=100,room_finder.sign_lock=true \
+  ROOM_FINDER_VLM=gpt-5.4-mini ROOM_FINDER_BELIEF_VLM=gpt-5-mini \
+  ~/room_finder_venv/bin/python ai_pc/ai_main.py --target T113 --robot-id KR-RND-2508-001 --iface enP5p3s0 \
+  --cameras local --rig ai_pc/rig_real.yaml --mmdev ~/ReasonNav/src/mm_dev
+```
+Before a run:
+* The AI PC needs internet (LTE): every plate / sign read and belief query is an OpenAI call. Check with `ping 8.8.8.8`.
+* The AI PC needs a gigabit link to the PoE switch: three 12 MP cameras use ~470 Mbit/s.
+* raisin::Network versions must match: robot node, gateway `raisin_py`, AI PC `raisin_py`
+  (`install/include/raisin_network/network.hpp`, `version_`). The robot PC's `raisin_ota_agent` installs releases into `~/raisin_ws`
+  and restarts the robot service. After an update, install the same release on the AI PC
+  (`python3 raisin.py -y install --all --archive-version <ver>`, then rebuild `install/` from `release/versions/<gen>`) and rebuild
+  `raisin_py` on both PCs.
+
+What was changed for the real building (env variable in `ai_main.py` = ReasonNav parameter, all default on here, off in the sim):
+| env (default) | what |
+|---|---|
+| `GDINO_HZ=0 GDINO_WORKERS=2 GDINO_WIDTH=960` | GDINO without wait, 2 requests in flight: ~1.1 Hz per camera with the YOLO TensorRT engine |
+| `DARK_ENHANCE=70` | luma stretch + CLAHE for dark crops before the VLM |
+| `SIGN_OCR_WORDS=0` | Tesseract gate off (it rejected 32 of 33 real signs) |
+| `SIGN_OVERWRITE=1` | a later comparable sign read replaces unconfirmed (misread) entries |
+| `DET_REACH_M=1.5` | doors / signs > 1.5 m off the traversable area are dropped; room plates never are |
+| `FRONTIER_ON_FREE=1` | frontiers from free cells: narrow corridor ends (2 m, inflated walls) still count |
+| `GOAL_UNLOOKED=1` | a VLM goal inside the looked-at area is moved on along robot -> goal |
+| `BELIEF_CONSENSUS=4` | a VLM goal is weighted by how many of the last 4 answers agree (one flipped answer does not switch wings) |
+| `BELIEF_OPENINGS=1` | lettered frontier openings on the VLM map; a `via` opening is used only if it leads toward the goal |
+| gateway `--dynamic-cap 1.5 --dynamic-clear-s 3` | cells seen free before (people walking by) clear after 3 s without hits |
+
+Each run also writes `camera_exposure.jsonl` (exposure / ISO / grey per colour frame). Known open issues: the robot sometimes stands
+still with a goal (navigation plugin "Start occupied", SLAM odometry dropouts, or no logged reason); the VLM reads the T101~T126 arrow
+literally (north) until plates of that hallway are read.
+
 ## Simulation check (one machine, no ROS environment)
 ```
 scripts/room_finder_net/run_net_sim.sh --goal 3014      # tmux session room_finder_net; --kill to stop
