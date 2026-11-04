@@ -70,7 +70,7 @@ def install_command(
     at_timestamp: Optional[str] = None,
     tag: Optional[str] = None,
     include_local: bool = False,
-    strict_local_version: bool = False,
+    allow_local_version_mismatch: bool = False,
     upgrade: bool = False,
     all_packages: bool = False,
 ) -> bool:
@@ -91,7 +91,7 @@ def install_command(
             at_timestamp,
             tag,
             include_local,
-            strict_local_version,
+            allow_local_version_mismatch,
             upgrade,
             all_packages,
         )
@@ -118,7 +118,7 @@ def _install(
     at_timestamp: Optional[str] = None,
     tag: Optional[str] = None,
     include_local: bool = False,
-    strict_local_version: bool = False,
+    allow_local_version_mismatch: bool = False,
     upgrade: bool = False,
     all_packages: bool = False,
 ) -> bool:
@@ -138,9 +138,10 @@ def _install(
             back to legacy latest-by-time selection. Ignored when
             `archive_version` is provided.
         include_local (bool): Also resolve dependencies of local src/ packages.
-        strict_local_version (bool): Fail instead of warning when an active
-            source version does not satisfy its requested conditions. Sources
-            remain selected in either mode, matching setup/build.
+        allow_local_version_mismatch (bool): Warn and continue instead of
+            failing when an active source version does not satisfy its
+            requested conditions. Sources remain selected in either mode,
+            matching setup/build.
         upgrade (bool): Query latest OTA packages unless a tag was selected;
             never silently downgrade an installed binary.
         all_packages (bool): Use every package in the selected OTA archive as
@@ -306,7 +307,7 @@ def _install(
             refresh_from_ota,
             explicit_archive_pin,
             transaction,
-            strict_local_version,
+            allow_local_version_mismatch,
             local_version_overrides,
             initial_results,
         )
@@ -421,7 +422,7 @@ def _resolve_packages(
     refresh_from_ota,
     explicit_archive_pin,
     transaction,
-    strict_local_version,
+    allow_local_version_mismatch,
     local_version_overrides,
     initial_results,
 ):
@@ -472,7 +473,7 @@ def _resolve_packages(
             spec_str = str(spec)
 
         # An unconstrained source root may have no version. Do not let that
-        # visit suppress a later explicit >=0.0.0 requirement in strict mode.
+        # visit suppress a later explicit >=0.0.0 requirement.
         request = (package_name, str(spec), bool(spec_str))
         if request in processed_specs:
             print(
@@ -527,15 +528,20 @@ def _resolve_packages(
                 )
                 return False
             version_str = release_info.get("version")
-            if version_str:
+            if package_type == "local source" and not spec_str:
+                # Nobody asked for a version: any local source is fine (a dev or
+                # working-tree version included). A later explicit requirement
+                # visits it again and is checked then.
+                is_valid = True
+            elif version_str:
                 try:
                     is_valid = spec.contains(parse_version(str(version_str)))
                 except InvalidVersion:
                     is_valid = False
             else:
-                is_valid = package_type == "local source" and not spec_str
+                is_valid = False
             if not is_valid:
-                if package_type == "local source" and not strict_local_version:
+                if package_type == "local source" and allow_local_version_mismatch:
                     local_version_overrides[package_name] = {
                         "path": path,
                         "version": str(version_str or "unknown"),
@@ -557,14 +563,15 @@ def _resolve_packages(
                 )
                 if package_type == "local source":
                     print(
-                        "   --strict-local-version makes this mismatch an error; "
-                        "without it, the source is retained with a warning."
+                        f"   Set the version in {release_yaml_path} to one that satisfies "
+                        f"'{spec}' or change the requirement. Pass --allow-local-version-mismatch "
+                        "only to use this source on purpose ('raisin build' builds it)."
                     )
                 return False
             install_queue.extend(dependencies)
             reason = (
                 f"satisfies '{spec}'"
-                if version_str
+                if spec_str
                 else "no version constraint requested"
             )
             print(
@@ -743,9 +750,9 @@ def _with_install_state_lock(function):
     help="Also resolve dependencies of local src/ packages alongside the requested packages. Source packages are not built by this command.",
 )
 @click.option(
-    "--strict-local-version",
+    "--allow-local-version-mismatch",
     is_flag=True,
-    help="Fail on active src/ version mismatches. By default, keep sources as setup/build does, warn and resolve their dependencies. Metadata and binary errors still fail.",
+    help="Keep an active src/ package whose version does not satisfy a requirement, warn and resolve its dependencies. By default such a mismatch fails. Metadata and binary errors fail either way.",
 )
 @click.option(
     "--type",
@@ -799,7 +806,7 @@ def install_cli_command(
     at_timestamp,
     tag,
     include_local=False,
-    strict_local_version=False,
+    allow_local_version_mismatch=False,
     upgrade=False,
     all_packages=False,
 ):
@@ -811,15 +818,15 @@ def install_cli_command(
     local source roots are automatic. Use --all to install every package in an
     OTA archive; without targets or sources, no whole archive is installed.
     Active sources take precedence over installed or OTA binaries, including
-    when a tag is specified. Source version mismatches warn and continue with
-    that source's dependencies. Compatible
+    when a tag is specified. A source whose version does not satisfy a
+    requirement fails the install. Compatible
     installed binaries are reused unless an OTA selection is explicit.
     Downloads are prepared in versions/ and activated together only after
     dependency checks succeed. Sources are built separately by 'raisin build'.
 
-    --strict-local-version makes source version mismatches (including unknown
-    versions with explicit constraints) an error. By default, those sources
-    are retained with a warning and summary.
+    --allow-local-version-mismatch keeps such sources (including unknown
+    versions with explicit constraints) with a warning and summary instead.
+    By default the mismatch is an error.
     Unreadable source manifests, missing dependencies and binary conflicts fail.
 
     --upgrade queries latest OTA packages unless --tag selects another channel.
@@ -837,7 +844,7 @@ def install_cli_command(
         raisin install --all --upgrade               # Refresh all archive packages from latest
         raisin install --include-local               # Resolve local source dependencies
         raisin install raisin_gui --include-local    # GUI plus local source dependencies
-        raisin install raisin_gui --strict-local-version  # Fail on source version mismatches
+        raisin install raisin_gui --allow-local-version-mismatch  # Keep a source of another version
         raisin install raisin_gui --upgrade           # Update binaries from latest, retaining sources
         raisin install raisin_gui --upgrade --tag stable  # Update within the stable channel
         raisin install raisin_network                # Install specific package
@@ -884,7 +891,7 @@ def install_cli_command(
             at_timestamp,
             tag=tag,
             include_local=include_local,
-            strict_local_version=strict_local_version,
+            allow_local_version_mismatch=allow_local_version_mismatch,
             upgrade=upgrade,
             all_packages=all_packages,
         )

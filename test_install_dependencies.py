@@ -285,21 +285,21 @@ def test_incompatible_installed_dependency_is_replaced_from_ota(workspace, capsy
     assert "does not satisfy '>=0.3.9'. Checking OTA" in capsys.readouterr().out
 
 
-def test_strict_local_version_fails_instead_of_hiding_source_with_a_binary(
+def test_source_version_mismatch_fails_by_default_instead_of_hiding_source_with_a_binary(
     workspace, capsys
 ):
-    workspace.source("raisin", "0.3.6")
+    source = workspace.source("raisin", "0.3.6")
     workspace.publish("raisin_gui", dependencies=["raisin>=0.3.9"])
     workspace.publish("raisin", "0.3.10")
 
-    assert not install.install_command(
-        ["raisin_gui"], "release", strict_local_version=True
-    )
+    assert not install.install_command(["raisin_gui"], "release")
 
     output = capsys.readouterr().out
     assert "0.3.6" in output
     assert "Local source 'raisin' cannot satisfy '>=0.3.9'" in output
     assert "repos_to_ignore" in output
+    assert str(source / "release.yaml") in output
+    assert "--allow-local-version-mismatch" in output
     assert workspace.transfers == ["raisin_gui"]
     assert not workspace.package_dir("raisin_gui").exists()
     assert "Installation process finished with errors" in output
@@ -307,7 +307,7 @@ def test_strict_local_version_fails_instead_of_hiding_source_with_a_binary(
 
 
 @pytest.mark.parametrize("source_version", ["0.3.6", None, "working-tree"])
-def test_default_keeps_mismatched_source_and_installs_all_other_dependencies(
+def test_allowed_mismatch_keeps_source_and_installs_all_other_dependencies(
     workspace, capsys, source_version
 ):
     source = workspace.source("raisin", source_version, ["source_helper"])
@@ -317,7 +317,12 @@ def test_default_keeps_mismatched_source_and_installs_all_other_dependencies(
     workspace.publish("source_helper")
     workspace.publish("gui_helper")
 
-    assert install.install_command(["raisin_gui"], "release", tag="latest")
+    assert install.install_command(
+        ["raisin_gui"],
+        "release",
+        tag="latest",
+        allow_local_version_mismatch=True,
+    )
 
     assert workspace.transfers == ["raisin_gui", "gui_helper", "source_helper"]
     assert not workspace.package_dir("raisin").exists()
@@ -337,7 +342,9 @@ def test_local_version_warning_does_not_hide_other_dependency_failures(
     workspace.publish("gui", "2.0.0", ["raisin>=0.3.9", "available_dependency"])
     workspace.publish("available_dependency")
 
-    assert not install.install_command(["gui"], "release", tag="latest")
+    assert not install.install_command(
+        ["gui"], "release", tag="latest", allow_local_version_mismatch=True
+    )
 
     assert workspace.transfers == ["gui", "available_dependency"]
     assert (workspace.root / "release/install").resolve() == previous
@@ -353,14 +360,16 @@ def test_local_version_warning_does_not_ignore_binary_version_constraints(
     workspace.source("raisin_gui", "0.2.7", ["shared>=2"])
     workspace.publish("shared", "1.0.0")
 
-    assert not install.install_command(["raisin_gui>=0.3"], "release")
+    assert not install.install_command(
+        ["raisin_gui>=0.3"], "release", allow_local_version_mismatch=True
+    )
     assert not workspace.transfers
     assert "Could not resolve 'shared' (required: '>=2')" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("strict", [False, True])
-def test_cli_source_version_policy_defaults_to_warning_and_supports_strict_mode(
-    workspace, monkeypatch, strict
+@pytest.mark.parametrize("allow", [False, True])
+def test_cli_source_version_policy_defaults_to_failure_and_can_be_allowed(
+    workspace, monkeypatch, allow
 ):
     workspace.source("raisin_gui", "0.2.7", ["source_helper"])
     workspace.publish("source_helper")
@@ -372,13 +381,13 @@ def test_cli_source_version_policy_defaults_to_warning_and_supports_strict_mode(
     ):
         monkeypatch.setattr(install, name, lambda *args, **kwargs: None)
     arguments = ["raisin_gui>=0.3"]
-    if strict:
-        arguments.append("--strict-local-version")
+    if allow:
+        arguments.append("--allow-local-version-mismatch")
 
     result = CliRunner().invoke(install.install_cli_command, arguments)
 
-    assert result.exit_code == (1 if strict else 0), result.output
-    if strict:
+    assert result.exit_code == (0 if allow else 1), result.output
+    if not allow:
         assert not workspace.transfers
         assert "Local source 'raisin_gui' cannot satisfy '>=0.3'" in result.output
     else:
@@ -386,9 +395,53 @@ def test_cli_source_version_policy_defaults_to_warning_and_supports_strict_mode(
         assert "Local source version warnings" in result.output
 
 
-@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("source_version", ["1.0.0.dev1", "working-tree", None])
+def test_unconstrained_local_source_passes_by_default_whatever_its_version(
+    workspace, capsys, source_version
+):
+    workspace.source("local_plugin", source_version, ["source_helper"])
+    workspace.publish("gui", dependencies=["local_plugin"])
+    workspace.publish("source_helper")
+
+    assert install.install_command(["gui"], "release")
+
+    output = capsys.readouterr().out
+    assert workspace.transfers == ["gui", "source_helper"]
+    assert "cannot satisfy" not in output
+    assert "Local source version warnings" not in output
+
+
+@pytest.mark.parametrize("source_version, ok", [("0.4.0", True), ("0.2.0", False)])
+def test_unconstrained_visit_first_still_checks_a_later_explicit_requirement(
+    workspace, capsys, source_version, ok
+):
+    workspace.source("local_plugin", source_version)
+    workspace.publish("first", dependencies=["local_plugin"])
+    workspace.publish("second", dependencies=["local_plugin>=0.3"])
+
+    assert install.install_command(["first", "second"], "release") == ok
+
+    output = capsys.readouterr().out
+    assert ("Local source 'local_plugin' cannot satisfy '>=0.3'" in output) != ok
+
+
+@pytest.mark.parametrize("source_version, ok", [("0.4.0", True), ("0.6.0", False)])
+def test_requirements_merged_in_sequence_are_all_checked_against_the_source(
+    workspace, capsys, source_version, ok
+):
+    workspace.source("local_plugin", source_version)
+    workspace.publish("first", dependencies=["local_plugin>=0.3"])
+    workspace.publish("second", dependencies=["local_plugin<0.5"])
+
+    assert install.install_command(["first", "second"], "release") == ok
+
+    output = capsys.readouterr().out
+    assert ("cannot satisfy" in output) != ok
+
+
+@pytest.mark.parametrize("allow", [False, True])
 def test_unversioned_source_root_does_not_hide_a_later_explicit_requirement(
-    workspace, capsys, strict
+    workspace, capsys, allow
 ):
     workspace.source("local_plugin", None)
     workspace.publish("gui", dependencies=["local_plugin>=0.0.0"])
@@ -397,11 +450,11 @@ def test_unversioned_source_root_does_not_hide_a_later_explicit_requirement(
         ["gui"],
         "release",
         include_local=True,
-        strict_local_version=strict,
-    ) == (not strict)
+        allow_local_version_mismatch=allow,
+    ) == allow
 
     output = capsys.readouterr().out
-    if strict:
+    if not allow:
         assert "Local source 'local_plugin' cannot satisfy '>=0.0.0'" in output
         assert not workspace.package_dir("gui").exists()
     else:
@@ -820,7 +873,9 @@ def test_upgrade_preserves_sources_and_updates_missing_or_installed_binary_depen
     workspace.publish("gui", "2.0.0", ["binary_only_dependency"])
     workspace.publish("shared", "2.0.0")
 
-    assert install.install_command(["gui>=2"], "release", upgrade=True)
+    assert install.install_command(
+        ["gui>=2"], "release", upgrade=True, allow_local_version_mismatch=True
+    )
 
     assert workspace.transfers == ["shared"]
     assert yaml.safe_load((source / "release.yaml").read_text())["version"] == "1.0.0"
