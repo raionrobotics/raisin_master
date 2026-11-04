@@ -24,6 +24,7 @@ class OakLocal:
         self.listeners = {}     # (cam, kind) -> [deliver]
         self.devices, self.stop = {}, threading.Event()
         self.stats, self.expo = {}, {}
+        self.expo_file = None       # set by the runner: one JSON line per colour frame (exposure ms, ISO, mean grey)
         self.depth_buf, self.buf_lock, self._last_depth, self.pair_dt = {}, threading.Lock(), {}, {}
         self.mono2wall = time.time() - time.monotonic()   # depthai timestamps are steady_clock (= time.monotonic)
 
@@ -174,6 +175,11 @@ class OakLocal:
         except Exception:  # noqa: BLE001
             pass
         s["lum"].append(float(img[::8, ::8].mean()))
+        if self.expo_file is not None and s["e"]:     # every frame, to match unreadable crops against the exposure later
+            with self.buf_lock:
+                self.expo_file.write('{"t": %.2f, "cam": "%s", "exp_ms": %.2f, "iso": %d, "grey": %.0f}\n' % (
+                    time.time(), cam, s["e"][-1], s["iso"][-1], s["lum"][-1]))
+                self.expo_file.flush()
         if time.time() - s["t"] >= 5.0:
             med = lambda v: float(np.median(v)) if v else float("nan")
             log.info("%s exposure %.2f ms  ISO %.0f  mean grey %.0f/255" % (cam, med(s["e"]), med(s["iso"]), med(s["lum"])))

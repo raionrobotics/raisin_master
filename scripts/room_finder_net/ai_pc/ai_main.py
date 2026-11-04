@@ -307,6 +307,8 @@ def main():
         install_dummy_vlm()
     out = a.out_dir or os.path.expanduser("~/raisin_ws/log/room_finder_net/%s_T%s" % (time.strftime("%Y%m%d_%H%M%S"), a.target))
     os.makedirs(out, exist_ok=True)
+    if oak is not None:
+        oak.expo_file = open(os.path.join(out, "camera_exposure.jsonl"), "a")
     yolo = a.yolo
     if not yolo:   # the copy shipped in the ReasonNav checkout, else the training machine's path
         cand = os.path.abspath(os.path.join(a.mmdev, "..", "..", "room_finder_assets", "weights", "doordetect_oi", "best.pt"))
@@ -331,6 +333,9 @@ def main():
                             # Tesseract word-count gate before the VLM sign read: off. On the 10-28 crops it passed 1 of 33 signs the VLM
                             # read correctly (the T1xx~T1xx strips, Korean text), and three misses mark a sign "not a sign" for good
                             "sign_ocr_words": int(os.environ.get("SIGN_OCR_WORDS", "0")),
+                            # crops for the VLM with median luma below this get a luma stretch + CLAHE (dim corridor, backlit doors:
+                            # 129 of 433 crops of the 11-04 T136 run had a median below 50 and the VLM read none of them); 0 = off
+                            "dark_enhance": float(os.environ.get("DARK_ENHANCE", "70")),
                             "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5")),
                             "label_nearest_door": os.environ.get("LABEL_NEAREST_DOOR", "1") == "1",
                             # detections beyond 5 m are ignored (door / plate / sign positions and sizes are least accurate there)
