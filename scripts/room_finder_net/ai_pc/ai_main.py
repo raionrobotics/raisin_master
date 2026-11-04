@@ -372,6 +372,10 @@ def main():
                      # the VLM put the T101~T126 goal in the open lobby north of the sign: the frontier openings are lettered on its map, it names the one
                      # to drive through (a sign stands at the hallway it points into; plates read in a hallway beat an arrow)
                      "belief_openings": os.environ.get("BELIEF_OPENINGS", "1") == "1",
+                     # 11-04 T113: the west corridor end (2 m wide, walls inflated) had a 4-cell traversable frontier, dropped as noise
+                     "frontier_on_free": os.environ.get("FRONTIER_ON_FREE", "1") == "1",
+                     # VLM goals inside the looked-at area are moved on along robot -> goal (no confidence lands on looked cells)
+                     "goal_unlooked": os.environ.get("GOAL_UNLOOKED", "1") == "1",
                      # unread signs scored 30 - path everywhere, so the lobby's decorations kept winning: lower base, plus the belief at the sign
                      "sign_base": float(os.environ.get("SIGN_BASE", "10")),
                      "sign_belief_w": float(os.environ.get("SIGN_BELIEF_W", "30")),

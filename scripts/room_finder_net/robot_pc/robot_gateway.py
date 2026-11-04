@@ -69,6 +69,10 @@ class Gateway:
         self.x0, self.y0 = xmin, ymin
         self.w, self.h = int(math.ceil((xmax - xmin) / res)), int(math.ceil((ymax - ymin) / res))
         self.logodds = np.zeros((self.h, self.w), dtype=np.float32)
+        # moving obstacles (people): a cell that was clearly seen free before and is hit later only gets a weak occupancy
+        # (--dynamic-cap) and goes back to free once no point has hit it for --dynamic-clear-s. Walls are never seen free.
+        self.free_seen = np.zeros((self.h, self.w), dtype=bool)
+        self.last_hit = np.zeros((self.h, self.w), dtype=np.float64)
         self.map_lock = threading.Lock()
         self.n_bins = 720
         self.scans = 0
@@ -160,7 +164,10 @@ class Gateway:
         with self.map_lock:
             flat = self.logodds.reshape(-1)
             flat[free_idx] = np.maximum(flat[free_idx] - 0.35, -4.0)
-            flat[hit_idx] = np.minimum(flat[hit_idx] + 0.9, 4.0)
+            seen = self.free_seen.reshape(-1)
+            seen[free_idx[flat[free_idx] <= -2.0]] = True
+            flat[hit_idx] = np.minimum(flat[hit_idx] + 0.9, np.where(seen[hit_idx], a.dynamic_cap, 4.0))
+            self.last_hit.reshape(-1)[hit_idx] = time.time()
             self.scans += 1
 
     def publish_map(self):
@@ -168,6 +175,9 @@ class Gateway:
             return
         with self.map_lock:
             lo = self.logodds
+            if self.a.dynamic_clear_s > 0:   # a person who walked on: the cell is free again (it was free before they came)
+                gone = self.free_seen & (lo > -0.4) & (time.time() - self.last_hit > self.a.dynamic_clear_s)
+                lo[gone] = -0.4
             known = np.abs(lo) > 0.05
             rows, cols = np.flatnonzero(known.any(axis=1)), np.flatnonzero(known.any(axis=0))
             if len(rows) == 0:
@@ -333,6 +343,10 @@ def main():
     ap.add_argument("--obstacle-below", type=float, default=0.3, help="obstacle band: this far below the lidar (m)")
     ap.add_argument("--obstacle-above", type=float, default=0.3, help="obstacle band: this far above the lidar (m)")
     ap.add_argument("--inflate", type=float, default=0.5, help="inflation radius around obstacles (m), 0 = off")
+    ap.add_argument("--dynamic-cap", type=float, default=1.5,
+                    help="max occupancy log-odds of a cell that was clearly free before (people walking by); walls get 4.0")
+    ap.add_argument("--dynamic-clear-s", type=float, default=3.0,
+                    help="such a cell is free again when no point has hit it for this long (s); 0 = off")
     ap.add_argument("--viz-port", type=int, default=8081, help="map viewer http port (0 = off)")
     ap.add_argument("--viz-host", default="0.0.0.0", help="address the viewer listens on")
     a = ap.parse_args()
