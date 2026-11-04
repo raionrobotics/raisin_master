@@ -45,9 +45,9 @@ def parse_version_specifier(spec_str: str) -> Optional[SpecifierSet]:
         clause = r"[<>=!~]+\s*[^\s,<>=!~]+"
         specifiers = re.findall(clause, spec_str)
         if specifiers:
-            if re.sub(clause, "", spec_str).strip(" ,"):
+            if re.sub(clause, "", spec_str).replace(",", "").strip():
                 return None
-            return SpecifierSet(", ".join(s.replace(" ", "") for s in specifiers))
+            return SpecifierSet(", ".join(re.sub(r"\s", "", s) for s in specifiers))
 
         # If no operators found, treat as exact version match
         if re.fullmatch(r"[^\s,<>=!~]+", spec_str):

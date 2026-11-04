@@ -318,6 +318,8 @@ def test_source_version_mismatch_fails_by_default_instead_of_hiding_source_with_
         (">=1.0 <2.0", "1.5", True),
         (">=1.0, <2.0", "2.0", False),
         ("1.0.0rc1", "1.0.0rc1", True),
+        (">=1.0,\t<2.0", "1.5", True),
+        (">=\t1.0", "1.0", True),
     ],
 )
 def test_requirement_keeps_its_pre_release_suffix(spec, version, expected):
@@ -327,6 +329,14 @@ def test_requirement_keeps_its_pre_release_suffix(spec, version, expected):
 @pytest.mark.parametrize("spec", [">=1.0 latest", "==1.0.0 or 2.0", "1.0 2.0", ">="])
 def test_requirement_with_an_unparsable_part_is_rejected_not_narrowed(spec):
     assert install.parse_version_specifier(spec) is None
+
+
+def test_tab_separated_requirement_is_checked_against_the_source(workspace, capsys):
+    workspace.source("local_plugin", "1.5")
+    workspace.publish("gui", dependencies=["local_plugin>=1.0,\t<2.0"])
+
+    assert install.install_command(["gui"], "release")
+    assert "cannot satisfy" not in capsys.readouterr().out
 
 
 def test_pre_release_requirement_is_not_met_by_the_release_source(workspace, capsys):
