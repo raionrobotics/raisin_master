@@ -336,6 +336,9 @@ def main():
                             # crops for the VLM with median luma below this get a luma stretch + CLAHE (dim corridor, backlit doors:
                             # 129 of 433 crops of the 11-04 T136 run had a median below 50 and the VLM read none of them); 0 = off
                             "dark_enhance": float(os.environ.get("DARK_ENHANCE", "70")),
+                            # a later comparable sign read replaces unconfirmed entries (11-04 T140: T131~T150 was also kept as
+                            # "T135-T150" and "101~110" from two misreads); entries read the same way twice stay
+                            "sign_overwrite": os.environ.get("SIGN_OVERWRITE", "1") == "1",
                             "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5")),
                             "label_nearest_door": os.environ.get("LABEL_NEAREST_DOOR", "1") == "1",
                             # detections beyond 5 m are ignored (door / plate / sign positions and sizes are least accurate there)
