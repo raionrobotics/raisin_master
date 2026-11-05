@@ -1232,6 +1232,11 @@ def create_action_file(action_file, project_directory, install_dir):
     file_path = msg_dir / f"{class_name}FeedbackMessage.msg"
     file_path.write_text(feedback_message_content)
 
+    return (
+        [str(msg_dir / name) for name in message_definitions] + [str(file_path)],
+        [str(srv_dir / f"{class_name}SendGoal.srv"), str(srv_dir / f"{class_name}GetResult.srv")],
+    )
+
 
 def create_message_file(msg_file, project_directory, install_dir):
     """
@@ -2193,9 +2198,26 @@ def setup(
         click.echo(f"🎯 target: {target.slug} (profile '{target.profile}')")
         click.echo(f"📦 packages: {', '.join(sorted(packages_allowed))}")
 
-    interface_dirs = [str(path) for path in source_packages.values()] if cross else ["src"]
+    if cross:
+        interface_dirs = [str(path) for path in source_packages.values()]
+        interface_repos_to_ignore = repos_to_ignore
+    elif package_name:
+        # Package publishing reads only this checkout. A repository can be
+        # excluded from the aggregate workspace build while still being the
+        # source of the package currently being published (for example,
+        # raisin_ros2_messages). Keep it excluded from CMake discovery above,
+        # but allow its interface definitions into this package's archive.
+        interface_dirs = [src_dir]
+        source_repo = Path(package_name).parts[0]
+        interface_repos_to_ignore = [
+            repo for repo in repos_to_ignore if repo != source_repo
+        ]
+    else:
+        interface_dirs = ["src"]
+        interface_repos_to_ignore = repos_to_ignore
     action_files = find_interface_files(
-        interface_dirs, ["action"], packages_to_ignore, repos_to_ignore, packages_allowed
+        interface_dirs, ["action"], packages_to_ignore,
+        interface_repos_to_ignore, packages_allowed
     )[0]
 
     project_dirs = [f"src/{name}" for name in target.source_repositories] if cross else [src_dir]
@@ -2205,15 +2227,29 @@ def setup(
     )
     runtime_prefix.make_scripts_executable(Path(g.script_directory) / install_dir)
 
-    # Handle .action files
+    # Track only outputs generated during this invocation for a package publish.
+    # The shared temp tree may contain older actions from the same ROS package.
+    generated_msgs, generated_srvs = [], []
     for action_file in action_files:
-        create_action_file(action_file, Path(action_file).parent.parent, install_dir)
+        generated = create_action_file(action_file, Path(action_file).parent.parent, install_dir)
+        if generated:
+            generated_msgs.extend(generated[0])
+            generated_srvs.extend(generated[1])
 
-    temp_dirs = [f"temp/{name}" for name in source_packages] if cross else ["temp"]
+    if cross:
+        temp_dirs = [f"temp/{name}" for name in source_packages]
+    elif package_name:
+        temp_dirs = []
+    else:
+        temp_dirs = ["temp"]
     msg_files, srv_files = find_interface_files(
-        interface_dirs + temp_dirs, ["msg", "srv"], packages_to_ignore, repos_to_ignore,
+        interface_dirs + temp_dirs, ["msg", "srv"], packages_to_ignore,
+        interface_repos_to_ignore,
         packages_allowed
     )
+    if package_name and not cross:
+        msg_files.extend(generated_msgs)
+        srv_files.extend(generated_srvs)
 
     # Handle .msg files
     for msg_file in msg_files:
