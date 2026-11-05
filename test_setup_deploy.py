@@ -115,6 +115,10 @@ class TestSetupDeploy(unittest.TestCase):
         stale_temp.parent.mkdir(parents=True)
         stale_temp.write_text("uint8 value\n", encoding="utf-8")
 
+        stale_same_package = self.root / "temp" / "sensor_msgs" / "msg" / "OldActionGoal.msg"
+        stale_same_package.parent.mkdir(parents=True, exist_ok=True)
+        stale_same_package.write_text("uint8 stale\n", encoding="utf-8")
+
         templates = Path(__file__).parent / "templates"
         (self.root / "templates").mkdir()
         for name in (
@@ -170,6 +174,7 @@ class TestSetupDeploy(unittest.TestCase):
         with zipfile.ZipFile(archive) as published:
             self.assertIn("messages/sensor_msgs/msg/Imu.msg", published.namelist())
             self.assertIn("messages/sensor_msgs/msg/InspectGoal.msg", published.namelist())
+            self.assertNotIn("messages/sensor_msgs/msg/OldActionGoal.msg", published.namelist())
             self.assertNotIn(
                 "messages/other_msgs/msg/MustNotShip.msg", published.namelist()
             )
