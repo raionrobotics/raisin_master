@@ -66,10 +66,10 @@ def print_help():
         f"  {'':<22} '--upgrade' queries latest OTA versions and hashes while retaining active sources and newer installed binaries."
     )
     print(
-        f"  {'':<22} Active sources take precedence; source version mismatches warn and continue resolving dependencies."
+        f"  {'':<22} Active sources take precedence; a source that does not satisfy an explicit version requirement fails the install."
     )
     print(
-        f"  {'':<22} '--strict-local-version' makes source version mismatches an error."
+        f"  {'':<22} '--allow-local-version-mismatch' keeps such a source on purpose, with a warning ('--strict-local-version' is gone)."
     )
     print(
         f"  {'':<22} Logs local reuse; '--tag latest' refreshes binaries while retaining active sources."

@@ -513,18 +513,18 @@ class Verification:
         local = self.workspace("local-source")
         source = self.source(local, "gui", "0.1.0", [n["core"] + ">=2"])
         self.run(
-            "source-target-retained",
+            "source-version-mismatch-fails",
             local,
             [n["gui"] + ">=2", "--upgrade"],
-            packages={n["core"]: "2.0.0", n["leaf"]: "2.0.0"},
-            log_contains=("despite required",),
-        )
-        self.run(
-            "source-version-strict",
-            local,
-            [n["gui"] + ">=2", "--strict-local-version"],
             expected=1,
             preserve=True,
+        )
+        self.run(
+            "source-target-retained",
+            local,
+            [n["gui"] + ">=2", "--upgrade", "--allow-local-version-mismatch"],
+            packages={n["core"]: "2.0.0", n["leaf"]: "2.0.0"},
+            log_contains=("despite required",),
         )
         consumer = self.workspace("unrelated-source-consumer", clone=baseline)
         self.source(consumer, "other_consumer", dependencies=[n["core"] + "<2"])
