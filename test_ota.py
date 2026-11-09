@@ -3807,6 +3807,69 @@ class TestDownload(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["version"], "1.5.0")
 
+    @patch("raisin_ota.client._download_package_blob", return_value=(True, None))
+    @patch("raisin_ota.client._fetch_archive_manifest")
+    def test_download_package_selects_requested_prerelease(
+        self, mock_manifest, mock_blob
+    ):
+        packages = [
+            {
+                "packageName": "mypkg",
+                "tagName": "v1.0.0rc1",
+                "packageId": "p1",
+                "manifestHash": "a" * 64,
+            },
+            {
+                "packageName": "mypkg",
+                "tagName": "v1.0.0",
+                "packageId": "p2",
+                "manifestHash": "b" * 64,
+            },
+        ]
+        mock_manifest.return_value = (packages, "arch-1", "v2024.01")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            g.script_directory = tmpdir
+            _sync_ota_context()
+            install_base = Path(tmpdir) / "release" / "install"
+            install_base.mkdir(parents=True)
+
+            download_file = Path(tmpdir) / "install" / "mypkg-ota-1.0.0rc1.zip"
+            download_file.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(download_file, "w") as zf:
+                zf.writestr("release.yaml", "version: 1.0.0rc1\n")
+
+            result = ota.download_package(
+                "mypkg", "==1.0.0rc1", "release", install_base, tag=None
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["version"], "1.0.0rc1")
+        self.assertEqual(mock_blob.call_args[0][1], "p1")
+
+    def test_ota_and_installer_read_specifiers_the_same_way(self):
+        from commands.utils import parse_version_specifier as installer_parse
+
+        for spec in [
+            "",
+            ">=1.0.0",
+            ">=1.0,<2.0",
+            ">=1.0 <2.0",
+            ">=1.0\t<2.0",
+            ">= 1.0",
+            "1.0.0",
+            "==1.0.0rc1",
+            ">=2.0.0.dev1",
+            "==1.0.*",
+            ">=1.0 latest",
+            "latest",
+            ">=1.0,,<2.0",
+        ]:
+            with self.subTest(spec=spec):
+                self.assertEqual(
+                    ota.parse_version_specifier(spec), installer_parse(spec)
+                )
+
     @patch("raisin_ota.client._queue_snapshot_report")
     @patch("raisin_ota.client.get_install_session_id", return_value="session-1")
     @patch("raisin_ota.client._download_package_blob", return_value=(True, None))
