@@ -1926,12 +1926,20 @@ def deploy_target_interfaces(target: TargetConfig, install_dir, source_packages,
                 )
 
 
-def copy_extra_headers(target: TargetConfig) -> None:
+QUOTED_INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*"([^"]+)"', re.MULTILINE)
+
+
+def collect_extra_headers(target: TargetConfig) -> Dict[str, Path]:
     """
-    Install header-only files from packages that cannot be built for the target
-    (declared as `extra_headers` in the profile).
+    Resolve the profile's `extra_headers` and the headers they include with
+    `#include "..."` from the same include directory, so that a new include there
+    needs no profile change. Includes found elsewhere (generated message headers)
+    are left to whatever provides them.
+
+    Returns:
+        dict: include path (e.g. 'raisin_util/time.hpp') -> source file.
     """
-    dest_root = Path(g.generated_dir) / "include"
+    headers = {}
     for relative, source in sorted(target.extra_headers.items()):
         source_path = Path(g.script_directory) / source
         if not source_path.is_file():
@@ -1939,10 +1947,33 @@ def copy_extra_headers(target: TargetConfig) -> None:
                 f"❌ profile '{target.profile}' extra header '{relative}' not found "
                 f"at {source_path}"
             )
+        headers[relative] = source_path
+
+    pending = list(headers.items())
+    while pending:
+        relative, source_path = pending.pop()
+        include_root = source_path.parents[len(Path(relative).parts) - 1]
+        text = source_path.read_text(encoding="utf-8", errors="replace")
+        for included in QUOTED_INCLUDE.findall(text):
+            candidate = include_root / included
+            if included not in headers and candidate.is_file():
+                headers[included] = candidate
+                pending.append((included, candidate))
+    return headers
+
+
+def copy_extra_headers(target: TargetConfig) -> None:
+    """
+    Install header-only files from packages that cannot be built for the target
+    (declared as `extra_headers` in the profile), with the headers they include.
+    """
+    dest_root = Path(g.generated_dir) / "include"
+    for relative, source_path in sorted(collect_extra_headers(target).items()):
         destination = dest_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, destination)
-        print(f"  -> extra header {relative}")
+        declared = relative in target.extra_headers
+        print(f"  -> extra header {relative}" + ("" if declared else " (included)"))
 
 
 def collect_src_vcpkg_dependencies(repos_to_ignore=None):
