@@ -175,10 +175,13 @@ button.on { border-color: var(--robot); color: var(--robot); }
       (s.cues || []).forEach(c => {
         if (c.bearing == null) return;
         const hit = tnum != null && c.lo != null && c.hi != null && (c.pre || "") === tpre && +c.lo <= tnum && tnum <= +c.hi;
-        const L = (hit ? 3.5 : 1.6) * view.scale, ex = x + L * Math.cos(c.bearing), ey = y - L * Math.sin(c.bearing);
+        // a bent arrow (bearing2 = its second leg): 1.2 m along the first leg, then the second leg
+        const bent = c.bearing2 != null, L1 = bent ? 1.2 * view.scale : 0, L = (hit ? 3.5 : 1.6) * view.scale;
+        const mx = x + L1 * Math.cos(c.bearing), my = y - L1 * Math.sin(c.bearing), b2 = bent ? c.bearing2 : c.bearing;
+        const ex = mx + L * Math.cos(b2), ey = my - L * Math.sin(b2);
         ctx.strokeStyle = hit ? css("--goal") : col; ctx.lineWidth = hit ? 3 : 1.5; ctx.globalAlpha = hit ? 1 : 0.7;
-        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(ex, ey); ctx.stroke();
-        const a = Math.atan2(ey - y, ex - x);
+        ctx.beginPath(); ctx.moveTo(x, y); if (bent) ctx.lineTo(mx, my); ctx.lineTo(ex, ey); ctx.stroke();
+        const a = Math.atan2(ey - my, ex - mx);
         ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex - 8 * Math.cos(a - 0.4), ey - 8 * Math.sin(a - 0.4));
         ctx.lineTo(ex - 8 * Math.cos(a + 0.4), ey - 8 * Math.sin(a + 0.4)); ctx.closePath(); ctx.fillStyle = ctx.strokeStyle; ctx.fill();
         ctx.globalAlpha = 1;

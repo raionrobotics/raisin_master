@@ -297,7 +297,7 @@ def main():
             "doors": [{k: d.get(k) for k in ("id", "x", "y", "conf", "label", "nrm", "width")} for d in r.get("doors", [])],
             "labels": [{k: lb.get(k) for k in ("id", "x", "y", "number", "score")} for lb in r.get("labels", [])],
             "signs": [{"id": s["id"], "x": s["x"], "y": s["y"], "valid": s.get("valid"), "dead": s.get("dead"),
-                       "cues": [{k: c.get(k) for k in ("place", "bearing", "lo", "hi", "pre")} for c in s.get("cues", [])]}
+                       "cues": [{k: c.get(k) for k in ("place", "bearing", "bearing2", "lo", "hi", "pre")} for c in s.get("cues", [])]}
                       for s in r.get("signs", [])]}
 
     def on_finder(m):
@@ -384,7 +384,10 @@ def main():
                             "read_range": float(os.environ.get("READ_RANGE", "5.0")),
                             "sign_range": float(os.environ.get("SIGN_RANGE", "5.0")),
                             # an oblique view of a sign gives a wrong plane normal, and the arrow bearing is built from it
-                            "sign_max_angle_deg": float(os.environ.get("SIGN_MAX_ANGLE_DEG", "50"))},
+                            "sign_max_angle_deg": float(os.environ.get("SIGN_MAX_ANGLE_DEG", "50")),
+                            # 30 % of the box width left / right of a sign for the VLM: GDINO boxes hug the text and cut the arrow at the
+                            # strip's end (11-10 18:40: the bent arrow of 'T112~T121' was half cut and read as plain 'left')
+                            "sign_crop_mx": float(os.environ.get("SIGN_CROP_MX", "0.3"))},
         "room_finder": {"target": a.target, "out_dir": out + "/finder", "max_time": float(a.max_time), "policy": a.policy,
                         # real robot: a door needs a mapped wall next to it; go to a door without turning to face it (3 cameras)
                         "door_wall_max": float(os.environ.get("DOOR_WALL_MAX", "0.5")),
