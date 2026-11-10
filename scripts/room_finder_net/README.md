@@ -78,7 +78,7 @@ cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
 # AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames), then the finder
 HF_HUB_OFFLINE=1 ~/room_finder_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/gdino_trt/gdino_server_trt.py --engine ~/gdino_trt/gdino_fp16.engine
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
-  RF_PARAMS=room_finder.belief_sign_steer=true,room_finder.sign_seek=100,room_finder.sign_lock=true,room_finder.agree_gain=2.5,room_finder.agree_stall_s=90,room_finder.sign_passed_m=5 \
+  RF_PARAMS=room_finder.belief_sign_steer=true,room_finder.sign_seek=100,room_finder.sign_lock=true \
   ROOM_FINDER_VLM=gpt-5.4-mini ROOM_FINDER_BELIEF_VLM=gpt-5-mini \
   ~/room_finder_venv/bin/python ai_pc/ai_main.py --target T113 --robot-id KR-RND-2508-001 --iface enP5p3s0 \
   --cameras local --rig ai_pc/rig_real.yaml --mmdev ~/ReasonNav/src/mm_dev
@@ -101,16 +101,24 @@ What was changed for the real building (env variable in `ai_main.py` = ReasonNav
 | `SIGN_OVERWRITE=1` | a later comparable sign read replaces unconfirmed (misread) entries |
 | `DET_REACH_M=1.5` | doors / signs > 1.5 m off the traversable area are dropped; room plates never are |
 | `FRONTIER_ON_FREE=1` | frontiers from free cells: narrow corridor ends (2 m, inflated walls) still count |
-| `GOAL_UNLOOKED=1` | a VLM goal inside the looked-at area is moved on along robot -> goal |
+| `GOAL_UNLOOKED=1` | a VLM goal inside the looked-at area is ignored (moving it on sent it into the wrong wing) |
 | `BELIEF_CONSENSUS=4` | a VLM goal is weighted by how many of the last 4 answers agree (one flipped answer does not switch wings) |
 | `BELIEF_OPENINGS=1` | lettered frontier openings on the VLM map; a `via` opening is used only if it leads toward the goal |
 | gateway `--dynamic-cap 1.5 --dynamic-clear-s 3` | cells seen free before (people walking by) clear after 3 s without hits |
 | gateway `--transient-s 8` (flag) | cells never seen free and hit for < 8 s go back to unknown 15 s after their last hit (a person in an unexplored corridor); a wall glimpsed < 8 s does too |
-| `RF_PARAMS` agree_gain / agree_stall_s / sign_passed_m | the dev-PC sim "all" variant: a VLM goal along the target sign's arrow is followed (frontiers +2.5 per m closer, dropped after 90 s without 3 m progress); a sign passed by 5 m no longer locks |
+| `RF_PARAMS` agree_gain / agree_stall_s / sign_passed_m (not used) | the dev-PC sim "all" variant. Off on the robot since 11-10: the T101~T126 arrow points at an entrance 2 m away with the hallway running perpendicular, the VLM reads it literally, and "agreement" pulled the robot out of the right hallway twice |
 
 Each run also writes `camera_exposure.jsonl` (exposure / ISO / grey per colour frame). Known open issues: the robot sometimes stands
 still with a goal (navigation plugin "Start occupied", SLAM odometry dropouts, or no logged reason); the VLM reads the T101~T126 arrow
 literally (north) until plates of that hallway are read.
+
+### Recording the cameras (robot driven by hand)
+Stop `ai_main` first: only one program can open the cameras. On the AI PC:
+```
+cd <ws>/scripts/room_finder_net && ~/room_finder_venv/bin/python ai_pc/record_cams.py --hz 1
+```
+It writes the cameras' 12 MP JPEG frames, unchanged, to `<ws>/log/cam_record/<time>/<cam>/` plus `frames.csv`. Ctrl+C stops it.
+`--hz` sets the frames saved per camera per second: 1 Hz is ~7 MB/s for three cameras.
 
 ## Simulation check (one machine, no ROS environment)
 ```
