@@ -75,8 +75,9 @@ workspace that holds these scripts (logs go to `<workspace>/log/room_finder_net/
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
   ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -60 -60 60 60 \
   --transient-s 8
-# AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames), then the finder
+# AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames) and the OCR server, then the finder
 HF_HUB_OFFLINE=1 ~/room_finder_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/gdino_trt/gdino_server_trt.py --engine ~/gdino_trt/gdino_fp16.engine
+~/ocr_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/ocr_server.py
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
   RF_PARAMS=room_finder.belief_sign_steer=true,room_finder.sign_seek=100,room_finder.sign_lock=true \
   ROOM_FINDER_VLM=gpt-5.4-mini ROOM_FINDER_BELIEF_VLM=gpt-5-mini \
@@ -111,6 +112,19 @@ What was changed for the real building (env variable in `ai_main.py` = ReasonNav
 Each run also writes `camera_exposure.jsonl` (exposure / ISO / grey per colour frame). Known open issues: the robot sometimes stands
 still with a goal (navigation plugin "Start occupied", SLAM odometry dropouts, or no logged reason); the VLM reads the T101~T126 arrow
 literally (north) until plates of that hallway are read.
+
+### OCR server (room plates)
+`ai_pc/ocr_server.py` runs RapidOCR (PP-OCRv4) on the GPU in its own venv, kept apart from the perception venv:
+```
+python3 -m venv ~/ocr_venv && ~/ocr_venv/bin/pip install rapidocr_onnxruntime opencv-python-headless
+~/ocr_venv/bin/pip uninstall -y onnxruntime && ~/ocr_venv/bin/pip install onnxruntime-gpu --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+```
+`room_perception` sends each camera's newest frame to it in turn (`OCR_URL`, default `http://127.0.0.1:8767`).
+* Texts shaped like a room number (`T104`; `O`/`I`/`L` in the digits read as `0`/`1`) at conf >= 0.9 become plate reads at the depth
+  inside the text box.
+* A bare number is dropped while the plates read so far carry a letter prefix: the OCR sometimes reads `T117` as `1117`.
+* On the 11-10 hand-driven recording it found all 16 plates T101..T117 the robot passed, ~330 ms per 12 MP frame.
+* GDINO plate boxes still go to the VLM too; `GDINO_PLATES=0` turns that path off.
 
 ### Recording the cameras (robot driven by hand)
 Stop `ai_main` first: only one program can open the cameras. On the AI PC:

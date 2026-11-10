@@ -340,6 +340,12 @@ def main():
                             # a later comparable sign read replaces unconfirmed entries (11-04 T140: T131~T150 was also kept as
                             # "T135-T150" and "101~110" from two misreads); entries read the same way twice stay
                             "sign_overwrite": os.environ.get("SIGN_OVERWRITE", "1") == "1",
+                            # scene-text OCR server (ai_pc/ocr_server.py, ~/ocr_venv): room-number texts become plate reads directly.
+                            # On the 11-10 recording it read all 16 plates the robot passed; GDINO missed plates next to bigger nameplates.
+                            # Not running = a warning every 30 s and plates from GDINO + VLM only. "" = off
+                            "ocr_url": os.environ.get("OCR_URL", "http://127.0.0.1:8767"),
+                            "ocr_min_conf": float(os.environ.get("OCR_MIN_CONF", "0.9")),
+                            "gdino_plates": os.environ.get("GDINO_PLATES", "1") == "1",   # 0: GDINO plate boxes are no longer sent to the VLM
                             "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5")),
                             "label_nearest_door": os.environ.get("LABEL_NEAREST_DOOR", "1") == "1",
                             # detections beyond 5 m are ignored (door / plate / sign positions and sizes are least accurate there)
