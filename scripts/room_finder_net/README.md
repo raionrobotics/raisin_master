@@ -74,7 +74,7 @@ workspace that holds these scripts (logs go to `<workspace>/log/room_finder_net/
 # robot PC (after standing the robot up and starting mapping)
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
   ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -80 -80 80 80 \
-  --transient-s 8
+  --transient-s 8 --log-dir
 # AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames) and the OCR server, then the finder
 HF_HUB_OFFLINE=1 ~/room_finder_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/gdino_trt/gdino_server_trt.py --engine ~/gdino_trt/gdino_fp16.engine
 ~/ocr_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/ocr_server.py
@@ -82,8 +82,14 @@ cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
   RF_PARAMS=room_finder.belief_sign_steer=true,room_finder.sign_seek=100,room_finder.sign_lock=true \
   ROOM_FINDER_VLM=gpt-5.4-mini ROOM_FINDER_BELIEF_VLM=gpt-5-mini \
   ~/room_finder_venv/bin/python ai_pc/ai_main.py --target T113 --robot-id KR-RND-2508-001 --iface enP5p3s0 \
-  --cameras local --rig ai_pc/rig_real.yaml --mmdev ~/ReasonNav/src/mm_dev
+  --cameras local --rig ai_pc/rig_real.yaml --mmdev ~/ReasonNav/src/mm_dev --log-debug-hz 2
 ```
+Logs of what the two viewers show (for videos):
+* gateway `--log-dir` (http://<robot PC>:8081): `<robot PC ws>/log/room_finder_net/gateway/<start time>/state.jsonl` (pose, goal and
+  the AI PC's landmarks + finder state, 2 Hz) and `map/<time ms>.npz` (the published grid, every 2 s). One folder per gateway start,
+  robot PC clock.
+* ai_main `--log-debug-hz 2` (http://<AI PC>:8082): `<run>/debug_image/<time ms>.jpg` + `frames.csv` with the AI PC time and the robot
+  PC time (the AI PC clock is not NTP-synced; it was 55.8 s ahead on 11-10), so the two logs line up.
 Before a run:
 * The AI PC needs internet (LTE): every plate / sign read and belief query is an OpenAI call. Check with `ping 8.8.8.8`.
 * The AI PC needs a gigabit link to the PoE switch: three 12 MP cameras use ~470 Mbit/s.
@@ -105,6 +111,9 @@ What was changed for the real building (env variable in `ai_main.py` = ReasonNav
 | `GOAL_UNLOOKED=1` | a VLM goal inside the looked-at area is ignored (moving it on sent it into the wrong wing) |
 | `BELIEF_CONSENSUS=4` | a VLM goal is weighted by how many of the last 4 answers agree (one flipped answer does not switch wings) |
 | `BELIEF_OPENINGS=1` | lettered frontier openings on the VLM map; a `via` opening is used only if it leads toward the goal |
+| `VISIT_SIGNS=0 VISIT_DOORS=0 VISIT_LABELS=0` | no detours to read signs, doors or plates one digit off the target (the OCR reads plates while driving past). A read of the target itself is still checked |
+| `LOOK_RADIUS=5 LOOK_LOS=1` | "looked at" = within 5 m of the path in line of sight (was a 3 m circle through walls: the lobby centre stayed unlooked and VLM goals kept the robot there) |
+| `FRONTIER_MIN_DIST=1.5` | a frontier's goal point is its cheapest cell >= 1.5 m away. A corridor's frontier starts at the robot, and its nearest cell (< 0.8 m) used to drop the whole frontier (11-10 T113: turned back out of the west corridor) |
 | gateway `--dynamic-cap 1.5 --dynamic-clear-s 3` | cells seen free before (people walking by) clear after 3 s without hits |
 | gateway `--transient-s 8` (flag) | cells never seen free and hit for < 8 s go back to unknown 15 s after their last hit (a person in an unexplored corridor); a wall glimpsed < 8 s does too |
 | `RF_PARAMS` agree_gain / agree_stall_s / sign_passed_m (not used) | the dev-PC sim "all" variant. Off on the robot since 11-10: the T101~T126 arrow points at an entrance 2 m away with the hallway running perpendicular, the VLM reads it literally, and "agreement" pulled the robot out of the right hallway twice |

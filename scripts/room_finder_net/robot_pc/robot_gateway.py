@@ -12,6 +12,9 @@ Runs next to the robot's raisin node and does the three things the AI PC should 
   3. status      : `room_finder/status` JSON (pose, has_goal, watchdog state), 2 Hz.
   4. map viewer  : http://<robot PC>:8081 (--viz-port) -- map, robot trail, goal and the AI PC's landmarks (doors, room
                    numbers, signs), which the AI PC pushes through service `room_finder/viz`.  Read-only, no camera images.
+  5. log (--log-dir) : what the viewer shows, saved to <dir>/<start time>/: state.jsonl (pose, goal, ... at --log-hz; 'viz' only
+                   when the AI PC sent a new one) and map/<time ms>.npz (data int8 as published, x0, y0, res) every --log-map-s.
+                   Times are this PC's clock (the AI PC's ai_main --log-debug-hz writes the robot clock next to its own).
   Service `room_finder/stop` cancels the current goal.
 
   robot_gateway.py --robot-id <robot nickname> [--id room_finder_gw] [--iface lo]
@@ -83,6 +86,7 @@ class Gateway:
         self.viz_t = 0.0
         self.trail = []             # robot xy every >= 0.2 m
         self.map_viz = None         # (json bytes) latest cropped map for the viewer
+        self.map_last = None        # (time, x0, y0, int8 grid) latest published map, for --log-dir
 
         self.net = raisin_py.Net(a.id, a.iface)
         self.robot = None
@@ -104,6 +108,12 @@ class Gateway:
         threading.Thread(target=self.loop, daemon=True).start()
         if a.viz_port:
             threading.Thread(target=self.serve_viewer, daemon=True).start()
+        if a.log_dir:
+            base = a.log_dir if a.log_dir != "auto" else os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "log", "room_finder_net", "gateway")   # <workspace>/log/...
+            d = os.path.abspath(os.path.join(os.path.expanduser(base), time.strftime("%Y%m%d_%H%M%S")))
+            threading.Thread(target=self.log_loop, args=(d,), daemon=True).start()
+            logging.info("logging the viewer state to %s" % d)
         logging.info("map: rays <= %.1f m, scan sector +-%.0f deg, obstacles %.2f m below .. %.2f m above the lidar (lidar %.3f m above odom), inflation %.2f m"
                      % (a.scan_range, a.scan_fov, a.obstacle_below, a.obstacle_above, a.lidar_z, a.inflate))
         logging.info("gateway up: goals -> %s (frame from %s), map %dx%d @ %.2f m, watchdog %.0f s"
@@ -220,6 +230,7 @@ class Gateway:
         data[occ] = 100
         x0, y0 = float(self.x0 + c0 * self.res), float(self.y0 + r0 * self.res)
         self.pub_map.publish("map", self.res, x0, y0, data)
+        self.map_last = (time.time(), x0, y0, data)
         if self.a.viz_port:   # viewer: 0 free, 100 occupied, 255 unknown, row 0 = lowest y
             self.map_viz = json.dumps({"res": self.res, "x0": x0, "y0": y0, "w": int(data.shape[1]), "h": int(data.shape[0]),
                                        "data": base64.b64encode(data.view(np.uint8).tobytes()).decode()}).encode()
@@ -262,6 +273,29 @@ class Gateway:
         return json.dumps({"t": time.time(), "pose": None if p is None else [round(v, 3) for v in p[:4]], "has_goal": hg,
                            "goal": self.goal, "watchdog_fired": self.watchdog_fired, "scans": self.scans, "trail": trail,
                            "viz": self.viz, "viz_age": None if not self.viz_t else round(time.time() - self.viz_t, 1)}).encode()
+
+    def log_loop(self, d):
+        os.makedirs(os.path.join(d, "map"), exist_ok=True)
+        viz_logged, map_logged_t = 0.0, 0.0
+        with open(os.path.join(d, "state.jsonl"), "a") as f:
+            while True:
+                time.sleep(1.0 / max(self.a.log_hz, 0.1))
+                try:
+                    with self.lock:
+                        p, hg = self.pose, self.has_goal
+                    rec = {"t": round(time.time(), 3), "pose": None if p is None else [round(v, 3) for v in p[:4]], "has_goal": hg,
+                           "goal": self.goal, "watchdog_fired": self.watchdog_fired, "scans": self.scans}
+                    if self.viz_t != viz_logged:
+                        viz_logged, rec["viz"] = self.viz_t, self.viz
+                    f.write(json.dumps(rec) + "\n")
+                    f.flush()
+                    m = self.map_last
+                    if m is not None and m[0] > map_logged_t and time.time() - map_logged_t >= self.a.log_map_s:
+                        map_logged_t = m[0]
+                        np.savez_compressed(os.path.join(d, "map", "%d.npz" % int(m[0] * 1000)), data=m[3], x0=m[1], y0=m[2], res=self.res)
+                except Exception as e:  # noqa: BLE001  (disk full ...): keep the gateway running
+                    logging.warning("log: %r" % e)
+                    time.sleep(5.0)
 
     def serve_viewer(self):
         gw = self
@@ -379,6 +413,10 @@ def main():
     ap.add_argument("--transient-forget-s", type=float, default=15.0)
     ap.add_argument("--viz-port", type=int, default=8081, help="map viewer http port (0 = off)")
     ap.add_argument("--viz-host", default="0.0.0.0", help="address the viewer listens on")
+    ap.add_argument("--log-dir", nargs="?", const="auto", default="",
+                    help="save what the viewer shows under this folder/<start time> (bare --log-dir: <workspace>/log/room_finder_net/gateway)")
+    ap.add_argument("--log-hz", type=float, default=2.0, help="state.jsonl lines per second")
+    ap.add_argument("--log-map-s", type=float, default=2.0, help="seconds between map snapshots")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     Gateway(a)

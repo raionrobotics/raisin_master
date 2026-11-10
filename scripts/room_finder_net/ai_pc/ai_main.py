@@ -177,6 +177,8 @@ def main():
                     help="no OpenAI: plate reads return 'no plate', sign reads return no cues, belief queries return no region")
     ap.add_argument("--debug-port", type=int, default=8082,
                     help="MJPEG http stream of /room_finder/debug_image (camera tiles + detection boxes); 0 = off")
+    ap.add_argument("--log-debug-hz", type=float, default=float(os.environ.get("LOG_DEBUG_HZ", "0")),
+                    help="also save that image (what :8082 shows) to <run>/debug_image at this rate (it is made at 2 Hz); 0 = off")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     rig = yaml.safe_load(open(a.rig))
@@ -294,9 +296,11 @@ def main():
     threading.Thread(target=viz_worker, daemon=True).start()
 
     # ---- detection debug image (left | front | right with boxes) as an MJPEG stream; the robot PC forwards the port to the wifi
-    if a.debug_port:
+    dbg = None
+    if a.debug_port or a.log_debug_hz > 0:
         import debug_stream
-        router.subscribe("/room_finder/debug_image", debug_stream.DebugStream(a.debug_port).on_image)
+        dbg = debug_stream.DebugStream(a.debug_port)
+        router.subscribe("/room_finder/debug_image", dbg.on_image)
 
     # ---- the nodes (imported unchanged from ReasonNav)
     rosless.install(router)
@@ -308,6 +312,9 @@ def main():
     ws = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))   # the workspace holding this script
     out = a.out_dir or os.path.join(ws, "log", "room_finder_net", "%s_T%s" % (time.strftime("%Y%m%d_%H%M%S"), a.target))
     os.makedirs(out, exist_ok=True)
+    if dbg is not None and a.log_debug_hz > 0:   # t_robot: the robot PC clock (odometry offset), to line up with the gateway's --log-dir
+        dbg.record(os.path.join(out, "debug_image"), a.log_debug_hz,
+                   clock=lambda: None if poses.offset is None else time.time() - poses.offset)
     if oak is not None:
         oak.expo_file = open(os.path.join(out, "camera_exposure.jsonl"), "a")
     yolo = a.yolo
@@ -389,6 +396,18 @@ def main():
                      # a VLM goal gets the weight (answers among the last 4 that point within 10 m of it) / 4 (11-04 T113: three answers
                      # in a row claimed the numbers grow eastward and sent the robot into the wrong wing); 0 = off
                      "belief_consensus": int(os.environ.get("BELIEF_CONSENSUS", "4")),
+                     # no detours to read signs / doors / plates one digit off the target: the OCR reads the plates while driving past and
+                     # the detours sent the robot back and forth in the lobby (11-10). A read of the target itself is still checked
+                     "visit_signs": os.environ.get("VISIT_SIGNS", "0") == "1",
+                     "visit_doors": os.environ.get("VISIT_DOORS", "0") == "1",
+                     "visit_labels": os.environ.get("VISIT_LABELS", "0") == "1",
+                     # 'looked at' = within 5 m (the OCR read range) in line of sight of the robot's path (was a 3 m circle through walls:
+                     # the lobby centre stayed unlooked, so VLM goals kept the robot there, 11-10)
+                     "look_radius": float(os.environ.get("LOOK_RADIUS", "5.0")),
+                     "look_los": os.environ.get("LOOK_LOS", "1") == "1",
+                     # a frontier's goal point is its cheapest cell >= 1.5 m away: a corridor's frontier starts at the robot and its nearest
+                     # cell (< 0.8 m) used to drop the whole frontier (11-10 T113: turned back out of the west corridor at x -26)
+                     "frontier_min_dist": float(os.environ.get("FRONTIER_MIN_DIST", "1.5")),
                      # unread signs scored 30 - path everywhere, so the lobby's decorations kept winning: lower base, plus the belief at the sign
                      "sign_base": float(os.environ.get("SIGN_BASE", "10")),
                      "sign_belief_w": float(os.environ.get("SIGN_BELIEF_W", "30")),

@@ -4,8 +4,10 @@
   http://<AI PC>:<port>/stream      multipart MJPEG
   http://<AI PC>:<port>/snapshot.jpg
 
-The perception thread only hands over the latest message; JPEG encoding happens on the first http request that needs it."""
+The perception thread only hands over the latest message; JPEG encoding happens on the first http request that needs it.
+record() also saves the JPEGs to a folder (port 0 = record only, no http server)."""
 import logging
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,7 +20,7 @@ PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport
 <title>Room finder detections</title><style>body{margin:0;background:#111;color:#ccc;font:14px sans-serif}
 img{display:block;width:100%;height:auto}p{margin:6px 10px}</style></head>
 <body><img src="/stream" alt="waiting for /room_finder/debug_image"><p>left | front | right, 2 Hz.
-green door, orange sign, magenta plate</p></body></html>"""
+green door, orange sign, magenta plate (GDINO), cyan plate number read by the OCR</p></body></html>"""
 
 
 class DebugStream:
@@ -65,10 +67,43 @@ class DebugStream:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self.httpd = ThreadingHTTPServer((host, port), H)
-        self.httpd.daemon_threads = True
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
-        log.info("detection stream: http://%s:%d" % (host, port))
+        self.httpd = None
+        if port:
+            self.httpd = ThreadingHTTPServer((host, port), H)
+            self.httpd.daemon_threads = True
+            threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+            log.info("detection stream: http://%s:%d" % (host, port))
+
+    def record(self, out_dir, hz, clock=None):
+        """save the images (at most hz per second) as out_dir/<AI PC time ms>.jpg, listed in out_dir/frames.csv with the AI PC time
+        and clock() = the robot PC time (the AI PC clock is not NTP-synced: +55.8 s on 11-10), for lining up with the gateway log"""
+        os.makedirs(out_dir, exist_ok=True)
+        csv_path = os.path.join(out_dir, "frames.csv")
+
+        def loop():
+            new = not os.path.exists(csv_path)
+            with open(csv_path, "a") as csv:
+                if new:
+                    csv.write("file,t_local,t_robot\n")
+                seq, last = -1, 0.0
+                while True:
+                    seq, jpg = self.latest(seq, 5.0)
+                    now = time.time()
+                    if jpg is None or now - last < 1.0 / hz - 0.05:
+                        continue
+                    last = now
+                    name = "%d.jpg" % int(now * 1000)
+                    try:
+                        with open(os.path.join(out_dir, name), "wb") as f:
+                            f.write(jpg)
+                        tr = clock() if clock else None
+                        csv.write("%s,%.3f,%s\n" % (name, now, "" if tr is None else "%.3f" % tr))
+                        csv.flush()
+                    except OSError as e:
+                        log.warning("debug image not saved: %r" % e)
+                        time.sleep(5.0)
+        threading.Thread(target=loop, daemon=True).start()
+        log.info("saving the detection images to %s (%.1f Hz)" % (out_dir, hz))
 
     def on_image(self, m):
         """router callback (perception thread): keep only the latest message"""
@@ -95,4 +130,5 @@ class DebugStream:
             return self.seq, self.jpg
 
     def close(self):
-        self.httpd.shutdown()
+        if self.httpd is not None:
+            self.httpd.shutdown()
