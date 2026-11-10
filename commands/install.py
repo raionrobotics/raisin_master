@@ -316,7 +316,13 @@ def _install(
             )
         if is_successful:
             is_successful = transaction.commit()
-        if is_successful:
+        if is_successful and local_version_overrides:
+            print(
+                "🎉 Installation process finished successfully, but "
+                f"{len(local_version_overrides)} local source version(s) do not "
+                "satisfy their requirements (listed below)."
+            )
+        elif is_successful:
             print("🎉🎉🎉 Installation process finished successfully.")
         else:
             print(
@@ -527,13 +533,18 @@ def _resolve_packages(
                 )
                 return False
             version_str = release_info.get("version")
-            if version_str:
+            if package_type == "local source" and not spec_str:
+                # Nobody asked for a version: any local source is fine (a dev or
+                # working-tree version included). A later explicit requirement
+                # visits it again and is checked then.
+                is_valid = True
+            elif version_str:
                 try:
                     is_valid = spec.contains(parse_version(str(version_str)))
                 except InvalidVersion:
                     is_valid = False
             else:
-                is_valid = package_type == "local source" and not spec_str
+                is_valid = False
             if not is_valid:
                 if package_type == "local source" and not strict_local_version:
                     local_version_overrides[package_name] = {
@@ -564,7 +575,7 @@ def _resolve_packages(
             install_queue.extend(dependencies)
             reason = (
                 f"satisfies '{spec}'"
-                if version_str
+                if spec_str
                 else "no version constraint requested"
             )
             print(

@@ -247,22 +247,29 @@ def parse_version_specifier(spec_str):
         ""            -> >=0.0.0 (any version)
         ">=1.0.0"     -> standard specifier
         ">=1.0,<2.0"  -> compound specifier
+        ">=1.0 <2.0"  -> compound specifier
         "1.0.0"       -> treated as ==1.0.0
+        "==1.0.0rc1"  -> pre-release kept as written
 
-    Returns a SpecifierSet, or None when the string cannot be parsed.
+    Must read a string the same way as commands.utils.parse_version_specifier:
+    the installer re-checks what this module selected.
+
+    Returns a SpecifierSet, or None when any part of the string is not a
+    specifier.
     """
     try:
         spec_str = (spec_str or "").strip()
         if not spec_str:
             return SpecifierSet(">=0.0.0")
 
-        specifiers = re.findall(r"[<>=!~]+[\d.]+", spec_str)
+        clause = r"[<>=!~]+\s*[^\s,<>=!~]+"
+        specifiers = re.findall(clause, spec_str)
         if specifiers:
-            formatted = ", ".join(specifiers)
-            formatted = formatted.replace(">, =", ">=").replace("< =", "<=")
-            return SpecifierSet(formatted)
+            if re.sub(clause, "", spec_str).replace(",", "").strip():
+                return None
+            return SpecifierSet(", ".join(re.sub(r"\s", "", s) for s in specifiers))
 
-        if re.match(r"^[\d.]+$", spec_str):
+        if re.fullmatch(r"[^\s,<>=!~]+", spec_str):
             return SpecifierSet(f"=={spec_str}")
 
         return None
