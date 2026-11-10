@@ -73,7 +73,7 @@ workspace that holds these scripts (logs go to `<workspace>/log/room_finder_net/
 ```
 # robot PC (after standing the robot up and starting mapping)
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
-  ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -60 -60 60 60 \
+  ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -120 -60 60 60 \
   --transient-s 8
 # AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames) and the OCR server, then the finder
 HF_HUB_OFFLINE=1 ~/room_finder_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/gdino_trt/gdino_server_trt.py --engine ~/gdino_trt/gdino_fp16.engine
