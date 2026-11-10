@@ -73,6 +73,8 @@ class Gateway:
         # (--dynamic-cap) and goes back to free once no point has hit it for --dynamic-clear-s. Walls are never seen free.
         self.free_seen = np.zeros((self.h, self.w), dtype=bool)
         self.last_hit = np.zeros((self.h, self.w), dtype=np.float64)
+        self.first_hit = np.zeros((self.h, self.w), dtype=np.float64)   # --transient-s: when the cell was first hit
+        self.transient_t, self.transient_cleared = 0.0, 0
         self.map_lock = threading.Lock()
         self.n_bins = 720
         self.scans = 0
@@ -167,8 +169,29 @@ class Gateway:
             seen = self.free_seen.reshape(-1)
             seen[free_idx[flat[free_idx] <= -2.0]] = True
             flat[hit_idx] = np.minimum(flat[hit_idx] + 0.9, np.where(seen[hit_idx], a.dynamic_cap, 4.0))
-            self.last_hit.reshape(-1)[hit_idx] = time.time()
+            now = time.time()
+            self.last_hit.reshape(-1)[hit_idx] = now
+            fh = self.first_hit.reshape(-1)
+            fh[hit_idx[fh[hit_idx] == 0]] = now
             self.scans += 1
+
+    def clear_transient(self, lo):
+        """Time instead of shape: a wall is hit over and over while the robot drives along it, a person standing in the way
+        only for the seconds they stand there. Occupied cells whose hits all fell within --transient-s and that no point
+        has hit for --transient-forget-s go back to unknown (wherever they are, isolated or not), so a corridor a person
+        blocked is a frontier again. A wall only glimpsed for a moment goes back to unknown too and is marked again
+        the next time the robot looks at it."""
+        now = time.time()
+        tr = (lo >= 0.85) & ~self.free_seen & (self.first_hit > 0) & (self.last_hit - self.first_hit < self.a.transient_s) \
+            & (now - self.last_hit > self.a.transient_forget_s)
+        n = int(tr.sum())
+        if n:
+            lo[tr] = 0.0
+            self.first_hit[tr] = 0.0
+            self.transient_cleared += n
+            ys, xs = np.nonzero(tr)
+            logging.info("map: %d transient obstacle cells around (%.1f, %.1f) back to unknown (hit for < %.0f s)"
+                         % (n, self.x0 + (xs.mean() + 0.5) * self.res, self.y0 + (ys.mean() + 0.5) * self.res, self.a.transient_s))
 
     def publish_map(self):
         if self.scans == 0:
@@ -178,6 +201,9 @@ class Gateway:
             if self.a.dynamic_clear_s > 0:   # a person who walked on: the cell is free again (it was free before they came)
                 gone = self.free_seen & (lo > -0.4) & (time.time() - self.last_hit > self.a.dynamic_clear_s)
                 lo[gone] = -0.4
+            if self.a.transient_s > 0 and time.time() - self.transient_t > 1.0:
+                self.transient_t = time.time()
+                self.clear_transient(lo)
             known = np.abs(lo) > 0.05
             rows, cols = np.flatnonzero(known.any(axis=1)), np.flatnonzero(known.any(axis=0))
             if len(rows) == 0:
@@ -347,6 +373,10 @@ def main():
                     help="max occupancy log-odds of a cell that was clearly free before (people walking by); walls get 4.0")
     ap.add_argument("--dynamic-clear-s", type=float, default=3.0,
                     help="such a cell is free again when no point has hit it for this long (s); 0 = off")
+    ap.add_argument("--transient-s", type=float, default=0.0,
+                    help="obstacle cells hit only within this many seconds of their first hit (people, not walls) go back to "
+                         "unknown when no point has hit them for --transient-forget-s; 0 = off")
+    ap.add_argument("--transient-forget-s", type=float, default=15.0)
     ap.add_argument("--viz-port", type=int, default=8081, help="map viewer http port (0 = off)")
     ap.add_argument("--viz-host", default="0.0.0.0", help="address the viewer listens on")
     a = ap.parse_args()
