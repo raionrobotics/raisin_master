@@ -87,7 +87,8 @@ cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
 Logs of what the two viewers show (for videos):
 * gateway `--log-dir` (http://<robot PC>:8081): `<robot PC ws>/log/room_finder_net/gateway/<start time>/state.jsonl` (pose, goal and
   the AI PC's landmarks + finder state, 2 Hz) and `map/<time ms>.npz` (the published grid, every 2 s). One folder per gateway start,
-  robot PC clock. The viewer also shades the finder's looked-at cells (purple, `viz.looked`, sent every 2 s).
+  robot PC clock. `viz.looked` in it (every 2 s) holds the finder's looked-at cells (zlib + packbits, row 0 = lowest y); the viewer does
+  not draw them.
 * ai_main `--log-debug-hz 2` (http://<AI PC>:8082): `<run>/debug_image/<time ms>.jpg` + `frames.csv` with the AI PC time and the robot
   PC time (the AI PC clock is not NTP-synced; it was 55.8 s ahead on 11-10), so the two logs line up.
 Before a run:

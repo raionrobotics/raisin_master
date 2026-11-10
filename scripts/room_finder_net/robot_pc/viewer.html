@@ -9,21 +9,18 @@
   --bg: #f4f5f7; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #d0d5dd;
   --free: #ffffff; --occ: #1d2330; --unk: #c9ced6;
   --robot: #1570ef; --trail: #53b1fd; --goal: #d92d20; --door: #b54708; --label: #079455; --sign: #dc6803; --dead: #98a2b3;
-  --looked: #7a5af8;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0f1218; --panel: #171b24; --text: #e6e8ec; --muted: #98a2b3; --line: #2b3240;
     --free: #2a303c; --occ: #e6e8ec; --unk: #151922;
     --robot: #53b1fd; --trail: #2e90fa; --goal: #f97066; --door: #fdb022; --label: #32d583; --sign: #fd853a; --dead: #667085;
-    --looked: #9b8afb;
   }
 }
 :root[data-theme="dark"] {
   --bg: #0f1218; --panel: #171b24; --text: #e6e8ec; --muted: #98a2b3; --line: #2b3240;
   --free: #2a303c; --occ: #e6e8ec; --unk: #151922;
   --robot: #53b1fd; --trail: #2e90fa; --goal: #f97066; --door: #fdb022; --label: #32d583; --sign: #fd853a; --dead: #667085;
-  --looked: #9b8afb;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -93,7 +90,6 @@ button.on { border-color: var(--robot); color: var(--robot); }
       <span><i class="sw" style="background:var(--door)"></i>문</span>
       <span><i class="sw" style="background:var(--label)"></i>호수</span>
       <span><i class="sw" style="background:var(--sign)"></i>표지판</span>
-      <span><i class="sw" style="background:var(--looked);opacity:.45"></i>이미 본 곳</span>
     </div>
   </div>
 </div>
@@ -102,7 +98,6 @@ button.on { border-color: var(--robot); color: var(--robot); }
   const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
   const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   let map = null, mapImg = null, mapKey = "", st = null;
-  let looked = null, lookedImg = null, lookedZ = "";   // the finder's looked-at cells (viz.looked, zlib + packbits, row 0 = lowest y)
   let view = { cx: 0, cy: 0, scale: 30 };        // world (m) at canvas centre, px per m
   let follow = true, showText = true, fitted = false;
   const $ = id => document.getElementById(id);
@@ -136,25 +131,6 @@ button.on { border-color: var(--robot); color: var(--robot); }
     mapImg = c; mapKey = key;
   }
 
-  async function buildLooked(L) {
-    if (!L || !L.z || L.z === lookedZ || typeof DecompressionStream === "undefined") return;
-    lookedZ = L.z;
-    try {
-      const bin = Uint8Array.from(atob(L.z), ch => ch.charCodeAt(0));
-      const bits = new Uint8Array(await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
-      const c = document.createElement("canvas"); c.width = L.w; c.height = L.h;
-      const g = c.getContext("2d"), img = g.createImageData(L.w, L.h);
-      const v = parseInt(css("--looked").replace("#", ""), 16), col = [v >> 16 & 255, v >> 8 & 255, v & 255];
-      for (let i = 0; i < L.w * L.h; i++) {
-        if (!(bits[i >> 3] & (0x80 >> (i & 7)))) continue;
-        const j = ((L.h - 1 - Math.floor(i / L.w)) * L.w + (i % L.w)) * 4;
-        img.data[j] = col[0]; img.data[j + 1] = col[1]; img.data[j + 2] = col[2]; img.data[j + 3] = 255;
-      }
-      g.putImageData(img, 0, 0);
-      looked = L; lookedImg = c; draw();
-    } catch (e) { /* keep the last one */ }
-  }
-
   function fit() {
     if (!map) return;
     const w = map.w * map.res, h = map.h * map.res;
@@ -175,11 +151,6 @@ button.on { border-color: var(--robot); color: var(--robot); }
     if (mapImg && map) {
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(mapImg, sx(map.x0), sy(map.y0 + map.h * map.res), map.w * map.res * view.scale, map.h * map.res * view.scale);
-    }
-    if (lookedImg && looked) {
-      ctx.imageSmoothingEnabled = false; ctx.globalAlpha = 0.3;
-      ctx.drawImage(lookedImg, sx(looked.x0), sy(looked.y0 + looked.h * looked.res), looked.w * looked.res * view.scale, looked.h * looked.res * view.scale);
-      ctx.globalAlpha = 1;
     }
     // 1 m grid scale bar
     const bar = Math.pow(10, Math.ceil(Math.log10(60 / view.scale)));
@@ -275,7 +246,6 @@ button.on { border-color: var(--robot); color: var(--robot); }
     try {
       const r = await fetch("state.json", { cache: "no-store" });
       st = await r.json(); panel(); draw();
-      buildLooked(st && st.viz && st.viz.looked);
     } catch (e) { $("conn").textContent = "로봇 PC 연결 끊김"; }
     setTimeout(pollState, 1000);
   }
@@ -318,7 +288,7 @@ button.on { border-color: var(--robot); color: var(--robot); }
   $("follow").onclick = () => { setFollow(!follow); draw(); };
   $("fit").onclick = () => { setFollow(false); fit(); draw(); };
   $("labels").onclick = () => { showText = !showText; $("labels").classList.toggle("on", showText); draw(); };
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { buildMapImage(); const L = looked; lookedZ = ""; buildLooked(L); draw(); });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { buildMapImage(); draw(); });
   window.addEventListener("resize", resize);
   resize(); pollState(); pollMap();
 })();
