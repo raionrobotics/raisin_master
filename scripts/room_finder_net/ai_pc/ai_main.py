@@ -152,6 +152,28 @@ def install_dummy_vlm():
     logging.warning("DUMMY VLM: no OpenAI calls; room numbers cannot be read through the VLM")
 
 
+def wait_servers(servers):
+    """block until every (name, http url) accepts a TCP connection; '' = not used. One command for both servers is in the README."""
+    import socket
+    import urllib.parse
+    for name, url in servers:
+        if not url:
+            continue
+        u = urllib.parse.urlparse(url)
+        n = 0
+        while True:
+            try:
+                socket.create_connection((u.hostname, u.port or 80), 1.0).close()
+                break
+            except OSError:
+                if n % 10 == 0:
+                    logging.error("%s server not running at %s: start it (README 'Real robot runs'); waiting ..." % (name, url))
+                n += 1
+                time.sleep(1.0)
+        if n:
+            logging.info("%s server up at %s" % (name, url))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", required=True, help="room number to find")
@@ -282,6 +304,8 @@ def main():
         s = json.loads(m.data)
         viz["finder"] = {k: s.get(k) for k in ("state", "target", "elapsed", "path_len", "item", "hint", "found", "label_xy")}
         viz["finder"]["log"] = (s.get("log") or [])[-6:]
+        if s.get("looked"):   # every 2 s: the finder's looked-at cells (zlib + packbits), drawn by the viewer
+            viz["looked"] = s["looked"]
 
     def viz_worker():
         while rosless.ok():
@@ -396,15 +420,27 @@ def main():
                      # a VLM goal gets the weight (answers among the last 4 that point within 10 m of it) / 4 (11-04 T113: three answers
                      # in a row claimed the numbers grow eastward and sent the robot into the wrong wing); 0 = off
                      "belief_consensus": int(os.environ.get("BELIEF_CONSENSUS", "4")),
-                     # no detours to read signs / doors / plates one digit off the target: the OCR reads the plates while driving past and
-                     # the detours sent the robot back and forth in the lobby (11-10). A read of the target itself is still checked
-                     "visit_signs": os.environ.get("VISIT_SIGNS", "0") == "1",
-                     "visit_doors": os.environ.get("VISIT_DOORS", "0") == "1",
+                     # signs / doors are read on the way only: visited when the path there is <= 4 m and not behind the direction of
+                     # travel (unlimited visits sent the robot back and forth in the lobby, none at all left the lobby signs unread, 11-10).
+                     # Plates one digit off the target are not visited; a read of the target itself is still checked
+                     "visit_signs": os.environ.get("VISIT_SIGNS", "1") == "1",
+                     "visit_doors": os.environ.get("VISIT_DOORS", "1") == "1",
                      "visit_labels": os.environ.get("VISIT_LABELS", "0") == "1",
-                     # 'looked at' = within 5 m (the OCR read range) in line of sight of the robot's path (was a 3 m circle through walls:
-                     # the lobby centre stayed unlooked, so VLM goals kept the robot there, 11-10)
-                     "look_radius": float(os.environ.get("LOOK_RADIUS", "5.0")),
-                     "look_los": os.environ.get("LOOK_LOS", "1") == "1",
+                     "visit_max_pc": float(os.environ.get("VISIT_MAX_PC", "4")),
+                     "visit_no_back": os.environ.get("VISIT_NO_BACK", "1") == "1",
+                     # stand still 1.5 s next to an unread door / plate / sign within 2.5 m, once each: the waypoints have no speed limit
+                     "look_stop_s": float(os.environ.get("LOOK_STOP_S", "1.5")),
+                     "look_stop_m": float(os.environ.get("LOOK_STOP_M", "2.5")),
+                     # 'looked at' = within 3 m of the path (through walls), plus 6 m in line of sight where it is >= 2 m from walls (the
+                     # lobby). 11-10: 5 m line of sight everywhere dismissed the right VLM goal 4 m away and never covered the walls' edges
+                     "look_radius": float(os.environ.get("LOOK_RADIUS", "3.0")),
+                     "look_far": float(os.environ.get("LOOK_FAR", "6.0")),
+                     "look_open_m": float(os.environ.get("LOOK_OPEN_M", "1.5")),
+                     # sign arrows point at a corridor mouth 1-4 m away, the corridor runs across: the arrow becomes that corridor, and the
+                     # corridors of entries without the target cost candidates 40 points (11-10: 'T131~T150' read at 17 s, robot still
+                     # drove to the east corridor's end; 'T101~T126' sent it north into the lobby instead of west)
+                     "sign_corridor": os.environ.get("SIGN_CORRIDOR", "1") == "1",
+                     "sign_neg_penalty": float(os.environ.get("SIGN_NEG_PENALTY", "40")),
                      # a frontier's goal point is its cheapest cell >= 1.5 m away: a corridor's frontier starts at the robot and its nearest
                      # cell (< 0.8 m) used to drop the whole frontier (11-10 T113: turned back out of the west corridor at x -26)
                      "frontier_min_dist": float(os.environ.get("FRONTIER_MIN_DIST", "1.5")),
@@ -447,6 +483,9 @@ def main():
         except ValueError:
             pass
         rosless.Node.param_overrides.setdefault(node, {})[name] = v
+    # the GDINO and OCR servers must be up: 11-10 17:17 ran without the OCR server (no plate read by it) and nobody noticed
+    po = rosless.Node.param_overrides.get("room_perception", {})
+    wait_servers([("GDINO", str(po.get("gdino_url") or "http://127.0.0.1:8765")), ("OCR", str(po.get("ocr_url") or ""))])
     import room_perception  # noqa: E402
     import room_finder  # noqa: E402
     perception = room_perception.RoomPerception()

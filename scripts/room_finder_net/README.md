@@ -73,11 +73,11 @@ workspace that holds these scripts (logs go to `<workspace>/log/room_finder_net/
 ```
 # robot PC (after standing the robot up and starting mapping)
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
-  ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -80 -80 80 80 \
+  ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -90 -90 90 90 \
   --transient-s 8 --log-dir
-# AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames) and the OCR server, then the finder
-HF_HUB_OFFLINE=1 ~/room_finder_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/gdino_trt/gdino_server_trt.py --engine ~/gdino_trt/gdino_fp16.engine
-~/ocr_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/ocr_server.py
+# AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames) and the OCR server in one shell (Ctrl+C stops both), then the
+# finder in another one. ai_main waits until both servers answer.
+bash -c 'trap "kill 0" EXIT; HF_HUB_OFFLINE=1 ~/room_finder_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/gdino_trt/gdino_server_trt.py --engine ~/gdino_trt/gdino_fp16.engine & ~/ocr_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/ocr_server.py & wait'
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
   RF_PARAMS=room_finder.belief_sign_steer=true,room_finder.sign_seek=100,room_finder.sign_lock=true \
   ROOM_FINDER_VLM=gpt-5.4-mini ROOM_FINDER_BELIEF_VLM=gpt-5-mini \
@@ -87,7 +87,7 @@ cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
 Logs of what the two viewers show (for videos):
 * gateway `--log-dir` (http://<robot PC>:8081): `<robot PC ws>/log/room_finder_net/gateway/<start time>/state.jsonl` (pose, goal and
   the AI PC's landmarks + finder state, 2 Hz) and `map/<time ms>.npz` (the published grid, every 2 s). One folder per gateway start,
-  robot PC clock.
+  robot PC clock. The viewer also shades the finder's looked-at cells (purple, `viz.looked`, sent every 2 s).
 * ai_main `--log-debug-hz 2` (http://<AI PC>:8082): `<run>/debug_image/<time ms>.jpg` + `frames.csv` with the AI PC time and the robot
   PC time (the AI PC clock is not NTP-synced; it was 55.8 s ahead on 11-10), so the two logs line up.
 Before a run:
@@ -111,8 +111,11 @@ What was changed for the real building (env variable in `ai_main.py` = ReasonNav
 | `GOAL_UNLOOKED=1` | a VLM goal inside the looked-at area is ignored (moving it on sent it into the wrong wing) |
 | `BELIEF_CONSENSUS=4` | a VLM goal is weighted by how many of the last 4 answers agree (one flipped answer does not switch wings) |
 | `BELIEF_OPENINGS=1` | lettered frontier openings on the VLM map; a `via` opening is used only if it leads toward the goal |
-| `VISIT_SIGNS=0 VISIT_DOORS=0 VISIT_LABELS=0` | no detours to read signs, doors or plates one digit off the target (the OCR reads plates while driving past). A read of the target itself is still checked |
-| `LOOK_RADIUS=5 LOOK_LOS=1` | "looked at" = within 5 m of the path in line of sight (was a 3 m circle through walls: the lobby centre stayed unlooked and VLM goals kept the robot there) |
+| `VISIT_SIGNS=1 VISIT_DOORS=1 VISIT_MAX_PC=4 VISIT_NO_BACK=1 VISIT_LABELS=0` | signs / doors are visited only when the path there is <= 4 m and not behind the direction of travel (unlimited visits: back and forth in the lobby; none: the lobby signs stayed unread). Plates one digit off the target are not visited; a read of the target is |
+| `LOOK_STOP_S=1.5 LOOK_STOP_M=2.5` | stand still 1.5 s next to an unread door / plate / sign within 2.5 m, once each (the waypoints have no speed limit, so stopping is the "slow down") |
+| `LOOK_RADIUS=3 LOOK_FAR=6 LOOK_OPEN_M=1.5` | "looked at" = within 3 m of the path (through walls) plus 6 m in line of sight where it is >= 2 m from walls (the lobby). A 5 m line of sight everywhere (11-10 17:17) dismissed the right VLM goal 4 m away before its plate was read and never covered the cells under the walls' inflation |
+| `SIGN_CORRIDOR=1 SIGN_NEG_PENALTY=40` | a sign arrow pointing at a corridor mouth 1-4 m away means that corridor (it runs across the arrow): 'T101~T126' at (-11, -1) -> west, 'T131~T150' at (6, -1) -> east. Candidates in the corridor of an entry without the target lose 40 points (17:17: 'T131~T150' read at 17 s, the robot still drove to the east corridor's end) |
+| ai_main start | waits (with an error line every 10 s) until the GDINO and OCR servers accept connections (17:17 ran without the OCR server) |
 | `FRONTIER_MIN_DIST=1.5` | a frontier's goal point is its cheapest cell >= 1.5 m away. A corridor's frontier starts at the robot, and its nearest cell (< 0.8 m) used to drop the whole frontier (11-10 T113: turned back out of the west corridor) |
 | gateway `--dynamic-cap 1.5 --dynamic-clear-s 3` | cells seen free before (people walking by) clear after 3 s without hits |
 | gateway `--transient-s 8` (flag) | cells never seen free and hit for < 8 s go back to unknown 15 s after their last hit (a person in an unexplored corridor); a wall glimpsed < 8 s does too |
