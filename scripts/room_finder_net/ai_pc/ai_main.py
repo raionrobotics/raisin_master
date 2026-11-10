@@ -447,6 +447,9 @@ def main():
                      # path cost per cell 1 + 1.5 * (0.9 m - clearance) instead of 6x: a 2 m corridor cost ~4.5x its length (18:08: the
                      # frontier 4.5 m down the T112 corridor lost to one 12 m away in the hall)
                      "soft_weight": float(os.environ.get("SOFT_WEIGHT", "1.5")),
+                     # traversable = free and >= 0.1 m from the gateway's inflated cells; with the gateway's --inflate 0.4 every passage
+                     # >= 1.0 m wide is traversable (0.95 m for some grid offsets). Was 0.3 on 0.5: ~1.6 m
+                     "trav_clear": float(os.environ.get("TRAV_CLEAR", "0.1")),
                      # no free spot 1-2 m in front of a plate (2 m corridor): the nearest traversable cell within 2.5 m is the viewpoint
                      # (18:08: T113 read once by the OCR at 0.8 m, re-reading it never became a candidate)
                      "viewpoint_fallback_m": float(os.environ.get("VIEWPOINT_FALLBACK_M", "2.5")),

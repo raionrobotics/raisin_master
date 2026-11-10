@@ -74,7 +74,7 @@ workspace that holds these scripts (logs go to `<workspace>/log/room_finder_net/
 # robot PC (after standing the robot up and starting mapping)
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
   ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -100 -100 100 100 \
-  --transient-s 8 --log-dir
+  --inflate 0.4 --transient-s 8 --log-dir
 # AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames) and the OCR server in one shell (Ctrl+C stops both), then the
 # finder in another one. ai_main waits until both servers answer.
 bash -c 'trap "kill 0" EXIT; HF_HUB_OFFLINE=1 ~/room_finder_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/gdino_trt/gdino_server_trt.py --engine ~/gdino_trt/gdino_fp16.engine & ~/ocr_venv/bin/python <ws>/scripts/room_finder_net/ai_pc/ocr_server.py & wait'
@@ -118,6 +118,7 @@ What was changed for the real building (env variable in `ai_main.py` = ReasonNav
 | `SIGN_CORRIDOR=1 SIGN_NEG_PENALTY=40` | a sign arrow pointing at a corridor mouth 1-4 m away means that corridor (it runs across the arrow): 'T101~T126' at (-11, -1) -> west, 'T131~T150' at (6, -1) -> east. Candidates in the corridor of an entry without the target lose 40 points (17:17: 'T131~T150' read at 17 s, the robot still drove to the east corridor's end) |
 | `SIGN_BROAD_W=1` | the most specific sign entry listing the target gets the full belief weight (4), broader ones 1 (18:08: 'T112~T126' south outweighed 'T112~T121' west at T112) |
 | `SOFT_WEIGHT=1.5` | path cost per cell 1 + 1.5 x (0.9 m - clearance), was 6: a 2 m corridor cost ~4.5x its length, so the frontier 4.5 m down the T112 corridor lost to one 12 m away in a hall |
+| `TRAV_CLEAR=0.1` + gateway `--inflate 0.4` | passages >= 1.0 m wide are traversable for the finder (0.95 m for some grid offsets; the 10 cm grid moves the limit in 0.2 m steps: the next one is 1.2 m). Was 0.3 on 0.5: ~1.6 m. The robot's own navigation still checks its footprint |
 | `VIEWPOINT_FALLBACK_M=2.5` | no free spot 1-2 m in front of a plate (2 m corridor): the nearest traversable cell within 2.5 m. 18:08: T113 was read once by the OCR, and re-reading it never became a candidate |
 | `RELOOK=1` | VLM goals ignored as already looked at are re-checked once (low score, 3 s look) before giving up. 18:08: the VLM named T113's spot 7 times; the robot gave up 6 m away |
 | ai_main start | waits (with an error line every 10 s) until the GDINO and OCR servers accept connections (17:17 ran without the OCR server) |
