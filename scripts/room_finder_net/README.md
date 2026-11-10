@@ -73,7 +73,7 @@ workspace that holds these scripts (logs go to `<workspace>/log/room_finder_net/
 ```
 # robot PC (after standing the robot up and starting mapping)
 cd <ws>/scripts/room_finder_net && source <ws>/ld_prefix_path.sh && \
-  ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -90 -90 90 90 \
+  ~/room_finder_venv/bin/python robot_pc/robot_gateway.py --robot-id KR-RND-2508-001 --iface enxc84d442343c1 --map-bounds -100 -100 100 100 \
   --transient-s 8 --log-dir
 # AI PC: GDINO (TensorRT, 960x720 engine for the 4:3 IMX378 frames) and the OCR server in one shell (Ctrl+C stops both), then the
 # finder in another one. ai_main waits until both servers answer.
@@ -116,6 +116,10 @@ What was changed for the real building (env variable in `ai_main.py` = ReasonNav
 | `LOOK_STOP_S=1.5 LOOK_STOP_M=2.5` | stand still 1.5 s next to an unread door / plate / sign within 2.5 m, once each (the waypoints have no speed limit, so stopping is the "slow down") |
 | `LOOK_RADIUS=3 LOOK_FAR=6 LOOK_OPEN_M=1.5` | "looked at" = within 3 m of the path (through walls) plus 6 m in line of sight where it is >= 2 m from walls (the lobby). A 5 m line of sight everywhere (11-10 17:17) dismissed the right VLM goal 4 m away before its plate was read and never covered the cells under the walls' inflation |
 | `SIGN_CORRIDOR=1 SIGN_NEG_PENALTY=40` | a sign arrow pointing at a corridor mouth 1-4 m away means that corridor (it runs across the arrow): 'T101~T126' at (-11, -1) -> west, 'T131~T150' at (6, -1) -> east. Candidates in the corridor of an entry without the target lose 40 points (17:17: 'T131~T150' read at 17 s, the robot still drove to the east corridor's end) |
+| `SIGN_BROAD_W=1` | the most specific sign entry listing the target gets the full belief weight (4), broader ones 1 (18:08: 'T112~T126' south outweighed 'T112~T121' west at T112) |
+| `SOFT_WEIGHT=1.5` | path cost per cell 1 + 1.5 x (0.9 m - clearance), was 6: a 2 m corridor cost ~4.5x its length, so the frontier 4.5 m down the T112 corridor lost to one 12 m away in a hall |
+| `VIEWPOINT_FALLBACK_M=2.5` | no free spot 1-2 m in front of a plate (2 m corridor): the nearest traversable cell within 2.5 m. 18:08: T113 was read once by the OCR, and re-reading it never became a candidate |
+| `RELOOK=1` | VLM goals ignored as already looked at are re-checked once (low score, 3 s look) before giving up. 18:08: the VLM named T113's spot 7 times; the robot gave up 6 m away |
 | ai_main start | waits (with an error line every 10 s) until the GDINO and OCR servers accept connections (17:17 ran without the OCR server) |
 | `FRONTIER_MIN_DIST=1.5` | a frontier's goal point is its cheapest cell >= 1.5 m away. A corridor's frontier starts at the robot, and its nearest cell (< 0.8 m) used to drop the whole frontier (11-10 T113: turned back out of the west corridor) |
 | gateway `--dynamic-cap 1.5 --dynamic-clear-s 3` | cells seen free before (people walking by) clear after 3 s without hits |

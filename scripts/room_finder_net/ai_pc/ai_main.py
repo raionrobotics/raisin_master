@@ -441,6 +441,18 @@ def main():
                      # drove to the east corridor's end; 'T101~T126' sent it north into the lobby instead of west)
                      "sign_corridor": os.environ.get("SIGN_CORRIDOR", "1") == "1",
                      "sign_neg_penalty": float(os.environ.get("SIGN_NEG_PENALTY", "40")),
+                     # the most specific entry listing the target gets the full sign weight, broader ones 1/4 (18:08: 'T112~T126' south
+                     # outweighed 'T112~T121' west at T112, and the robot went south)
+                     "sign_broad_w": float(os.environ.get("SIGN_BROAD_W", "1.0")),
+                     # path cost per cell 1 + 1.5 * (0.9 m - clearance) instead of 6x: a 2 m corridor cost ~4.5x its length (18:08: the
+                     # frontier 4.5 m down the T112 corridor lost to one 12 m away in the hall)
+                     "soft_weight": float(os.environ.get("SOFT_WEIGHT", "1.5")),
+                     # no free spot 1-2 m in front of a plate (2 m corridor): the nearest traversable cell within 2.5 m is the viewpoint
+                     # (18:08: T113 read once by the OCR at 0.8 m, re-reading it never became a candidate)
+                     "viewpoint_fallback_m": float(os.environ.get("VIEWPOINT_FALLBACK_M", "2.5")),
+                     # VLM goals ignored as already looked at are re-checked once (low score) before giving up (18:08: the VLM named
+                     # T113's spot 7 times; the robot gave up 6 m from it)
+                     "relook": os.environ.get("RELOOK", "1") == "1",
                      # a frontier's goal point is its cheapest cell >= 1.5 m away: a corridor's frontier starts at the robot and its nearest
                      # cell (< 0.8 m) used to drop the whole frontier (11-10 T113: turned back out of the west corridor at x -26)
                      "frontier_min_dist": float(os.environ.get("FRONTIER_MIN_DIST", "1.5")),
