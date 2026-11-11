@@ -449,6 +449,15 @@ def main():
                      # drove to the east corridor's end; 'T101~T126' sent it north into the lobby instead of west)
                      "sign_corridor": os.environ.get("SIGN_CORRIDOR", "1") == "1",
                      "sign_neg_penalty": float(os.environ.get("SIGN_NEG_PENALTY", "40")),
+                     # ... scaled by how far the target number is from the entry's range: none within 2 (the corridor is then a likely
+                     # place, a weak pointer into it), full from 10 on. 11-11 T111: 'T112~T126' ruled out the corridor holding T110 / T111
+                     "sign_neg_near": float(os.environ.get("SIGN_NEG_NEAR", "2")),
+                     "sign_neg_far": float(os.environ.get("SIGN_NEG_FAR", "10")),
+                     # robot in a pocket of the traversable map (a passage it drove through measures under the limit): plan from the
+                     # nearest large region within 3 m. 11-11 T111: 12 cells at the west end, every candidate unreachable, gave up
+                     "escape_m": float(os.environ.get("ESCAPE_M", "3.0")),
+                     # no give-up while frontiers are left: blocked goals are freed and tried again (MAX_TIME still ends the run)
+                     "keep_trying": os.environ.get("KEEP_TRYING", "1") == "1",
                      # the most specific entry listing the target gets the full sign weight, broader ones 1/4 (18:08: 'T112~T126' south
                      # outweighed 'T112~T121' west at T112, and the robot went south)
                      "sign_broad_w": float(os.environ.get("SIGN_BROAD_W", "1.0")),
