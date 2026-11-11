@@ -91,6 +91,15 @@ Logs of what the two viewers show (for videos):
   not draw them.
 * ai_main `--log-debug-hz 2` (http://<AI PC>:8082): `<run>/debug_image/<time ms>.jpg` + `frames.csv` with the AI PC time and the robot
   PC time (the AI PC clock is not NTP-synced; it was 55.8 s ahead on 11-10), so the two logs line up.
+* Video from both (`ai_pc/render_video.py`, on the AI PC: it has ffmpeg with H.264). Copy the gateway folder over, then render
+  (8081 map + panel above, 8082 cameras below, 1920x1080, x8, ends 8 s after the finder is done; ~2.5 min for a 10 min run):
+  ```
+  scp -r ~/raisin_ws/log/room_finder_net/gateway/<time> raibonav@192.168.1.77:raisin_ws/log/room_finder_net/gateway/   # robot PC
+  cd ~/raisin_ws/scripts/room_finder_net && L=~/raisin_ws/log/room_finder_net && \
+    ~/room_finder_venv/bin/python ai_pc/render_video.py --gw $L/gateway/<time> --run $L/<time>_T<target>      # -> <run>/video.mp4
+  ```
+  `--layout map` / `cams` for one view, `--view follow` to follow the robot, `--speed`, `--from` / `--to` (s), `--still end --out map.png`
+  for one picture (the robot PC's python3 can render stills: no ffmpeg needed).
 Before a run:
 * The AI PC needs internet (LTE): every plate / sign read and belief query is an OpenAI call. Check with `ping 8.8.8.8`.
 * The AI PC needs a gigabit link to the PoE switch: three 12 MP cameras use ~470 Mbit/s.
