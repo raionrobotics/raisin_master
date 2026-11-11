@@ -142,7 +142,7 @@ def install_dummy_vlm():
 
     def complete(self, content, max_tokens):
         text = content if isinstance(content, str) else next((c["text"] for c in content if c.get("type") == "text"), "")
-        if text.startswith("The image is a crop of a hospital wall"):
+        if text.startswith(("The image is a crop of a hospital wall", "The image is a crop of an indoor wall")):
             return '{"number": null, "confidence": 0.0}'
         if text.startswith("The image is a crop of a navigational sign"):
             return "[]"
@@ -377,6 +377,9 @@ def main():
                             "ocr_url": os.environ.get("OCR_URL", "http://127.0.0.1:8767"),
                             "ocr_min_conf": float(os.environ.get("OCR_MIN_CONF", "0.9")),
                             "gdino_plates": os.environ.get("GDINO_PLATES", "1") == "1",   # 0: GDINO plate boxes are no longer sent to the VLM
+                            # an OCR number counts once the VLM, shown the frame around it, calls it a room plate (11-10: '2026' on a
+                            # poster and the 0119 of an emergency phone sticker became rooms). Off with the dummy VLM (it cannot confirm)
+                            "ocr_verify": os.environ.get("OCR_VERIFY", "1") == "1" and not a.dummy_vlm,
                             "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5")),
                             "label_nearest_door": os.environ.get("LABEL_NEAREST_DOOR", "1") == "1",
                             # detections beyond 5 m are ignored (door / plate / sign positions and sizes are least accurate there)
