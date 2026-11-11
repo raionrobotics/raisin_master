@@ -455,8 +455,14 @@ def main():
                      # path cost per cell 1 + 1.5 * (0.9 m - clearance) instead of 6x: a 2 m corridor cost ~4.5x its length (18:08: the
                      # frontier 4.5 m down the T112 corridor lost to one 12 m away in the hall)
                      "soft_weight": float(os.environ.get("SOFT_WEIGHT", "1.5")),
-                     # traversable = free and >= 0.1 m from the gateway's inflated cells; with the gateway's --inflate 0.4 every passage
-                     # >= 1.0 m wide is traversable (0.95 m for some grid offsets). Was 0.3 on 0.5: ~1.6 m
+                     # passages: traversable = >= 0.525 m from the nearest obstacle cell of the gateway's 5 cm map (--map-res 0.05),
+                     # whatever its inflation: 1.1 m passages blocked, 1.2 m passable (11-11). A 10 cm map cannot tell the two apart
+                     # (0.5 is used on it, 1.2 m passes, a warning says so). TRAV_OCC_M=0 goes back to TRAV_CLEAR on the inflated map
+                     "trav_occ_m": float(os.environ.get("TRAV_OCC_M", "0.525")),
+                     # the finder's own grid: a 5 cm map is folded into 10 cm cells once the passage widths are taken from it
+                     "grid_res": float(os.environ.get("FINDER_GRID_RES", "0.1")),
+                     # (TRAV_OCC_M=0 only) traversable = free and >= 0.1 m from the gateway's inflated cells: ~1.0 m passages on
+                     # --inflate 0.4, ~1.3 m on 0.5 (the 11-10 runs). Was 0.3 on 0.5: ~1.6 m
                      "trav_clear": float(os.environ.get("TRAV_CLEAR", "0.1")),
                      # no free spot 1-2 m in front of a plate (2 m corridor): the nearest traversable cell within 2.5 m is the viewpoint
                      # (18:08: T113 read once by the OCR at 0.8 m, re-reading it never became a candidate)
