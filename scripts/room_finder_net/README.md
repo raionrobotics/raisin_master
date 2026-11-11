@@ -119,6 +119,7 @@ What was changed for the real building (env variable in `ai_main.py` = ReasonNav
 | `SIGN_BROAD_W=1` | the most specific sign entry listing the target gets the full belief weight (4), broader ones 1 (18:08: 'T112~T126' south outweighed 'T112~T121' west at T112) |
 | `SOFT_WEIGHT=1.5` | path cost per cell 1 + 1.5 x (0.9 m - clearance), was 6: a 2 m corridor cost ~4.5x its length, so the frontier 4.5 m down the T112 corridor lost to one 12 m away in a hall |
 | `SIGN_CROP_MX=0.3` + bent arrows | signs are cropped with 30 % of the box width left / right (GDINO cut the bent arrow of 'T112~T121' in half). The sign prompt knows bent arrows (`left-then-straight`, `right-then-straight`, `straight-then-left`, `straight-then-right`): the route follows the first leg from where a reader stands and turns at the first >= 2.5 m opening toward the second leg. The viewer draws them with two legs |
+| `GDINO_PLATES=0` | GDINO plate boxes are no longer read by the VLM (OCR + door crops only; see the OCR server section) |
 | `OCR_VERIFY=1` + plate prompt | an OCR room number counts only after the VLM, shown the frame around it (the text boxed in red, >= 3 box widths each side; the OCR's text is not in the prompt), reads the same digits (one off allowed) and calls it a room plate: one check per number and place, reads wait for it, a no drops them. 11-10: '2026' on a poster at the start and the 0119 of an emergency phone sticker (042-350-0119) became rooms. The plate prompt of the door / GDINO path names phone / emergency numbers, years, stickers and posters as non-plates (the sticker was read as 0119 5 of 5 times before, 0 of 5 after). Debug image: white `T113 ?` = waiting, grey `2026 x` = rejected; `crops/ocrv_*.jpg` + `ocr_verify` events |
 | `TRAV_CLEAR=0.1` + gateway `--inflate 0.4` | passages >= 1.0 m wide are traversable for the finder (0.95 m for some grid offsets; the 10 cm grid moves the limit in 0.2 m steps: the next one is 1.2 m). Was 0.3 on 0.5: ~1.6 m. The robot's own navigation still checks its footprint |
 | `VIEWPOINT_FALLBACK_M=2.5` | no free spot 1-2 m in front of a plate (2 m corridor): the nearest traversable cell within 2.5 m. 18:08: T113 was read once by the OCR, and re-reading it never became a candidate |
@@ -145,7 +146,9 @@ python3 -m venv ~/ocr_venv && ~/ocr_venv/bin/pip install rapidocr_onnxruntime op
 * A bare number is dropped while the plates read so far carry a letter prefix: the OCR sometimes reads `T117` as `1117`.
 * `OCR_VERIFY=1` (default): each new number / place is checked once by the VLM on the frame around it (table above).
 * On the 11-10 hand-driven recording it found all 16 plates T101..T117 the robot passed, ~330 ms per 12 MP frame.
-* GDINO plate boxes still go to the VLM too; `GDINO_PLATES=0` turns that path off.
+* GDINO plate boxes no longer go to the VLM (`GDINO_PLATES=0`, since 11-11; `1` turns that path back on). In the 11-10 runs it made
+  189-414 VLM calls a run for 5-13 reads, and every number it read twice that the OCR never read was a misread (0119, 1117, 1116, 121).
+  Plates come from the OCR and from the door crops (YOLO door -> VLM); GDINO still finds the signs.
 
 ### Recording the cameras (robot driven by hand)
 Stop `ai_main` first: only one program can open the cameras. On the AI PC:

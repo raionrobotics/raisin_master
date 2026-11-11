@@ -376,7 +376,9 @@ def main():
                             # Not running = a warning every 30 s and plates from GDINO + VLM only. "" = off
                             "ocr_url": os.environ.get("OCR_URL", "http://127.0.0.1:8767"),
                             "ocr_min_conf": float(os.environ.get("OCR_MIN_CONF", "0.9")),
-                            "gdino_plates": os.environ.get("GDINO_PLATES", "1") == "1",   # 0: GDINO plate boxes are no longer sent to the VLM
+                            # GDINO plate boxes -> VLM: off (11-10 18:14 / 18:40 / 18:58: 189-414 VLM calls a run for 5-13 reads; every
+                            # number it read twice that the OCR never read was a misread: 0119, 1117, 1116, 121). Signs still use GDINO
+                            "gdino_plates": os.environ.get("GDINO_PLATES", "0") == "1",
                             # an OCR number counts once the VLM, shown the frame around it, calls it a room plate (11-10: '2026' on a
                             # poster and the 0119 of an emergency phone sticker became rooms). Off with the dummy VLM (it cannot confirm)
                             "ocr_verify": os.environ.get("OCR_VERIFY", "1") == "1" and not a.dummy_vlm,
