@@ -448,11 +448,9 @@ def main():
                      # corridors of entries without the target cost candidates 40 points (11-10: 'T131~T150' read at 17 s, robot still
                      # drove to the east corridor's end; 'T101~T126' sent it north into the lobby instead of west)
                      "sign_corridor": os.environ.get("SIGN_CORRIDOR", "1") == "1",
+                     # (a sign entry that does not list the target: the target is probably not that way, not certainly. Its corridor
+                     # ranks lower and the belief there is scaled down, nothing is removed; the VLM prompt says the same, 11-11)
                      "sign_neg_penalty": float(os.environ.get("SIGN_NEG_PENALTY", "40")),
-                     # ... scaled by how far the target number is from the entry's range: none within 2 (the corridor is then a likely
-                     # place, a weak pointer into it), full from 10 on. 11-11 T111: 'T112~T126' ruled out the corridor holding T110 / T111
-                     "sign_neg_near": float(os.environ.get("SIGN_NEG_NEAR", "2")),
-                     "sign_neg_far": float(os.environ.get("SIGN_NEG_FAR", "10")),
                      # robot in a pocket of the traversable map (a passage it drove through measures under the limit): plan from the
                      # nearest large region within 3 m. 11-11 T111: 12 cells at the west end, every candidate unreachable, gave up
                      "escape_m": float(os.environ.get("ESCAPE_M", "3.0")),
