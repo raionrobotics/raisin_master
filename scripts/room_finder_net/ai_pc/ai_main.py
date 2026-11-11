@@ -455,10 +455,11 @@ def main():
                      # path cost per cell 1 + 1.5 * (0.9 m - clearance) instead of 6x: a 2 m corridor cost ~4.5x its length (18:08: the
                      # frontier 4.5 m down the T112 corridor lost to one 12 m away in the hall)
                      "soft_weight": float(os.environ.get("SOFT_WEIGHT", "1.5")),
-                     # passages: traversable = >= 0.525 m from the nearest obstacle cell of the gateway's 5 cm map (--map-res 0.05),
-                     # whatever its inflation: 1.1 m passages blocked, 1.2 m passable (11-11). A 10 cm map cannot tell the two apart
-                     # (0.5 is used on it, 1.2 m passes, a warning says so). TRAV_OCC_M=0 goes back to TRAV_CLEAR on the inflated map
-                     "trav_occ_m": float(os.environ.get("TRAV_OCC_M", "0.525")),
+                     # passages >= 2 x 0.57 m wide are traversable, measured from where the lidar points hit (gateway --map-res 0.05,
+                     # --subcell 1 = default), whatever the inflation: 1.10 / 1.12 m blocked, 1.2 m passable at any wall angle (11-11; 0.525
+                     # on cell centres let the 1.12 m passage at (-7.0, -2.7) in). Without hit positions a wall is only known to the
+                     # cell (0.575 at most on 5 cm, 0.5 on 10 cm; a warning). TRAV_OCC_M=0 goes back to TRAV_CLEAR on the inflated map
+                     "trav_occ_m": float(os.environ.get("TRAV_OCC_M", "0.57")),
                      # the finder's own grid: a 5 cm map is folded into 10 cm cells once the passage widths are taken from it
                      "grid_res": float(os.environ.get("FINDER_GRID_RES", "0.1")),
                      # (TRAV_OCC_M=0 only) traversable = free and >= 0.1 m from the gateway's inflated cells: ~1.0 m passages on

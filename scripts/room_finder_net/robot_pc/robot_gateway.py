@@ -77,6 +77,13 @@ class Gateway:
         self.free_seen = np.zeros((self.h, self.w), dtype=bool)
         self.last_hit = np.zeros((self.h, self.w), dtype=np.float64)
         self.first_hit = np.zeros((self.h, self.w), dtype=np.float64)   # --transient-s: when the cell was first hit
+        # --subcell: where inside its cell an obstacle was hit (running mean of the points, in cells from the centre). A wall is
+        # then known to ~1 cm instead of to the cell: on 5 cm cells a 1.12 m passage read 1.10 m one time and 1.15 m another,
+        # and a wall a degree off the grid stepped a whole cell inward (11-11: 1.12 m was let in, 1.2 m would have been refused)
+        if a.subcell:
+            self.sub_x = np.zeros((self.h, self.w), dtype=np.float32)
+            self.sub_y = np.zeros((self.h, self.w), dtype=np.float32)
+            self.sub_n = np.zeros((self.h, self.w), dtype=np.float32)
         self.transient_t, self.transient_cleared = 0.0, 0
         self.map_lock = threading.Lock()
         self.n_bins = 720
@@ -173,12 +180,27 @@ class Gateway:
         hy = np.floor((ry + rel[:, 1] - self.y0) / res).astype(np.int64)
         hin = (hx >= 0) & (hx < self.w) & (hy >= 0) & (hy < self.h)
         hit_idx = np.unique(hy[hin] * self.w + hx[hin])
+        if a.subcell:
+            fx = ((rx + rel[hin, 0] - self.x0) / res - hx[hin] - 0.5).astype(np.float32)    # -0.5 .. 0.5 cells from the centre
+            fy = ((ry + rel[hin, 1] - self.y0) / res - hy[hin] - 0.5).astype(np.float32)
+            hit_pts = hy[hin] * self.w + hx[hin]
         with self.map_lock:
             flat = self.logodds.reshape(-1)
             flat[free_idx] = np.maximum(flat[free_idx] - 0.35, -4.0)
             seen = self.free_seen.reshape(-1)
             seen[free_idx[flat[free_idx] <= -2.0]] = True
             flat[hit_idx] = np.minimum(flat[hit_idx] + 0.9, np.where(seen[hit_idx], a.dynamic_cap, 4.0))
+            if a.subcell:
+                sx, sy, sn = self.sub_x.reshape(-1), self.sub_y.reshape(-1), self.sub_n.reshape(-1)
+                np.add.at(sx, hit_pts, fx)
+                np.add.at(sy, hit_pts, fy)
+                np.add.at(sn, hit_pts, 1.0)
+                big = hit_idx[sn[hit_idx] > 50.0]          # a mean over the last ~50 points: a moved obstacle catches up
+                if big.size:
+                    k = 50.0 / sn[big]
+                    sx[big] *= k
+                    sy[big] *= k
+                    sn[big] = 50.0
             now = time.time()
             self.last_hit.reshape(-1)[hit_idx] = now
             fh = self.first_hit.reshape(-1)
@@ -198,6 +220,8 @@ class Gateway:
         if n:
             lo[tr] = 0.0
             self.first_hit[tr] = 0.0
+            if self.a.subcell:
+                self.sub_n[tr] = self.sub_x[tr] = self.sub_y[tr] = 0.0
             self.transient_cleared += n
             ys, xs = np.nonzero(tr)
             logging.info("map: %d transient obstacle cells around (%.1f, %.1f) back to unknown (hit for < %.0f s)"
@@ -211,6 +235,8 @@ class Gateway:
             if self.a.dynamic_clear_s > 0:   # a person who walked on: the cell is free again (it was free before they came)
                 gone = self.free_seen & (lo > -0.4) & (time.time() - self.last_hit > self.a.dynamic_clear_s)
                 lo[gone] = -0.4
+                if self.a.subcell:
+                    self.sub_n[gone] = self.sub_x[gone] = self.sub_y[gone] = 0.0
             if self.a.transient_s > 0 and time.time() - self.transient_t > 1.0:
                 self.transient_t = time.time()
                 self.clear_transient(lo)
@@ -221,6 +247,8 @@ class Gateway:
             r0, r1 = max(rows[0] - 5, 0), min(rows[-1] + 6, self.h)
             c0, c1 = max(cols[0] - 5, 0), min(cols[-1] + 6, self.w)
             sub = lo[r0:r1, c0:c1].copy()
+            if self.a.subcell:
+                ssx, ssy, ssn = self.sub_x[r0:r1, c0:c1].copy(), self.sub_y[r0:r1, c0:c1].copy(), self.sub_n[r0:r1, c0:c1].copy()
         data = np.full(sub.shape, -1, dtype=np.int8)
         data[sub <= -0.4] = 0
         occ = sub >= 0.85
@@ -228,6 +256,12 @@ class Gateway:
         if rad > 0:   # like nav2's inflation layer: known cells within --inflate of an obstacle get 99 (inscribed), obstacles 100
             data[disk_dilate(occ, rad) & (data == 0)] = 99
         data[occ] = 100
+        if self.a.subcell:   # occupied cells: 101 + (ly + 2) * 5 + (lx + 2), the mean hit at (lx, ly) * 0.2 cells from the centre
+            n = np.maximum(ssn, 1e-6)
+            lx = np.clip(np.rint(ssx / n * 5.0), -2, 2).astype(np.int16)
+            ly = np.clip(np.rint(ssy / n * 5.0), -2, 2).astype(np.int16)
+            has = occ & (ssn > 0)
+            data[has] = (101 + (ly[has] + 2) * 5 + (lx[has] + 2)).astype(np.int8)
         x0, y0 = float(self.x0 + c0 * self.res), float(self.y0 + r0 * self.res)
         self.pub_map.publish("map", self.res, x0, y0, data)
         self.map_last = (time.time(), x0, y0, data)
@@ -394,6 +428,9 @@ def main():
     ap.add_argument("--max-goal-dist", type=float, default=8.0, help="reject goals farther than this from the robot (m)")
     ap.add_argument("--watchdog", type=float, default=10.0, help="cancel the goal after this many seconds without a new goal")
     ap.add_argument("--map-res", type=float, default=0.1)
+    ap.add_argument("--subcell", type=int, default=1,
+                    help="1: occupied cells carry where in the cell the points hit (values 101..125; 100 = no position), so "
+                         "passage widths are known to ~1 cm; 0: plain 100")
     ap.add_argument("--map-hz", type=float, default=2.0)
     ap.add_argument("--map-bounds", type=float, nargs=4, default=[-52.0, -8.0, 30.0, 40.0], metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
                     help="area (m, navigation frame) the map covers; default = the simulated hospital")

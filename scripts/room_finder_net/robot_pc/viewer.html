@@ -124,7 +124,7 @@ button.on { border-color: var(--robot); color: var(--robot); }
     for (let i = 0; i < n; i++) {
       const v = raw.charCodeAt(i), row = Math.floor(i / map.w), col = i % map.w;
       const j = ((map.h - 1 - row) * map.w + col) * 4;           // row 0 = lowest y -> bottom of the image
-      const p = v === 0 ? F : v === 100 ? O : v === 99 ? I : U;
+      const p = v === 0 ? F : (v >= 100 && v < 128) ? O : v === 99 ? I : U;   // 101..125: an obstacle with its hit position
       img.data[j] = p[0]; img.data[j + 1] = p[1]; img.data[j + 2] = p[2]; img.data[j + 3] = 255;
     }
     g.putImageData(img, 0, 0);

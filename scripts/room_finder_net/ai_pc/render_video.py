@@ -101,7 +101,7 @@ class View:
         vals[~(((r >= 0) & (r < h))[:, None] & ((c >= 0) & (c < w))[None, :])] = -1
         img[vals == 0] = C["free"]
         img[vals == 99] = C["infl"]
-        img[vals == 100] = C["occ"]
+        img[vals >= 100] = C["occ"]          # 101..125: an obstacle with its sub-cell hit position (gateway --subcell)
         return img
 
 
