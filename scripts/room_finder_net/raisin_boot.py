@@ -11,10 +11,13 @@ NAME = "libraisin_empty_encryption.so"
 
 
 def preload():
-    ws = os.environ.get("RAISIN_WS", os.path.expanduser("~/raisin_ws"))
-    cands = [os.path.join(ws, "install", "lib", NAME)]
-    cands += glob.glob(os.path.join(ws, "cmake-build-release", "src", "raisin", "raisin_encryption", "*", NAME))
-    cands += glob.glob(os.path.join(ws, "**", NAME), recursive=False)
+    # $RAISIN_WS, else the workspace holding this script (<ws>/scripts/room_finder_net), so a renamed workspace keeps its own install
+    here = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+    cands = []
+    for ws in dict.fromkeys(w for w in (os.environ.get("RAISIN_WS"), here, os.path.expanduser("~/raisin_ws")) if w):
+        cands += [os.path.join(ws, "install", "lib", NAME)]
+        cands += glob.glob(os.path.join(ws, "cmake-build-release", "src", "raisin", "raisin_encryption", "*", NAME))
+        cands += glob.glob(os.path.join(ws, "**", NAME), recursive=False)
     cands += [os.path.expanduser("~/raisin_master/install/lib/" + NAME)]
     for c in cands:
         if os.path.exists(c):
