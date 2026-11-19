@@ -75,6 +75,8 @@ class ReproducibleArchiveTest(unittest.TestCase):
                 names = archive.namelist()
                 self.assertIn("bin/", names)
                 self.assertIn("include/pkg/pkg.hpp", names)
+                # Unix, whatever platform built it: unzip applies the stored modes only then.
+                self.assertEqual({i.create_system for i in archive.infolist()}, {3})
                 modes = {i.filename: stat.S_IMODE(i.external_attr >> 16) for i in archive.infolist()}
                 self.assertEqual(modes["bin/pkg-tool"], 0o755)
                 self.assertEqual(modes["include/pkg/pkg.hpp"], 0o644)
@@ -90,6 +92,22 @@ class ReproducibleArchiveTest(unittest.TestCase):
                 for name in names:
                     (install / name).write_text(name)
             self.assertEqual(archive_of(Path(first)), archive_of(Path(second)))
+
+    def test_files_are_streamed_not_read_whole(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_install_tree(Path(root))
+            original = Path.read_bytes
+            def refuse(path):
+                raise AssertionError(f"read whole: {path}")
+            Path.read_bytes = refuse
+            try:
+                paths = {"install_dir": Path(root) / "install", "release_dir": Path(root) / "release"}
+                paths["release_dir"].mkdir()
+                archive = publish._create_archive("pkg", "1.2.3", "release", paths)
+            finally:
+                Path.read_bytes = original
+            with zipfile.ZipFile(archive) as opened:
+                self.assertEqual(opened.read("lib/libpkg.so"), b"\x7fELF" + b"\x00" * 64)
 
     def test_content_change_changes_the_archive(self):
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:

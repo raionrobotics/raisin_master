@@ -312,15 +312,24 @@ def _write_reproducible_zip(root: Path, archive_path: Path) -> None:
                 info = zipfile.ZipInfo(
                     (base / name).relative_to(root).as_posix() + "/", _ZIP_EPOCH
                 )
+                # Unix on every platform: ZipInfo picks MS-DOS on Windows, and
+                # unzip applies the stored modes only to Unix entries.
+                info.create_system = 3
                 info.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
                 archive.writestr(info, b"")
             for name in sorted(filenames):
                 path = base / name
-                mode = 0o755 if os.stat(path).st_mode & 0o111 else 0o644
+                status = os.stat(path)
+                mode = 0o755 if status.st_mode & 0o111 else 0o644
                 info = zipfile.ZipInfo(path.relative_to(root).as_posix(), _ZIP_EPOCH)
+                info.create_system = 3
                 info.external_attr = (stat.S_IFREG | mode) << 16
                 info.compress_type = zipfile.ZIP_DEFLATED
-                archive.writestr(info, path.read_bytes())
+                # Streamed, as make_archive did: libraries can be large.
+                with path.open("rb") as source, archive.open(
+                    info, "w", force_zip64=status.st_size > zipfile.ZIP64_LIMIT
+                ) as target:
+                    shutil.copyfileobj(source, target, 1024 * 1024)
 
 
 # ============================================================================
