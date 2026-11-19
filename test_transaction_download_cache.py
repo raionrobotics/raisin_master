@@ -308,3 +308,35 @@ def test_timestamp_unusable_explicit_cache_does_not_fall_back(timestamp_lab):
     assert lab.cache.read_text() == "not a directory"
     assert not lab.requests
     assert not (lab.workspace / "install").exists()
+
+
+def test_a_preparation_cut_off_mid_download_resumes_from_where_it_stopped(archive_lab):
+    """raisin-ota-agent#165 review: a download done with the robot on resumes.
+
+    The agent prepares with the robot running, and a radio link drops. The
+    cycle that failed is discarded (`discard_prepared_install` removes only the
+    staged generation), so the partial and its digest must survive it, and the
+    next preparation must ask for the rest with `Range` rather than start over.
+    """
+    lab = archive_lab
+    lab.interrupted = True
+    assert ota.prepare_archive_install(
+        "release", lab.install, archive_name="test-robot", archive_version="2026.10.19"
+    ) is None
+    # The link dropped 31 bytes into the first package; the rest never started.
+    (partial,) = (lab.workspace / "install").glob("*-ota-1.0.0.zip.part")
+    state = partial.with_name(partial.name + ".json")
+    assert partial.stat().st_size == 31
+    assert state.is_file()
+    first = partial.name.split("-ota-", 1)[0]
+
+    lab.interrupted = False
+    prepared = ota.prepare_archive_install(
+        "release", lab.install, archive_name="test-robot", archive_version="2026.10.19"
+    )
+    assert prepared is not None
+    resumed = [headers for name, headers in lab.requests if name == first][-1]
+    assert resumed["Range"] == "bytes=31-"
+    assert "If-Range" in resumed
+    assert not partial.exists()
+    ota.discard_prepared_install(prepared)

@@ -66,6 +66,8 @@ secrets.yaml
 *_repositories.yaml
 configuration_setting.yaml
 /.raisin-install.lock
+# Per-workspace parameter overrides; local experiments, never committed
+/.raisin/
 .ota_token_cache.json
 .ota/
 

@@ -243,6 +243,70 @@ class SdkDependenciesTest(unittest.TestCase):
             self.prepare()
 
 
+class ExtraHeadersTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        g.init_globals(script_directory=str(self.root))
+        self.include = self.root / "src/raisin/raisin_util/include"
+        (self.include / "raisin_util").mkdir(parents=True)
+
+    def write(self, relative, text):
+        (self.include / relative).write_text(text)
+
+    def target(self):
+        declared = {"raisin_util/time.hpp": "src/raisin/raisin_util/include/raisin_util/time.hpp"}
+        return replace(tc.resolve_android_target(ndk=str(make_fake_ndk(self.root))),
+                       extra_headers=declared)
+
+    def copy(self, target):
+        from commands.setup import copy_extra_headers
+        output = StringIO()
+        with redirect_stdout(output):
+            copy_extra_headers(target)
+        return output.getvalue()
+
+    def test_header_included_from_the_same_directory_is_copied(self):
+        self.write("raisin_util/time.hpp",
+                   '#include <chrono>\n'
+                   '#include "builtin_interfaces/msg/time.hpp"\n'
+                   '#include "raisin_util/simulated_time.hpp"\n')
+        self.write("raisin_util/simulated_time.hpp", "#include <mutex>\n")
+        output = self.copy(self.target())
+        generated = self.root / "generated/include"
+        self.assertTrue((generated / "raisin_util/time.hpp").is_file())
+        self.assertTrue((generated / "raisin_util/simulated_time.hpp").is_file())
+        self.assertFalse((generated / "builtin_interfaces").exists())
+        self.assertIn("raisin_util/simulated_time.hpp (included)", output)
+
+    def test_includes_are_followed_transitively_and_cycles_end(self):
+        self.write("raisin_util/time.hpp", '#include "raisin_util/a.hpp"\n')
+        self.write("raisin_util/a.hpp", '#include "raisin_util/b.hpp"\n')
+        self.write("raisin_util/b.hpp",
+                   '#include "raisin_util/a.hpp"\n#  include "raisin_util/time.hpp"\n')
+        from commands.setup import collect_extra_headers
+        headers = collect_extra_headers(self.target())
+        self.assertEqual(sorted(headers),
+                         ["raisin_util/a.hpp", "raisin_util/b.hpp", "raisin_util/time.hpp"])
+
+    def test_declared_header_keeps_its_declared_source(self):
+        self.write("raisin_util/time.hpp", '#include "raisin_util/clock.hpp"\n')
+        self.write("raisin_util/clock.hpp", "// from the include directory\n")
+        (self.root / "override").mkdir()
+        (self.root / "override/clock.hpp").write_text("// declared\n")
+        target = self.target()
+        target = replace(target, extra_headers={**target.extra_headers,
+                                                "raisin_util/clock.hpp": "override/clock.hpp"})
+        self.copy(target)
+        copied = self.root / "generated/include/raisin_util/clock.hpp"
+        self.assertEqual(copied.read_text(), "// declared\n")
+
+    def test_missing_declared_header_is_reported(self):
+        with self.assertRaisesRegex(SystemExit, "raisin_util/time.hpp"):
+            self.copy(self.target())
+
+
 class CMakeTemplateIsolationTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -28,7 +28,7 @@ import yaml
 from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from . import install_tree
 from .install_tree import InstallTreeUnusable, safe_component
@@ -3804,6 +3804,33 @@ def _session_for(archive_id: str) -> str:
     return get_install_session_id()
 
 
+@dataclass
+class PreparedArchiveInstall:
+    """An archive downloaded and staged, not yet switched to (`prepare_archive_install`).
+
+    Holds what the switch needs. Valid while the staged generation it names is
+    on disk and the caller still holds the install-state lock it prepared under;
+    kept past that lock, ask `prepared_install_usable` before switching to it.
+    """
+
+    release: Path
+    install_base_path: Path
+    build_type: str
+    staging: Path
+    version: str
+    archive_id: str
+    archive_name: str
+    platform_str: str
+    install_session_id: Optional[str]
+    event_context: dict
+    packages: list
+    requested: frozenset
+    results: dict
+    report_snapshot: bool
+    #: The live generation the staged tree was cloned from, None if there was none.
+    base: Optional[str] = None
+
+
 def download_all_from_archive(
     build_type: str,
     install_base_path: Path,
@@ -3816,7 +3843,8 @@ def download_all_from_archive(
     transaction: Optional[PackageInstallTransaction] = None,
     source_packages: Optional[set] = None,
     require_desired_state: bool = False,
-) -> dict:
+    _defer_commit: bool = False,
+) -> Union[dict, "PreparedArchiveInstall"]:
     """Download all packages from an archive.
 
     Args:
@@ -4028,6 +4056,7 @@ def download_all_from_archive(
 
     # Everything below lands in a staging tree cloned from the live one.
     # Nothing the robot runs changes until commit_version() moves the symlink.
+    base = install_tree.current_generation(release)
     staging = install_tree.stage_version(release, actual_version)
     requested = (
         set(package_filter)
@@ -4130,6 +4159,67 @@ def download_all_from_archive(
     if not package_filter:
         _prune_packages_the_archive_dropped(staging, requested, build_type)
 
+    prepared = PreparedArchiveInstall(
+        release=release,
+        install_base_path=Path(install_base_path),
+        build_type=build_type,
+        staging=staging,
+        version=actual_version,
+        archive_id=archive_id,
+        archive_name=archive_name,
+        platform_str=platform_str,
+        install_session_id=install_session_id,
+        event_context=dict(event_context),
+        packages=list(packages),
+        requested=frozenset(requested),
+        results=dict(results),
+        report_snapshot=report_snapshot,
+        base=base,
+    )
+    if _defer_commit:
+        # Everything up to the switch is done and nothing the robot runs has
+        # changed. The caller commits when it may take the robot
+        # (`commit_prepared_install`), or discards (`discard_prepared_install`).
+        return prepared
+    return commit_prepared_install(prepared)
+
+
+def commit_prepared_install(prepared: "PreparedArchiveInstall") -> dict:
+    """Switch `release/install` to a prepared archive, then check and report it.
+
+    The second half of `download_all_from_archive`, unchanged: the commit, the
+    post-switch usability check with its rollback, the snapshot when the
+    preparation asked for one, and pruning. Returns the per-package results, or
+    {} when nothing was switched (the staged tree is discarded) or the switch
+    was rolled back.
+    """
+    release = prepared.release
+    install_base_path = prepared.install_base_path
+    build_type = prepared.build_type
+    actual_version = prepared.version
+    archive_id = prepared.archive_id
+    archive_name = prepared.archive_name
+    platform_str = prepared.platform_str
+    install_session_id = prepared.install_session_id
+    event_context = dict(prepared.event_context)
+    packages = prepared.packages
+    requested = set(prepared.requested)
+    results = dict(prepared.results)
+    report_snapshot = prepared.report_snapshot
+
+    if not prepared_install_usable(prepared):
+        print(
+            f"⚠️ The prepared {archive_name} v{actual_version} no longer matches "
+            "release/install; nothing was switched."
+        )
+        discard_prepared_install(prepared)
+        note_install_failure(
+            "switch",
+            ERROR_UNKNOWN,
+            f"prepared {archive_name} v{actual_version} is stale",
+        )
+        return {}
+
     # Moving the symlink is what makes an install real. If it did not move,
     # nothing was installed — and the health check below would read the tree
     # that is still live and pass, so silence here reports the previous
@@ -4220,6 +4310,95 @@ def download_all_from_archive(
     install_tree.prune_versions(release, keep=_version_retention())
 
     return results
+
+
+def discard_prepared_install(prepared: "PreparedArchiveInstall") -> None:
+    """Drop a prepared archive that will not be committed. The live tree is untouched.
+
+    The session it opened stays: a later attempt at the same archive resumes
+    it, as after any failure that switched nothing.
+
+    By its path, not its version: kept past its lock, the version may by now
+    name another install's tree. Removed only while it is still an uncommitted
+    generation of this release, so a tree somebody committed stays.
+    """
+    staging = Path(prepared.staging)
+    release = Path(prepared.release)
+    if (
+        staging.parent == install_tree.versions_dir(release)
+        and staging.is_dir()
+        and not staging.is_symlink()
+        and install_tree._is_staging(staging)
+        and staging.name != install_tree.current_generation(release)
+    ):
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def prepared_install_usable(prepared: "PreparedArchiveInstall") -> bool:
+    """Whether a prepared archive can still be switched to as it was prepared.
+
+    Always, within the install-state lock it was prepared under. A caller that
+    keeps it past that lock -- one that waited for its machine and will try
+    again later -- has let anything holding the lock in between change what it
+    was prepared against: another install commits and prunes the staged tree,
+    or moves the live version, and switching to a tree cloned from the old one
+    would undo that install. So: the staged tree is still there and still
+    uncommitted, its version resolves to it and to nothing newer, and the live
+    generation is the one it was cloned from.
+    """
+    staging = Path(prepared.staging)
+    release = Path(prepared.release)
+    try:
+        return (
+            staging.is_dir()
+            and not staging.is_symlink()
+            and install_tree._is_staging(staging)
+            and install_tree._resolve_version_dir(release, prepared.version) == staging
+            and install_tree.current_generation(release) == prepared.base
+        )
+    except OSError:
+        return False
+
+
+def prepare_archive_install(
+    build_type: str,
+    install_base_path: Path,
+    *,
+    archive_name: Optional[str] = None,
+    archive_version: Optional[str] = None,
+    tag: Optional[str] = "stable",
+    report_snapshot: bool = True,
+    require_desired_state: bool = False,
+) -> Optional["PreparedArchiveInstall"]:
+    """`download_all_from_archive` up to, and not including, the switch.
+
+    Selection, the `started` event, the download, unpacking and the
+    completeness check all happen here, into a staged generation; the live
+    `release/install` does not change. For a caller that may not take the
+    machine yet -- a robot that is turned on -- and wants the download done
+    before it asks. None when nothing was prepared (the reasons are reported
+    and noted exactly as `download_all_from_archive` does).
+
+    Staged trees left by earlier preparations are removed first
+    (`install_tree.discard_abandoned_staging`). A caller keeping one it means to
+    switch to does not call this; it asks `prepared_install_usable` instead.
+    """
+    abandoned = install_tree.discard_abandoned_staging(
+        install_tree.release_for(install_base_path)
+    )
+    if abandoned:
+        print(f"🧹 Removed {len(abandoned)} abandoned staged tree(s): {', '.join(abandoned)}.")
+    result = download_all_from_archive(
+        build_type,
+        install_base_path,
+        archive_version=archive_version,
+        archive_name=archive_name,
+        tag=tag,
+        report_snapshot=report_snapshot,
+        require_desired_state=require_desired_state,
+        _defer_commit=True,
+    )
+    return result if isinstance(result, PreparedArchiveInstall) else None
 
 
 # `GET /packages` caps `limit` at 100 and rejects anything larger outright.
