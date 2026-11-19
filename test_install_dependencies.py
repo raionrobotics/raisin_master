@@ -306,6 +306,106 @@ def test_strict_local_version_fails_instead_of_hiding_source_with_a_binary(
     assert "finished successfully" not in output
 
 
+@pytest.mark.parametrize(
+    "spec, version, expected",
+    [
+        ("==1.0.0rc1", "1.0.0rc1", True),
+        ("==1.0.0rc1", "1.0.0", False),
+        (">=1.0.0rc1", "1.0.0rc2", True),
+        (">=1.0.0rc1", "1.0.0b1", False),
+        ("==1.0.0.dev1", "1.0.0.dev1", True),
+        ("==1.0.0.dev1", "1.0.0", False),
+        (">=1.0 <2.0", "1.5", True),
+        (">=1.0, <2.0", "2.0", False),
+        ("1.0.0rc1", "1.0.0rc1", True),
+        (">=1.0,\t<2.0", "1.5", True),
+        (">=\t1.0", "1.0", True),
+    ],
+)
+def test_requirement_keeps_its_pre_release_suffix(spec, version, expected):
+    assert install.parse_version_specifier(spec).contains(version) is expected
+
+
+@pytest.mark.parametrize("spec", [">=1.0 latest", "==1.0.0 or 2.0", "1.0 2.0", ">="])
+def test_requirement_with_an_unparsable_part_is_rejected_not_narrowed(spec):
+    assert install.parse_version_specifier(spec) is None
+
+
+def test_tab_separated_requirement_is_checked_against_the_source(workspace, capsys):
+    workspace.source("local_plugin", "1.5")
+    workspace.publish("gui", dependencies=["local_plugin>=1.0,\t<2.0"])
+
+    assert install.install_command(["gui"], "release", strict_local_version=True)
+    assert "cannot satisfy" not in capsys.readouterr().out
+
+
+def test_pre_release_requirement_is_not_met_by_the_release_source(workspace, capsys):
+    workspace.source("raisin", "1.0.0")
+    workspace.publish("raisin_gui", dependencies=["raisin==1.0.0rc1"])
+    workspace.publish("raisin", "1.0.0rc1")
+
+    assert not install.install_command(
+        ["raisin_gui"], "release", strict_local_version=True
+    )
+
+    output = capsys.readouterr().out
+    assert "Local source 'raisin' cannot satisfy '==1.0.0rc1'" in output
+
+
+@pytest.mark.parametrize("source_version", ["1.0.0.dev1", "working-tree", None])
+def test_unconstrained_local_source_passes_without_a_warning_whatever_its_version(
+    workspace, capsys, source_version
+):
+    workspace.source("local_plugin", source_version, ["source_helper"])
+    workspace.publish("gui", dependencies=["local_plugin"])
+    workspace.publish("source_helper")
+
+    assert install.install_command(["gui"], "release", strict_local_version=True)
+
+    output = capsys.readouterr().out
+    assert workspace.transfers == ["gui", "source_helper"]
+    assert "cannot satisfy" not in output
+    assert "Local source version warnings" not in output
+
+
+@pytest.mark.parametrize("source_version, ok", [("0.4.0", True), ("0.2.0", False)])
+def test_unconstrained_visit_first_still_checks_a_later_explicit_requirement(
+    workspace, capsys, source_version, ok
+):
+    workspace.source("local_plugin", source_version)
+    workspace.publish("first", dependencies=["local_plugin"])
+    workspace.publish("second", dependencies=["local_plugin>=0.3"])
+
+    assert (
+        install.install_command(
+            ["first", "second"], "release", strict_local_version=True
+        )
+        == ok
+    )
+
+    output = capsys.readouterr().out
+    assert ("Local source 'local_plugin' cannot satisfy '>=0.3'" in output) != ok
+
+
+@pytest.mark.parametrize("source_version, ok", [("0.4.0", True), ("0.6.0", False)])
+def test_requirements_merged_in_sequence_are_all_checked_against_the_source(
+    workspace, capsys, source_version, ok
+):
+    workspace.source("local_plugin", source_version)
+    workspace.publish("first", dependencies=["local_plugin>=0.3"])
+    workspace.publish("second", dependencies=["local_plugin<0.5"])
+
+    assert (
+        install.install_command(
+            ["first", "second"], "release", strict_local_version=True
+        )
+        == ok
+    )
+
+    output = capsys.readouterr().out
+    assert ("cannot satisfy" in output) != ok
+
+
 @pytest.mark.parametrize("source_version", ["0.3.6", None, "working-tree"])
 def test_default_keeps_mismatched_source_and_installs_all_other_dependencies(
     workspace, capsys, source_version
@@ -324,6 +424,7 @@ def test_default_keeps_mismatched_source_and_installs_all_other_dependencies(
     assert (source / "release.yaml").read_bytes() == manifest_before
     output = capsys.readouterr().out
     assert "Local source version warnings (sources retained for build)" in output
+    assert "1 local source version(s) do not satisfy their requirements" in output
     assert str(source) in output
     assert "required '>=0.3.9'" in output
     assert "These source versions have not been verified" in output
