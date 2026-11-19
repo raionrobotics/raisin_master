@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from commands import globals as g
 from commands import publish
-from commands import setup as setup_module
+from commands import setup as cli_setup
 
 
 def make_install_tree(root: Path) -> Path:
@@ -122,15 +122,15 @@ class ReleaseRecordTest(unittest.TestCase):
         # Jenkins checks the workspace out as raisin_integration, raisin_integration@2,
         # test@2 ...; the folder name must not reach the release record.
         for folder in ("raisin_integration@2", "test@2", "raisin_master"):
-            self.assertEqual(setup_module.release_record_name(f"/ci/{folder}", f"/ci/{folder}"), "raisin_master")
-        self.assertEqual(setup_module.release_record_name("/ci/test@2/src/raisin_gui", "/ci/test@2"), "raisin_gui")
+            self.assertEqual(cli_setup.release_record_name(f"/ci/{folder}", f"/ci/{folder}"), "raisin_master")
+        self.assertEqual(cli_setup.release_record_name("/ci/test@2/src/raisin_gui", "/ci/test@2"), "raisin_gui")
 
     def test_record_lines_do_not_depend_on_discovery_order(self):
         # Repositories are found in filesystem order, which differs between executors.
         with tempfile.TemporaryDirectory() as root:
             first, second = Path(root) / "a.txt", Path(root) / "b.txt"
-            setup_module.write_data(first, {"raisin_gui": "2" * 40, "raisin": "1" * 40})
-            setup_module.write_data(second, {"raisin": "1" * 40, "raisin_gui": "2" * 40})
+            cli_setup.write_data(first, {"raisin_gui": "2" * 40, "raisin": "1" * 40})
+            cli_setup.write_data(second, {"raisin": "1" * 40, "raisin_gui": "2" * 40})
             self.assertEqual(first.read_bytes(), second.read_bytes())
             self.assertEqual(first.read_text(), f"raisin {'1' * 40}\nraisin_gui {'2' * 40}\n")
 
