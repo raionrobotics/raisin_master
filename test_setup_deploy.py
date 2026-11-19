@@ -177,6 +177,8 @@ class TestSetupDeploy(unittest.TestCase):
 
         from commands.publish import _create_archive
 
+        # The public publish path creates its output directory before archiving.
+        (self.root / "archives").mkdir()
         archive = _create_archive(
             "raisin_ros2_messages", "0.1.2", "release",
             {
