@@ -2347,6 +2347,10 @@ class ContentHashMismatch(Exception):
     """Downloaded bytes did not match the digest the server advertised."""
 
 
+class ContentHashMissing(Exception):
+    """A caller requiring integrity metadata received no advertised digest."""
+
+
 class OtaDesiredStateUnusable(Exception):
     """The machine was told what to run and cannot use the answer.
 
@@ -2528,6 +2532,7 @@ def _attempt_download(
     headers: Optional[dict],
     params: Optional[dict],
     timeout: int,
+    require_content_hash: bool = False,
 ) -> None:
     """One download attempt. Raises on any failure; renames into place on success."""
     known_hash = _read_part_state(part_path)
@@ -2578,7 +2583,8 @@ def _attempt_download(
             # `existing` is 0 on the way back in, so no Range is sent and this
             # branch cannot be taken again.
             return _attempt_download(
-                url, part_path, download_path, headers, params, timeout
+                url, part_path, download_path, headers, params, timeout,
+                require_content_hash,
             )
         resp.raise_for_status()
 
@@ -2602,6 +2608,11 @@ def _attempt_download(
 
         expected = _expected_content_hash(resp.headers)
         if not expected:
+            if require_content_hash:
+                _discard_part(part_path)
+                raise ContentHashMissing(
+                    f"server sent no content hash for '{download_path.name}'"
+                )
             print(
                 f"⚠️ OTA server sent no content hash for "
                 f"'{download_path.name}'; download integrity was not verified."
@@ -2646,6 +2657,7 @@ def _download_to_path(
     error_context: str = "",
     max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS,
     timeout: int = 60,
+    require_content_hash: bool = False,
 ) -> tuple:
     """Download to `download_path` with resume, verification and bounded retry.
 
@@ -2658,9 +2670,17 @@ def _download_to_path(
 
     for attempt in range(max_attempts):
         try:
-            _attempt_download(url, part_path, download_path, headers, params, timeout)
+            _attempt_download(
+                url, part_path, download_path, headers, params, timeout,
+                require_content_hash,
+            )
             return (True, None)
-        except (requests.RequestException, OSError, ContentHashMismatch) as e:
+        except (
+            requests.RequestException,
+            OSError,
+            ContentHashMismatch,
+            ContentHashMissing,
+        ) as e:
             error_code = classify_download_error(e)
             print(f"⚠️ OTA download failed{context} [{error_code}]: {e}")
 
