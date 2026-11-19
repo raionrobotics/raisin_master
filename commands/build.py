@@ -21,7 +21,7 @@ from commands.utils import (
     get_build_jobs,
     get_default_portable_march,
 )
-from commands.fms_build_profile import fms_runtime_cmake_args
+from commands.cmake_definitions import cmake_definition_args
 
 
 def _resolve_default_python(script_directory):
@@ -45,8 +45,7 @@ def build_command(
     raisin_march=None,
     python_executable=None,
     sanitizer="off",
-    fms_runtime=False,
-    fms_development_profiles=False,
+    cmake_defines=(),
 ):
     """
     Build the project with CMake and Ninja.
@@ -57,14 +56,11 @@ def build_command(
         raisin_march (str): Optional CPU target override passed to CMake
         python_executable (str): Python interpreter for raisin Python packages
         sanitizer (str): Sanitizer mode for test targets ('off'|'address'|'thread'|'undefined')
-        fms_runtime (bool): Enable the opt-in FMS Mission runtime in its plugin package
-        fms_development_profiles (bool): Explicitly include synthetic development profiles
+        cmake_defines (tuple): Package-owned CMake cache definitions as KEY=VALUE strings
     """
     check_supported_architecture()
     script_directory = g.script_directory
-    fms_cmake_args = fms_runtime_cmake_args(
-        script_directory, fms_runtime, development_profiles=fms_development_profiles
-    )
+    extra_cmake_args = cmake_definition_args(cmake_defines)
     developer_env = g.developer_env
     ninja_path = g.ninja_path
 
@@ -109,7 +105,7 @@ def build_command(
                     cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
                 if sanitizer and sanitizer != "off":
                     cmake_command.append(f"-DRAISIN_SANITIZER={sanitizer}")
-                cmake_command.extend(fms_cmake_args)
+                cmake_command.extend(extra_cmake_args)
                 # Under QEMU, use compiler wrappers that retry on segfault
                 cmake_env = None
                 use_retry = (
@@ -177,7 +173,7 @@ def build_command(
                 ]
                 if python_executable:
                     cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
-                cmake_command.extend(fms_cmake_args)
+                cmake_command.extend(extra_cmake_args)
                 subprocess.run(cmake_command, check=True, text=True, env=developer_env)
 
             except subprocess.CalledProcessError as e:
@@ -288,14 +284,8 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     help="Install artifacts to install/ directory after building",
 )
 @click.option(
-    "--fms-runtime",
-    is_flag=True,
-    help="Build the opt-in FMS Mission runtime; requires a plugin source that declares the feature",
-)
-@click.option(
-    "--fms-development-profiles",
-    is_flag=True,
-    help="Include synthetic FMS development profiles (requires --fms-runtime)",
+    "--cmake-define", "cmake_defines", multiple=True, metavar="KEY=VALUE",
+    help="Pass a package CMake cache definition; repeat for multiple values",
 )
 @click.option(
     "--raisin-py-exec",
@@ -318,7 +308,7 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
 )
 @click.argument("targets", nargs=-1)
 def build_cli_command(
-    build_types, install, fms_runtime, fms_development_profiles,
+    build_types, install, cmake_defines,
     python_executable, test, asan, tsan, targets
 ):
     """
@@ -333,7 +323,7 @@ def build_cli_command(
         raisin build -t debug --test                 # Tests, no sanitizer
         raisin build -t debug --asan                 # Tests + ASan+UBSan (ASan/TSan are mutually exclusive)
         raisin build -t debug --tsan                 # Tests + ThreadSanitizer (ASan/TSan are mutually exclusive)
-        raisin build -t release --fms-runtime --fms-development-profiles  # Synthetic FMS tests
+        raisin build -t release --cmake-define ENABLE_EXAMPLES=ON
 
     \b
     Note: This command first runs setup, then compiles.
@@ -342,8 +332,10 @@ def build_cli_command(
     # Import here to avoid circular dependency
     from commands.setup import setup, process_build_targets
 
-    if fms_development_profiles and not fms_runtime:
-        raise click.ClickException("--fms-development-profiles requires --fms-runtime")
+    try:
+        cmake_definition_args(cmake_defines)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     targets = list(targets)
 
@@ -366,13 +358,6 @@ def build_cli_command(
         build_test_enabled=build_test_enabled,
     )
 
-    try:
-        fms_runtime_cmake_args(
-            g.script_directory, fms_runtime, development_profiles=fms_development_profiles
-        )
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-
     # Then build
     build_types = list(build_types) if build_types else []
 
@@ -387,6 +372,5 @@ def build_cli_command(
         raisin_march=raisin_march,
         python_executable=python_executable,
         sanitizer=sanitizer,
-        fms_runtime=fms_runtime,
-        fms_development_profiles=fms_development_profiles,
+        cmake_defines=cmake_defines,
     )
