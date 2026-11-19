@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 FMS_RUNTIME_PACKAGE = "raisin_behavior_tree_plugin"
 FMS_RUNTIME_OPTION = "RAISIN_BUILD_FMS_RUNTIME"
+FMS_DEVELOPMENT_OPTION = "RAISIN_BUILD_FMS_DEVELOPMENT_PROFILES"
 
 
 def _skip_cmake_comment(source: str, position: int) -> int:
@@ -132,8 +133,12 @@ def fms_runtime_cmake_args(
     script_directory: str,
     enabled: bool,
     package_source_dir: Optional[Union[str, Path]] = None,
+    *,
+    development_profiles: bool = False,
 ) -> list[str]:
     """Set the feature explicitly when declared; fail closed on unsupported opt-in."""
+    if development_profiles and not enabled:
+        raise ValueError("--fms-development-profiles requires --fms-runtime")
     if package_source_dir is None:
         cmake_file = (
             Path(script_directory)
@@ -153,21 +158,46 @@ def fms_runtime_cmake_args(
             "FMS runtime requested, but the raisin_plugin source is unavailable"
         ) from exc
 
-    # CMake cache variable names are case-sensitive; a differently-cased
-    # declaration would not be controlled by the exact -D option below.
-    if not _declares_cmake_option(source, FMS_RUNTIME_OPTION):
-        if not enabled:
-            return []
+    # CMake cache names are case-sensitive; clear both cached choices on a
+    # default build, but only pass options actually declared by this source.
+    has_runtime = _declares_cmake_option(source, FMS_RUNTIME_OPTION)
+    has_development = _declares_cmake_option(source, FMS_DEVELOPMENT_OPTION)
+    if enabled and not has_runtime:
         raise ValueError(
             "FMS runtime requested, but the selected raisin_plugin source does not "
             f"declare {FMS_RUNTIME_OPTION}"
         )
+    if development_profiles and not has_development:
+        raise ValueError(
+            "Development profiles requested, but the selected raisin_plugin source "
+            f"does not declare {FMS_DEVELOPMENT_OPTION}"
+        )
+    if enabled and has_development and not development_profiles:
+        raise ValueError(
+            "This plugin source requires explicit synthetic-profile opt-in: "
+            "use --fms-runtime --fms-development-profiles for development builds"
+        )
+    return [
+        f"-D{option}={'ON' if value else 'OFF'}"
+        for option, declared, value in (
+            (FMS_RUNTIME_OPTION, has_runtime, enabled),
+            (FMS_DEVELOPMENT_OPTION, has_development, development_profiles),
+        )
+        if declared
+    ]
 
-    return [f"-D{FMS_RUNTIME_OPTION}={'ON' if enabled else 'OFF'}"]
 
-
-def write_fms_build_profile(install_directory: str, enabled: bool) -> Path:
+def write_fms_build_profile(
+    install_directory: str, enabled: bool, *, development_profiles: bool = False
+) -> Path:
     """Write the selected FMS feature into the package's immutable archive tree."""
+    if development_profiles and not enabled:
+        raise ValueError("Development profiles require the FMS runtime")
+    # Older sources can contain synthetic profiles without declaring a separate
+    # choice. Omit this marker for them rather than asserting their absence.
+    features = {"fms_runtime": enabled}
+    if development_profiles:
+        features["fms_development_profiles"] = True
     profile_path = (
         Path(install_directory) / "share" / "raisin" / "build-profile.json"
     )
@@ -177,7 +207,7 @@ def write_fms_build_profile(install_directory: str, enabled: bool) -> Path:
             {
                 "schema_version": 1,
                 "package": FMS_RUNTIME_PACKAGE,
-                "features": {"fms_runtime": enabled},
+                "features": features,
             },
             indent=2,
             sort_keys=True,

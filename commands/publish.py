@@ -243,6 +243,7 @@ def _build_package(
     build_type: str,
     paths: dict,
     fms_runtime: bool = False,
+    fms_development_profiles: bool = False,
 ) -> bool:
     """Build the package using CMake + Ninja.
 
@@ -252,12 +253,15 @@ def _build_package(
     install_dir = paths["install_dir"]
     target_dir = paths["target_dir"]
     raisin_march = _get_publish_march()
-    if fms_runtime and target != FMS_RUNTIME_PACKAGE:
+    if (fms_runtime or fms_development_profiles) and target != FMS_RUNTIME_PACKAGE:
         raise ValueError(
-            f"--fms-runtime is only valid for {FMS_RUNTIME_PACKAGE}"
+            f"--fms-runtime / --fms-development-profiles are only valid for {FMS_RUNTIME_PACKAGE}"
         )
     fms_cmake_args = (
-        fms_runtime_cmake_args(g.script_directory, fms_runtime, target_dir)
+        fms_runtime_cmake_args(
+            g.script_directory, fms_runtime, target_dir,
+            development_profiles=fms_development_profiles,
+        )
         if target == FMS_RUNTIME_PACKAGE
         else []
     )
@@ -294,7 +298,9 @@ def _build_package(
     shutil.copy(target_dir / "release.yaml", install_dir / "release.yaml")
     _copy_dependency_declaration(target_dir, install_dir)
     if target == FMS_RUNTIME_PACKAGE and fms_runtime:
-        write_fms_build_profile(str(install_dir), enabled=True)
+        write_fms_build_profile(
+            str(install_dir), enabled=True, development_profiles=fms_development_profiles
+        )
 
     return True
 
@@ -362,6 +368,7 @@ def publish(
     build_type: str,
     dry_run: bool = False,
     fms_runtime: bool = False,
+    fms_development_profiles: bool = False,
 ) -> bool:
     """Build a package and archive it into release/.
 
@@ -378,6 +385,7 @@ def publish(
         dry_run: Accepted and ignored. Kept so CI, which still passes it, keeps
             working; there is no upload left for it to suppress.
         fms_runtime: Enable the opt-in runtime for the designated BT plugin archive.
+        fms_development_profiles: Explicitly include synthetic development profiles.
 
     Returns:
         True when the archive was produced. The caller turns a False into a
@@ -396,7 +404,10 @@ def publish(
         version = details.get("version", "0.0.0")
 
         # Build
-        if not _build_package(target, build_type, paths, fms_runtime=fms_runtime):
+        if not _build_package(
+            target, build_type, paths, fms_runtime=fms_runtime,
+            fms_development_profiles=fms_development_profiles,
+        ):
             return False
 
         # Archive
@@ -445,7 +456,12 @@ def publish(
     is_flag=True,
     help="Build the opt-in FMS Mission runtime (only for raisin_behavior_tree_plugin)",
 )
-def publish_command(target, build_type, dry_run, fms_runtime):
+@click.option(
+    "--fms-development-profiles",
+    is_flag=True,
+    help="Include synthetic FMS development profiles (requires --fms-runtime)",
+)
+def publish_command(target, build_type, dry_run, fms_runtime, fms_development_profiles):
     """
     Build a package and archive it into release/ for CI to upload.
 
@@ -453,20 +469,23 @@ def publish_command(target, build_type, dry_run, fms_runtime):
     Examples:
         raisin publish raisin_network                # Build and archive
         raisin publish raisin_network --type release # Release build only
-        raisin publish raisin_behavior_tree_plugin --type release --fms-runtime
+        raisin publish raisin_behavior_tree_plugin -t release --fms-runtime --fms-development-profiles
         raisin publish my_package -t release
     """
-    if fms_runtime and target != FMS_RUNTIME_PACKAGE:
+    if (fms_runtime or fms_development_profiles) and target != FMS_RUNTIME_PACKAGE:
         raise click.ClickException(
-            f"--fms-runtime is only valid for {FMS_RUNTIME_PACKAGE}"
+            f"--fms-runtime / --fms-development-profiles are only valid for {FMS_RUNTIME_PACKAGE}"
         )
+    if fms_development_profiles and not fms_runtime:
+        raise click.ClickException("--fms-development-profiles requires --fms-runtime")
     try:
-        if fms_runtime:
+        if fms_runtime or fms_development_profiles:
             package_source_dir = _resolve_target_dir(
                 Path(g.script_directory), target
             )
             fms_runtime_cmake_args(
-                g.script_directory, True, package_source_dir
+                g.script_directory, fms_runtime, package_source_dir,
+                development_profiles=fms_development_profiles,
             )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -481,7 +500,10 @@ def publish_command(target, build_type, dry_run, fms_runtime):
     # in release/ already.
     succeeded = True
     for bt in build_types:
-        if not publish(target, bt, dry_run, fms_runtime=fms_runtime):
+        if not publish(
+            target, bt, dry_run, fms_runtime=fms_runtime,
+            fms_development_profiles=fms_development_profiles,
+        ):
             succeeded = False
     if not succeeded:
         raise click.exceptions.Exit(code=1)

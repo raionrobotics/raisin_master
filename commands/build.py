@@ -46,6 +46,7 @@ def build_command(
     python_executable=None,
     sanitizer="off",
     fms_runtime=False,
+    fms_development_profiles=False,
 ):
     """
     Build the project with CMake and Ninja.
@@ -57,10 +58,13 @@ def build_command(
         python_executable (str): Python interpreter for raisin Python packages
         sanitizer (str): Sanitizer mode for test targets ('off'|'address'|'thread'|'undefined')
         fms_runtime (bool): Enable the opt-in FMS Mission runtime in its plugin package
+        fms_development_profiles (bool): Explicitly include synthetic development profiles
     """
     check_supported_architecture()
     script_directory = g.script_directory
-    fms_cmake_args = fms_runtime_cmake_args(script_directory, fms_runtime)
+    fms_cmake_args = fms_runtime_cmake_args(
+        script_directory, fms_runtime, development_profiles=fms_development_profiles
+    )
     developer_env = g.developer_env
     ninja_path = g.ninja_path
 
@@ -289,6 +293,11 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     help="Build the opt-in FMS Mission runtime; requires a plugin source that declares the feature",
 )
 @click.option(
+    "--fms-development-profiles",
+    is_flag=True,
+    help="Include synthetic FMS development profiles (requires --fms-runtime)",
+)
+@click.option(
     "--raisin-py-exec",
     "python_executable",
     default=None,
@@ -309,7 +318,8 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
 )
 @click.argument("targets", nargs=-1)
 def build_cli_command(
-    build_types, install, fms_runtime, python_executable, test, asan, tsan, targets
+    build_types, install, fms_runtime, fms_development_profiles,
+    python_executable, test, asan, tsan, targets
 ):
     """
     Compile the project using CMake and Ninja.
@@ -323,7 +333,7 @@ def build_cli_command(
         raisin build -t debug --test                 # Tests, no sanitizer
         raisin build -t debug --asan                 # Tests + ASan+UBSan (ASan/TSan are mutually exclusive)
         raisin build -t debug --tsan                 # Tests + ThreadSanitizer (ASan/TSan are mutually exclusive)
-        raisin build -t release --fms-runtime        # Opt in to the FMS Mission runtime
+        raisin build -t release --fms-runtime --fms-development-profiles  # Synthetic FMS tests
 
     \b
     Note: This command first runs setup, then compiles.
@@ -331,6 +341,9 @@ def build_cli_command(
     """
     # Import here to avoid circular dependency
     from commands.setup import setup, process_build_targets
+
+    if fms_development_profiles and not fms_runtime:
+        raise click.ClickException("--fms-development-profiles requires --fms-runtime")
 
     targets = list(targets)
 
@@ -354,7 +367,9 @@ def build_cli_command(
     )
 
     try:
-        fms_runtime_cmake_args(g.script_directory, fms_runtime)
+        fms_runtime_cmake_args(
+            g.script_directory, fms_runtime, development_profiles=fms_development_profiles
+        )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -373,4 +388,5 @@ def build_cli_command(
         python_executable=python_executable,
         sanitizer=sanitizer,
         fms_runtime=fms_runtime,
+        fms_development_profiles=fms_development_profiles,
     )
