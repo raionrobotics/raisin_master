@@ -1,3 +1,6 @@
+import shutil
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch
 
@@ -133,6 +136,73 @@ def test_publish_setup_scans_only_the_published_package_repository():
     scan = _scanned_repos()
     _run_setup(scan, package_name="raisin_raibo2", build_type="Release")
     assert scan.repos == {"raisin_raibo2"}
+
+
+def test_nested_publish_setup_scans_parent_and_finds_nested_cmake_project(tmp_path):
+    package = tmp_path / "src" / "raisin_plugin" / "raisin_behavior_tree_plugin"
+    package.mkdir(parents=True)
+    (package / "CMakeLists.txt").write_text("project(raisin_behavior_tree_plugin)\n")
+    (package / "release.yaml").write_text("version: 0.0.1\n")
+    (tmp_path / "templates").mkdir()
+    (tmp_path / "templates" / "raisin_serialization_base.hpp").write_text("// fixture\n")
+    repository_root = Path(setup_commands.__file__).resolve().parents[1]
+    shutil.copyfile(
+        repository_root / "templates" / "CMakeLists.txt",
+        tmp_path / "templates" / "CMakeLists.txt",
+    )
+
+    guarded_repositories = []
+    project_searches = []
+    find_projects = setup_commands.find_project_directories
+
+    def capture_guard(repositories):
+        guarded_repositories.append(repositories)
+
+    def capture_projects(search_directories, *args, **kwargs):
+        project_searches.append(search_directories)
+        return find_projects(search_directories, *args, **kwargs)
+
+    with (
+        patch.object(setup_commands.g, "script_directory", str(tmp_path)),
+        patch.object(setup_commands, "check_supported_architecture"),
+        patch.object(setup_commands, "get_repos_to_ignore", return_value=[]),
+        patch.object(setup_commands, "get_packages_to_ignore", return_value=[]),
+        patch.object(setup_commands, "guard_src_repo_lfs_assets", side_effect=capture_guard),
+        patch.object(setup_commands, "deploy_install_packages"),
+        patch.object(setup_commands, "guard_src_repo_release_yaml_dependencies"),
+        patch.object(setup_commands, "build_pure_cmake_projects", return_value=[]) as pure_cmake,
+        patch.object(setup_commands, "find_interface_files", return_value=([], [])),
+        patch.object(setup_commands, "find_project_directories", side_effect=capture_projects),
+        patch.object(setup_commands.runtime_prefix, "make_scripts_executable"),
+        patch.object(setup_commands, "find_git_repos", return_value=[]),
+        patch.object(setup_commands, "collect_src_vcpkg_dependencies"),
+        patch.object(setup_commands, "generate_vcpkg_json"),
+    ):
+        found = setup_commands.setup(
+            package_name="raisin_behavior_tree_plugin",
+            package_source_dir=package,
+            build_type="Release",
+            build_dir=str(tmp_path / "build"),
+        )
+
+    assert guarded_repositories == [{"raisin_plugin"}]
+    assert project_searches == [["src/raisin_plugin/raisin_behavior_tree_plugin"]]
+    assert found == [str(package)]
+    assert pure_cmake.call_args.args[2] == "raisin_plugin/raisin_behavior_tree_plugin"
+    assert "src/raisin_plugin/raisin_behavior_tree_plugin" in (
+        tmp_path / "CMakeLists.txt"
+    ).read_text()
+
+
+def test_publish_setup_rejects_source_directory_outside_src(tmp_path):
+    outside = tmp_path / "outside" / "raisin_behavior_tree_plugin"
+    outside.mkdir(parents=True)
+    with patch.object(setup_commands.g, "script_directory", str(tmp_path)):
+        with pytest.raises(ValueError, match="inside the source directory"):
+            setup_commands.setup(
+                package_name="raisin_behavior_tree_plugin",
+                package_source_dir=outside,
+            )
 
 
 @pytest.mark.parametrize(

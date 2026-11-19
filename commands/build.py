@@ -21,6 +21,7 @@ from commands.utils import (
     get_build_jobs,
     get_default_portable_march,
 )
+from commands.cmake_definitions import cmake_definition_args
 
 
 def _resolve_default_python(script_directory):
@@ -38,7 +39,14 @@ def _resolve_default_python(script_directory):
     return str(candidate) if candidate.is_file() else None
 
 
-def build_command(build_types, to_install=False, raisin_march=None, python_executable=None, sanitizer="off"):
+def build_command(
+    build_types,
+    to_install=False,
+    raisin_march=None,
+    python_executable=None,
+    sanitizer="off",
+    cmake_defines=(),
+):
     """
     Build the project with CMake and Ninja.
 
@@ -48,9 +56,11 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
         raisin_march (str): Optional CPU target override passed to CMake
         python_executable (str): Python interpreter for raisin Python packages
         sanitizer (str): Sanitizer mode for test targets ('off'|'address'|'thread'|'undefined')
+        cmake_defines (tuple): Package-owned CMake cache definitions as KEY=VALUE strings
     """
     check_supported_architecture()
     script_directory = g.script_directory
+    extra_cmake_args = cmake_definition_args(cmake_defines)
     developer_env = g.developer_env
     ninja_path = g.ninja_path
 
@@ -95,6 +105,7 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
                     cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
                 if sanitizer and sanitizer != "off":
                     cmake_command.append(f"-DRAISIN_SANITIZER={sanitizer}")
+                cmake_command.extend(extra_cmake_args)
                 # Under QEMU, use compiler wrappers that retry on segfault
                 cmake_env = None
                 use_retry = (
@@ -162,6 +173,7 @@ def build_command(build_types, to_install=False, raisin_march=None, python_execu
                 ]
                 if python_executable:
                     cmake_command.append(f"-DPython_EXECUTABLE={python_executable}")
+                cmake_command.extend(extra_cmake_args)
                 subprocess.run(cmake_command, check=True, text=True, env=developer_env)
 
             except subprocess.CalledProcessError as e:
@@ -272,6 +284,10 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
     help="Install artifacts to install/ directory after building",
 )
 @click.option(
+    "--cmake-define", "cmake_defines", multiple=True, metavar="KEY=VALUE",
+    help="Pass a package CMake cache definition; repeat for multiple values",
+)
+@click.option(
     "--raisin-py-exec",
     "python_executable",
     default=None,
@@ -292,7 +308,8 @@ def restore_pure_cmake_build_dir(script_directory, build_dir, build_type):
 )
 @click.argument("targets", nargs=-1)
 def build_cli_command(
-    build_types, install, python_executable, test, asan, tsan, targets
+    build_types, install, cmake_defines,
+    python_executable, test, asan, tsan, targets
 ):
     """
     Compile the project using CMake and Ninja.
@@ -306,6 +323,7 @@ def build_cli_command(
         raisin build -t debug --test                 # Tests, no sanitizer
         raisin build -t debug --asan                 # Tests + ASan+UBSan (ASan/TSan are mutually exclusive)
         raisin build -t debug --tsan                 # Tests + ThreadSanitizer (ASan/TSan are mutually exclusive)
+        raisin build -t release --cmake-define ENABLE_EXAMPLES=ON
 
     \b
     Note: This command first runs setup, then compiles.
@@ -313,6 +331,11 @@ def build_cli_command(
     """
     # Import here to avoid circular dependency
     from commands.setup import setup, process_build_targets
+
+    try:
+        cmake_definition_args(cmake_defines)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     targets = list(targets)
 
@@ -343,4 +366,11 @@ def build_cli_command(
         click.echo("   Example: raisin build --type release")
         sys.exit(1)
 
-    build_command(build_types, to_install=install, raisin_march=raisin_march, python_executable=python_executable, sanitizer=sanitizer)
+    build_command(
+        build_types,
+        to_install=install,
+        raisin_march=raisin_march,
+        python_executable=python_executable,
+        sanitizer=sanitizer,
+        cmake_defines=cmake_defines,
+    )
