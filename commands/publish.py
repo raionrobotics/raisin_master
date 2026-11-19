@@ -99,6 +99,28 @@ def _get_publish_march() -> str:
     return os.environ.get("RAISIN_MARCH", get_default_portable_march())
 
 
+# 1980-01-01, the same instant every zip entry records.
+_SOURCE_DATE_EPOCH = "315532800"
+
+
+def _reproducible_build_env(environ, workspace: str) -> dict:
+    """The build environment, minus what makes two builds of one source differ.
+
+    A package build is named by the hash of its zip, and robots skip a package
+    whose hash they already have. GCC writes __DATE__/__TIME__ from
+    SOURCE_DATE_EPOCH when it is set (bundled codecs log their build time), and
+    -ffile-prefix-map drops the checkout path that __FILE__ and debug info
+    would otherwise record (CI executors check out under different folders).
+    A caller's own epoch and flags are kept.
+    """
+    env = dict(environ)
+    env.setdefault("SOURCE_DATE_EPOCH", _SOURCE_DATE_EPOCH)
+    prefix_map = f"-ffile-prefix-map={workspace}=."
+    for name in ("CFLAGS", "CXXFLAGS"):
+        env[name] = f"{env[name]} {prefix_map}" if env.get(name) else prefix_map
+    return env
+
+
 def _build_linux(
     build_dir: Path,
     install_dir: Path,
@@ -120,19 +142,17 @@ def _build_linux(
         f"-DRAISIN_MARCH={raisin_march}",
     ]
 
+    build_env = _reproducible_build_env(os.environ, g.script_directory)
+
     # Under QEMU, use compiler wrappers that retry on segfault
-    cmake_env = None
     use_retry = is_qemu_emulated() or os.environ.get("RAISIN_QEMU_RETRY") == "1"
     if use_retry:
         scripts_dir = Path(g.script_directory) / "scripts"
-        cmake_env = {
-            **os.environ,
-            "CC": str(scripts_dir / "gcc-retry.sh"),
-            "CXX": str(scripts_dir / "g++-retry.sh"),
-        }
+        build_env["CC"] = str(scripts_dir / "gcc-retry.sh")
+        build_env["CXX"] = str(scripts_dir / "g++-retry.sh")
         print("🔄 QEMU retry wrapper enabled via CC/CXX")
 
-    subprocess.run(cmake_cmd, check=True, text=True, env=cmake_env)
+    subprocess.run(cmake_cmd, check=True, text=True, env=build_env)
     print("✅ CMake configuration successful.")
 
     print("🛠️  Building with Ninja...")
@@ -146,7 +166,9 @@ def _build_linux(
     ninja_cmd = ["ninja", "install", f"-j{core_count}"]
     for attempt in range(1, max_attempts + 1):
         try:
-            subprocess.run(ninja_cmd, cwd=build_dir, check=True, text=True)
+            subprocess.run(
+                ninja_cmd, cwd=build_dir, check=True, text=True, env=build_env
+            )
             break
         except subprocess.CalledProcessError:
             if attempt < max_attempts:

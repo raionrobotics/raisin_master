@@ -1743,6 +1743,30 @@ def write_data(file_path, data):
             f.write(f"{repo} {commit}\n")
 
 
+def release_record_repos(git_repos, workspace_root, package_name):
+    """The repositories a release.txt records.
+
+    A published package records only the repository it is built from. A record
+    of the whole workspace changed every package whenever any one repository
+    changed, so robots downloaded every package again for each build. A
+    development setup (no package) keeps the whole workspace.
+    """
+    if not package_name:
+        return list(git_repos)
+    package_dir = os.path.realpath(os.path.join(workspace_root, "src", package_name))
+    owners = [
+        repo
+        for repo in git_repos
+        if os.path.realpath(repo) != os.path.realpath(workspace_root)
+        and (
+            package_dir == os.path.realpath(repo)
+            or package_dir.startswith(os.path.realpath(repo) + os.sep)
+        )
+    ]
+    # The innermost repository holding the package is the one it is built from.
+    return sorted(owners, key=len)[-1:]
+
+
 def release_record_name(repo, workspace_root):
     """The name a repository is recorded under in release.txt.
 
@@ -2288,13 +2312,21 @@ def setup(
     install_release_file = Path(g.script_directory) / "install" / "release.txt"
 
     # Read existing data if the file already exists. A cross prefix starts empty
-    # so it never inherits the host workspace's revisions.
-    existing_data = {} if cross else read_existing_data(install_release_file)
+    # so it never inherits the host workspace's revisions, and neither does a
+    # published package: it records only the repository it is built from.
+    package_release = bool(package_name) and not cross
+    existing_data = (
+        {} if cross or package_release else read_existing_data(install_release_file)
+    )
     output_file = Path(g.script_directory) / install_dir / "release.txt"
 
     # Find Git repositories under the base directory.
     git_repos = find_git_repos(g.script_directory + "/src")
     git_repos.append(g.script_directory)
+    if package_release:
+        git_repos = release_record_repos(
+            git_repos, g.script_directory, package_name
+        )
     new_data = {}
 
     if not git_repos:

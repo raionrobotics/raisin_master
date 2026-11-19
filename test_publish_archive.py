@@ -20,6 +20,7 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -117,6 +118,41 @@ class ReproducibleArchiveTest(unittest.TestCase):
             self.assertNotEqual(archive_of(Path(first)), archive_of(Path(second)))
 
 
+class ReproducibleBuildEnvironmentTest(unittest.TestCase):
+    """The compiler must not record when or where a package was built."""
+
+    def run_build(self, environ):
+        calls = []
+
+        def record(cmd, **kwargs):
+            calls.append((cmd, kwargs.get("env")))
+
+        with mock.patch.dict(os.environ, environ, clear=True), \
+                mock.patch.object(publish.subprocess, "run", side_effect=record), \
+                mock.patch.object(publish, "is_qemu_emulated", return_value=False), \
+                mock.patch.object(publish, "get_build_jobs", return_value=2), \
+                mock.patch.object(g, "script_directory", "/ci/workspace/raisin_integration@2"):
+            publish._build_linux(Path("/tmp/b"), Path("/tmp/i"), "Release", "native")
+        return calls
+
+    def test_configure_and_build_share_a_fixed_date_and_a_path_free_prefix(self):
+        calls = self.run_build({"PATH": "/usr/bin"})
+        self.assertEqual([c[0][0] for c in calls], ["cmake", "ninja"])
+        for _, env in calls:
+            self.assertIsNotNone(env)
+            self.assertEqual(env["SOURCE_DATE_EPOCH"], "315532800")
+            for flags in (env["CFLAGS"], env["CXXFLAGS"]):
+                self.assertIn("-ffile-prefix-map=/ci/workspace/raisin_integration@2=.", flags)
+            self.assertEqual(env["PATH"], "/usr/bin")
+
+    def test_caller_flags_and_epoch_are_kept(self):
+        calls = self.run_build({"CFLAGS": "-O2", "CXXFLAGS": "-g", "SOURCE_DATE_EPOCH": "1700000000"})
+        for _, env in calls:
+            self.assertTrue(env["CFLAGS"].startswith("-O2 "))
+            self.assertTrue(env["CXXFLAGS"].startswith("-g "))
+            self.assertEqual(env["SOURCE_DATE_EPOCH"], "1700000000")
+
+
 class ReleaseRecordTest(unittest.TestCase):
     def test_workspace_root_is_named_by_repository_not_by_folder(self):
         # Jenkins checks the workspace out as raisin_integration, raisin_integration@2,
@@ -124,6 +160,16 @@ class ReleaseRecordTest(unittest.TestCase):
         for folder in ("raisin_integration@2", "test@2", "raisin_master"):
             self.assertEqual(setup_module.release_record_name(f"/ci/{folder}", f"/ci/{folder}"), "raisin_master")
         self.assertEqual(setup_module.release_record_name("/ci/test@2/src/raisin_gui", "/ci/test@2"), "raisin_gui")
+
+    def test_a_package_records_only_the_repository_it_is_built_from(self):
+        # Otherwise any repository's change rewrites every package's record,
+        # and with it every package's zip.
+        repos = ["/ws/src/raisin", "/ws/src/raisin_gui", "/ws/src/raisin_third_party_common", "/ws"]
+        self.assertEqual(setup_module.release_record_repos(repos, "/ws", "raisin_gui"), ["/ws/src/raisin_gui"])
+        # A package nested inside a repository records that repository.
+        self.assertEqual(setup_module.release_record_repos(repos, "/ws", "raisin/raisin_network"), ["/ws/src/raisin"])
+        # A development setup (no package) keeps the whole workspace.
+        self.assertEqual(setup_module.release_record_repos(repos, "/ws", ""), repos)
 
     def test_record_lines_do_not_depend_on_discovery_order(self):
         # Repositories are found in filesystem order, which differs between executors.
