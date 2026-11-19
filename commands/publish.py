@@ -7,8 +7,10 @@ Builds a package and archives it into release/. Uploading is CI's job.
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -281,14 +283,44 @@ def _create_archive(
 
     print("\n--- Creating Release Archive ---")
     print(f"📦 Compressing '{install_dir}'...")
-    shutil.make_archive(
-        base_name=str(archive_base),
-        format="zip",
-        root_dir=str(install_dir),
-    )
     archive_path = Path(str(archive_base) + ".zip")
+    _write_reproducible_zip(Path(install_dir), archive_path)
     print(f"✅ Successfully created archive: {archive_path}")
     return archive_path
+
+
+# The earliest time a zip can record. Every entry carries it, because the OTA
+# server names a build by the hash of its zip and lets a version tag point at one
+# build only: a timestamp from the build clock would make two builds of the same
+# sources two different packages. Installs extract with `extractall`, which does
+# not restore zip times, so unpacked files still get the time they were written.
+_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+
+
+def _write_reproducible_zip(root: Path, archive_path: Path) -> None:
+    """Zip `root` so that the bytes depend only on the files' names, contents and
+    executable bits: entries are sorted, timestamps fixed and modes normalised.
+
+    Like `shutil.make_archive`, it records every directory, follows symlinks to
+    files and records a symlinked directory without descending into it.
+    """
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for current, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            base = Path(current)
+            for name in dirnames:
+                info = zipfile.ZipInfo(
+                    (base / name).relative_to(root).as_posix() + "/", _ZIP_EPOCH
+                )
+                info.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
+                archive.writestr(info, b"")
+            for name in sorted(filenames):
+                path = base / name
+                mode = 0o755 if os.stat(path).st_mode & 0o111 else 0o644
+                info = zipfile.ZipInfo(path.relative_to(root).as_posix(), _ZIP_EPOCH)
+                info.external_attr = (stat.S_IFREG | mode) << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, path.read_bytes())
 
 
 # ============================================================================

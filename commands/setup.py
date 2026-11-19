@@ -1737,8 +1737,22 @@ def write_data(file_path, data):
     Writes the data (a dict of repo names to commit hashes) to the file.
     """
     with open(file_path, "w") as f:
-        for repo, commit in data.items():
+        # Sorted: repositories are discovered in filesystem order, and a package
+        # build is named by its zip's hash, so this file must not depend on it.
+        for repo, commit in sorted(data.items()):
             f.write(f"{repo} {commit}\n")
+
+
+def release_record_name(repo, workspace_root):
+    """The name a repository is recorded under in release.txt.
+
+    The workspace itself is raisin_master, whatever folder it was checked out
+    into: CI checks it out as raisin_integration, raisin_integration@2, test@2,
+    and the folder name would make otherwise identical builds differ.
+    """
+    if os.path.realpath(repo) == os.path.realpath(workspace_root):
+        return "raisin_master"
+    return os.path.basename(repo)
 
 
 def deploy_install_packages():
@@ -2289,8 +2303,7 @@ def setup(
         for repo in git_repos:
             commit_hash = get_commit_hash(repo)
             if commit_hash:
-                # Use just the folder name for the repository.
-                repo_name = os.path.basename(repo)
+                repo_name = release_record_name(repo, g.script_directory)
                 new_data[repo_name] = commit_hash
                 print(f"✅ Found {repo_name}: {commit_hash}")
 
