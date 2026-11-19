@@ -5,6 +5,7 @@ in setup: a package with a checkout in src/ is built rather than deployed, and
 each deployed package's generated headers are collected for that build.
 """
 
+import inspect
 import sys
 import tempfile
 import unittest
@@ -97,7 +98,18 @@ class TestSetupDeploy(unittest.TestCase):
             cli_setup.deploy_install_packages()
 
     def test_package_publish_includes_interfaces_from_its_ignored_source_repo(self):
-        source_repo = self.root / "src" / "raisin_ros2_messages"
+        self._check_published_interfaces()
+
+    def test_nested_package_publish_uses_its_actual_source_repository(self):
+        if "package_source_dir" not in inspect.signature(cli_setup.setup).parameters:
+            self.skipTest("requires the generic nested-package publish path")
+        self._check_published_interfaces(nested=True)
+
+    def _check_published_interfaces(self, nested=False):
+        repo_name = "interface_collection" if nested else "raisin_ros2_messages"
+        source_repo = self.root / "src" / repo_name
+        if nested:
+            source_repo = source_repo / "raisin_ros2_messages"
         imu = source_repo / "messages" / "sensor_msgs" / "msg" / "Imu.msg"
         imu.parent.mkdir(parents=True)
         imu.write_text("float32 angular_velocity_x\n", encoding="utf-8")
@@ -128,7 +140,7 @@ class TestSetupDeploy(unittest.TestCase):
             (self.root / "templates" / name).write_bytes((templates / name).read_bytes())
         # The unrelated repo is active: package publishing must still scope
         # interfaces to the selected package's own source repository.
-        self.ignored = {"raisin_ros2_messages"}
+        self.ignored = {repo_name}
         (self.root / "configuration_setting.yaml").write_text(
             "user_type: devel\npackages_to_ignore: []\nrepos_to_ignore: []\n",
             encoding="utf-8",
@@ -145,7 +157,8 @@ class TestSetupDeploy(unittest.TestCase):
                 patch.object(cli_setup, "generate_vcpkg_json"):
             with chdir(self.root):
                 projects = cli_setup.setup(
-                    package_name="raisin_ros2_messages", build_type="release"
+                    package_name="raisin_ros2_messages", build_type="release",
+                    **({"package_source_dir": source_repo} if nested else {}),
                 )
 
         packaged = (

@@ -2208,7 +2208,7 @@ def setup(
         # raisin_ros2_messages). Keep it excluded from CMake discovery above,
         # but allow its interface definitions into this package's archive.
         interface_dirs = [src_dir]
-        source_repo = Path(package_name).parts[0]
+        source_repo = get_repo_name_from_path(Path(g.script_directory) / src_dir)
         interface_repos_to_ignore = [
             repo for repo in repos_to_ignore if repo != source_repo
         ]
