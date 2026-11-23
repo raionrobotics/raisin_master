@@ -2307,8 +2307,11 @@ def setup(
     own_generated = set()
 
     def archive_dir(interface_file):
-        if archive_root is None or interface_file in own_generated \
-                or Path(interface_file).resolve().is_relative_to(archive_root):
+        if (
+            archive_root is None
+            or interface_file in own_generated
+            or Path(interface_file).resolve().is_relative_to(archive_root)
+        ):
             return install_dir
         return None
 
