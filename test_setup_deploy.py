@@ -197,6 +197,51 @@ class TestSetupDeploy(unittest.TestCase):
                 "messages/stale_action_package/msg/Stale.msg", published.namelist()
             )
 
+    def test_package_publish_generates_headers_of_messages_it_uses_from_other_repos(self):
+        # raisin_interfaces/AudioData uses std_msgs/Header from raisin_ros2_messages. Publishing
+        # raisin builds its own sources, so the std_msgs header must be generated, while only
+        # raisin's own definitions go into raisin's archive.
+        ros2 = self.root / "src" / "raisin_ros2_messages" / "messages" / "std_msgs" / "msg" / "Header.msg"
+        ros2.parent.mkdir(parents=True)
+        ros2.write_text("string frame_id\n", encoding="utf-8")
+        own = self.root / "src" / "raisin" / "raisin_interfaces" / "msg" / "AudioData.msg"
+        own.parent.mkdir(parents=True)
+        own.write_text("std_msgs/Header header\n", encoding="utf-8")
+        templates = Path(__file__).parent / "templates"
+        (self.root / "templates").mkdir()
+        for name in (
+            "ActionTemplate.hpp", "MessageTemplate.hpp", "ServiceTemplate.hpp",
+            "raisin_serialization_base.hpp",
+        ):
+            (self.root / "templates" / name).write_bytes((templates / name).read_bytes())
+        self.ignored = set()   # the integration workspace ignores no repository (EXCLUDED_REPOS)
+        (self.root / "configuration_setting.yaml").write_text(
+            "user_type: devel\npackages_to_ignore: []\nrepos_to_ignore: []\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(cli_setup, "check_supported_architecture"), \
+                patch.object(cli_setup, "guard_src_repo_lfs_assets"), \
+                patch.object(cli_setup, "deploy_install_packages"), \
+                patch.object(cli_setup, "guard_src_repo_release_yaml_dependencies"), \
+                patch.object(cli_setup, "build_pure_cmake_projects", return_value=[]), \
+                patch.object(cli_setup, "update_cmake_file"), \
+                patch.object(cli_setup, "get_commit_hash", return_value=None), \
+                patch.object(cli_setup, "collect_src_vcpkg_dependencies"), \
+                patch.object(cli_setup, "generate_vcpkg_json"):
+            with chdir(self.root):
+                cli_setup.setup(package_name="raisin", build_type="release")
+
+        generated = self.root / "generated" / "include"
+        self.assertTrue((generated / "std_msgs" / "msg" / "header.hpp").is_file())
+        self.assertTrue((generated / "raisin_interfaces" / "msg" / "audio_data.hpp").is_file())
+        messages = (
+            self.root / "release" / "install" / "raisin" / "ubuntu" / "24.04" / "x86_64"
+            / "release" / "messages"
+        )
+        self.assertTrue((messages / "raisin_interfaces" / "msg" / "AudioData.msg").is_file())
+        self.assertFalse((messages / "std_msgs").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

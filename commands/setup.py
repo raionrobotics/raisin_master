@@ -326,9 +326,12 @@ def create_service_file(srv_file, project_directory, install_dir):
     # Recreate the directory to ensure it's clean
     os.makedirs(include_project_srv_dir, exist_ok=True)
 
-    destination_file = os.path.join(install_dir, "messages", project_name, "srv", "")
-    os.makedirs(destination_file, exist_ok=True)
-    shutil.copy2(srv_file, destination_file)
+    # install_dir None: the header is generated for building against it, the definition is not
+    # part of the package being installed (it belongs to another package).
+    if install_dir is not None:
+        destination_file = os.path.join(install_dir, "messages", project_name, "srv", "")
+        os.makedirs(destination_file, exist_ok=True)
+        shutil.copy2(srv_file, destination_file)
 
     # Read the template
     with open(template_path, "r") as template_file:
@@ -1139,9 +1142,11 @@ def create_action_file(action_file, project_directory, install_dir):
     include_project_msg_dir = os.path.join(
         g.generated_dir, "include", project_name, "action"
     )
-    destination_file = os.path.join(install_dir, "messages", project_name, "action", "")
-    os.makedirs(destination_file, exist_ok=True)
-    shutil.copy2(action_file, destination_file)
+    # install_dir None: generated for building against it only (see create_service_file).
+    if install_dir is not None:
+        destination_file = os.path.join(install_dir, "messages", project_name, "action", "")
+        os.makedirs(destination_file, exist_ok=True)
+        shutil.copy2(action_file, destination_file)
 
     # Delete the entire include directory before generating new files
     os.makedirs(include_project_msg_dir, exist_ok=True)  # Recreate it
@@ -1252,9 +1257,12 @@ def create_message_file(msg_file, project_directory, install_dir):
     include_project_msg_dir = os.path.join(
         g.generated_dir, "include", project_name, "msg"
     )
-    destination_file = os.path.join(install_dir, "messages", project_name, "msg", "")
-    os.makedirs(destination_file, exist_ok=True)
-    shutil.copy2(msg_file, destination_file)
+    # install_dir None: header only, the definition belongs to another package (see
+    # create_service_file).
+    if install_dir is not None:
+        destination_file = os.path.join(install_dir, "messages", project_name, "msg", "")
+        os.makedirs(destination_file, exist_ok=True)
+        shutil.copy2(msg_file, destination_file)
 
     # Delete the entire include directory before generating new files
     os.makedirs(include_project_msg_dir, exist_ok=True)  # Recreate it
@@ -2277,12 +2285,14 @@ def setup(
         interface_dirs = [str(path) for path in source_packages.values()]
         interface_repos_to_ignore = repos_to_ignore
     elif package_name:
-        # Package publishing reads only this checkout. A repository can be
-        # excluded from the aggregate workspace build while still being the
-        # source of the package currently being published (for example,
-        # raisin_ros2_messages). Keep it excluded from CMake discovery above,
-        # but allow its interface definitions into this package's archive.
-        interface_dirs = [src_dir]
+        # Package publishing generates headers for every interface in the workspace, as a
+        # workspace build does: this package's own messages include the ones they use from other
+        # repositories (std_msgs, geometry_msgs, ...), so those headers must exist to build it.
+        # Only this package's own interfaces go into its archive (archive_roots below). A
+        # repository can be excluded from the aggregate workspace build while still being the
+        # source of the package being published (for example, raisin_ros2_messages): keep it
+        # excluded from CMake discovery above, but read its interface definitions here.
+        interface_dirs = ["src"]
         source_repo = get_repo_name_from_path(Path(g.script_directory) / src_dir)
         interface_repos_to_ignore = [
             repo for repo in repos_to_ignore if repo != source_repo
@@ -2290,6 +2300,18 @@ def setup(
     else:
         interface_dirs = ["src"]
         interface_repos_to_ignore = repos_to_ignore
+    # Which definitions the installed package carries: in a package publish only this package's
+    # own (its source, and what its own actions generate); otherwise all that is generated.
+    # Every other interface gets a header to build against and no copy (install_dir None).
+    archive_root = (Path(g.script_directory) / src_dir).resolve() if package_name and not cross else None
+    own_generated = set()
+
+    def archive_dir(interface_file):
+        if archive_root is None or interface_file in own_generated \
+                or Path(interface_file).resolve().is_relative_to(archive_root):
+            return install_dir
+        return None
+
     action_files = find_interface_files(
         interface_dirs, ["action"], packages_to_ignore,
         interface_repos_to_ignore, packages_allowed
@@ -2306,10 +2328,13 @@ def setup(
     # The shared temp tree may contain older actions from the same ROS package.
     generated_msgs, generated_srvs = [], []
     for action_file in action_files:
-        generated = create_action_file(action_file, Path(action_file).parent.parent, install_dir)
+        action_archive = archive_dir(action_file)
+        generated = create_action_file(action_file, Path(action_file).parent.parent, action_archive)
         if generated:
             generated_msgs.extend(generated[0])
             generated_srvs.extend(generated[1])
+            if action_archive is not None:
+                own_generated.update(generated[0] + generated[1])
 
     if cross:
         temp_dirs = [f"temp/{name}" for name in source_packages]
@@ -2328,11 +2353,11 @@ def setup(
 
     # Handle .msg files
     for msg_file in msg_files:
-        create_message_file(msg_file, Path(msg_file).parent.parent, install_dir)
+        create_message_file(msg_file, Path(msg_file).parent.parent, archive_dir(msg_file))
 
     # Handle .srv files
     for srv_file in srv_files:
-        create_service_file(srv_file, Path(srv_file).parent.parent, install_dir)
+        create_service_file(srv_file, Path(srv_file).parent.parent, archive_dir(srv_file))
 
     # SDK CMake generation belongs to build_sdk and its platform templates.
     if not cross:
