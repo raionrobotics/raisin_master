@@ -26,29 +26,31 @@ def parse_version_specifier(spec_str: str) -> Optional[SpecifierSet]:
         - Empty string or None → >=0.0.0 (any version)
         - ">=1.0.0" → standard specifier
         - ">=1.0.0,<2.0.0" → compound specifier
+        - ">=1.0 <2.0" → compound specifier
         - "1.0.0" → treated as ==1.0.0
+        - "==1.0.0rc1" → pre-release kept as written
 
     Args:
         spec_str: Version specifier string (e.g., ">=1.0", "==1.1.0", "")
 
     Returns:
-        SpecifierSet on success, None on parse failure.
+        SpecifierSet on success, None when any part of the string is not a
+        specifier (a requirement is never narrowed to the part that parses).
     """
     try:
         spec_str = (spec_str or "").strip()
         if not spec_str:
             return SpecifierSet(">=0.0.0")
 
-        # Extract version specifiers (handles ">=1.0, <2.0" format)
-        specifiers = re.findall(r"[<>=!~]+[\d.]+", spec_str)
+        clause = r"[<>=!~]+\s*[^\s,<>=!~]+"
+        specifiers = re.findall(clause, spec_str)
         if specifiers:
-            formatted = ", ".join(specifiers)
-            # Fix malformed "> =" to ">="
-            formatted = formatted.replace(">, =", ">=").replace("< =", "<=")
-            return SpecifierSet(formatted)
+            if re.sub(clause, "", spec_str).replace(",", "").strip():
+                return None
+            return SpecifierSet(", ".join(re.sub(r"\s", "", s) for s in specifiers))
 
         # If no operators found, treat as exact version match
-        if re.match(r"^[\d.]+$", spec_str):
+        if re.fullmatch(r"[^\s,<>=!~]+", spec_str):
             return SpecifierSet(f"=={spec_str}")
 
         return None
