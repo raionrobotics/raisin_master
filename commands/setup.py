@@ -318,6 +318,38 @@ def install_interface_definitions(definitions, install_dir):
         shutil.copy2(path, destination)
 
 
+def stage_own_generated_headers(generated_dir, definitions, own_source, staging_dir):
+    """Copy into <staging_dir>/include the generated headers a published package ships.
+
+    A package publish generates headers for every interface in the workspace, because its own
+    messages include other repositories' (std_msgs, ...). Those headers are for building it;
+    they belong to the packages that define them. The archive carries only what comes from
+    the published package's own source: the headers of its interface packages, the include/
+    directories those packages provide, and the files every archive has at the top
+    (raisin_serialization_base.hpp).
+    """
+    generated_include = Path(generated_dir) / "include"
+    staging_include = Path(staging_dir) / "include"
+    delete_directory(staging_dir)
+    staging_include.mkdir(parents=True)
+    if not generated_include.is_dir():
+        return
+    names = {interface_package(definition) for definition in definitions}
+    for definition in definitions:
+        package_root = Path(definition).parent.parent
+        if not package_root.resolve().is_relative_to(own_source):
+            continue
+        provided = package_root / "include"
+        if provided.is_dir() and any((package_root / kind).is_dir() for kind in ("msg", "srv")):
+            names.update(child.name for child in provided.iterdir())
+    for entry in sorted(generated_include.iterdir()):
+        if entry.is_dir():
+            if entry.name in names:
+                shutil.copytree(entry, staging_include / entry.name)
+        else:
+            shutil.copy2(entry, staging_include / entry.name)
+
+
 def create_service_file(srv_file, project_directory):
     """
     Create a service file based on the template, replacing the appropriate placeholders.
@@ -967,7 +999,12 @@ def topological_sort(graph, keys):
     return keys
 
 
-def update_cmake_file(project_directories, cmake_dir, build_test_enabled: bool):
+def update_cmake_file(
+    project_directories,
+    cmake_dir,
+    build_test_enabled: bool,
+    generated_install_dir: str = "generated/include",
+):
     """
     Generate a new CMakeLists.txt file by adding projects that either match
     the global 'g.build_pattern' (if not empty) or all projects, including their
@@ -1037,6 +1074,9 @@ def update_cmake_file(project_directories, cmake_dir, build_test_enabled: bool):
 
     cmake_content = cmake_template_content.replace(
         "@@SUB_PROJECT@@", "\n".join(subdirectory_lines)
+    )
+    cmake_content = cmake_content.replace(
+        "@@GENERATED_INSTALL_DIR@@", generated_install_dir
     )
     cmake_content = cmake_content.replace("@@SCRIPT_DIR@@", g.script_directory)
     cmake_content = cmake_content.replace(
@@ -2343,7 +2383,14 @@ def setup(
     # of the interface packages it defines: in a package publish those under its own source (an
     # action's generated messages belong to the action's package), otherwise all of them.
     definitions = action_files + msg_files + srv_files
+    # What CMake installs and setup copies as the package's generated headers. A package
+    # publish stages its own subset there (see stage_own_generated_headers) once generation
+    # is complete; everything else installs the whole generated tree, as before.
+    archive_generated_dir = None
     if package_name and not cross:
+        archive_generated_dir = (
+            Path(build_dir) if build_dir else Path(g.generated_dir).parent / "release" / "build"
+        ) / "archive_generated" / package_name
         own_source = (Path(g.script_directory) / src_dir).resolve()
         own_packages = {
             interface_package(definition) for definition in definitions
@@ -2354,7 +2401,16 @@ def setup(
 
     # SDK CMake generation belongs to build_sdk and its platform templates.
     if not cross:
-        update_cmake_file(project_directories, build_dir, bool(build_test_enabled))
+        update_cmake_file(
+            project_directories,
+            build_dir,
+            bool(build_test_enabled),
+            **(
+                {"generated_install_dir": (archive_generated_dir / "include").as_posix()}
+                if archive_generated_dir
+                else {}
+            ),
+        )
 
     if package_name == "" and not cross:  # this means we are not in the release mode
         runtime_prefix.copy_device_resources(Path(g.script_directory) / install_dir, Path.home())
@@ -2411,8 +2467,14 @@ def setup(
     os.makedirs(Path(g.script_directory) / "install", exist_ok=True)
 
     # install generated files
+    generated_to_install = Path(g.generated_dir)
+    if archive_generated_dir:
+        stage_own_generated_headers(
+            g.generated_dir, definitions, own_source, archive_generated_dir
+        )
+        generated_to_install = archive_generated_dir
     shutil.copytree(
-        Path(g.generated_dir),
+        generated_to_install,
         Path(g.script_directory) / install_dir / "generated",
         dirs_exist_ok=True,
     )
