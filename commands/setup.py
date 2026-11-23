@@ -304,14 +304,27 @@ def process_build_targets(targets):
         g.build_pattern = found_patterns
 
 
-def create_service_file(srv_file, project_directory, install_dir):
+def interface_package(definition):
+    """The interface package a definition belongs to: <package>/<msg|srv|action>/<Name>.<kind>."""
+    return Path(definition).parent.parent.name
+
+
+def install_interface_definitions(definitions, install_dir):
+    """Copy each definition to <install_dir>/messages/<package>/<msg|srv|action>/."""
+    for definition in definitions:
+        path = Path(definition)
+        destination = Path(install_dir) / "messages" / interface_package(path) / path.suffix[1:]
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+
+
+def create_service_file(srv_file, project_directory):
     """
     Create a service file based on the template, replacing the appropriate placeholders.
     The file is saved in <g.script_directory>/include/<project_directory>/srv.
 
     :param srv_file: Path to the .srv file
     :param project_directory: Path to the project directory
-    :param install_dir: Installation directory
     """
     template_path = os.path.join(g.script_directory, "templates", "ServiceTemplate.hpp")
 
@@ -325,13 +338,6 @@ def create_service_file(srv_file, project_directory, install_dir):
 
     # Recreate the directory to ensure it's clean
     os.makedirs(include_project_srv_dir, exist_ok=True)
-
-    # install_dir None: the header is generated for building against it, the definition is not
-    # part of the package being installed (it belongs to another package).
-    if install_dir is not None:
-        destination_file = os.path.join(install_dir, "messages", project_name, "srv", "")
-        os.makedirs(destination_file, exist_ok=True)
-        shutil.copy2(srv_file, destination_file)
 
     # Read the template
     with open(template_path, "r") as template_file:
@@ -1128,7 +1134,7 @@ def transform_data_type(data_type, project_name):
         return f"{project_name}::msg::{data_type}", data_type, subproject_path, False
 
 
-def create_action_file(action_file, project_directory, install_dir):
+def create_action_file(action_file, project_directory):
     """
     Create a message file based on the template, replacing '@@MESSAGE_NAME@@' with the message file name.
     The file is saved in <g.script_directory>/include/<project_directory>/msg.
@@ -1142,11 +1148,6 @@ def create_action_file(action_file, project_directory, install_dir):
     include_project_msg_dir = os.path.join(
         g.generated_dir, "include", project_name, "action"
     )
-    # install_dir None: generated for building against it only (see create_service_file).
-    if install_dir is not None:
-        destination_file = os.path.join(install_dir, "messages", project_name, "action", "")
-        os.makedirs(destination_file, exist_ok=True)
-        shutil.copy2(action_file, destination_file)
 
     # Delete the entire include directory before generating new files
     os.makedirs(include_project_msg_dir, exist_ok=True)  # Recreate it
@@ -1243,7 +1244,7 @@ def create_action_file(action_file, project_directory, install_dir):
     )
 
 
-def create_message_file(msg_file, project_directory, install_dir):
+def create_message_file(msg_file, project_directory):
     """
     Create a message file based on the template, replacing '@@MESSAGE_NAME@@' with the message file name.
     The file is saved in <g.script_directory>/include/<project_directory>/msg.
@@ -1257,12 +1258,6 @@ def create_message_file(msg_file, project_directory, install_dir):
     include_project_msg_dir = os.path.join(
         g.generated_dir, "include", project_name, "msg"
     )
-    # install_dir None: header only, the definition belongs to another package (see
-    # create_service_file).
-    if install_dir is not None:
-        destination_file = os.path.join(install_dir, "messages", project_name, "msg", "")
-        os.makedirs(destination_file, exist_ok=True)
-        shutil.copy2(msg_file, destination_file)
 
     # Delete the entire include directory before generating new files
     os.makedirs(include_project_msg_dir, exist_ok=True)  # Recreate it
@@ -2288,7 +2283,7 @@ def setup(
         # Package publishing generates headers for every interface in the workspace, as a
         # workspace build does: this package's own messages include the ones they use from other
         # repositories (std_msgs, geometry_msgs, ...), so those headers must exist to build it.
-        # Only this package's own interfaces go into its archive (archive_roots below). A
+        # Only this package's own interfaces go into its archive (see below). A
         # repository can be excluded from the aggregate workspace build while still being the
         # source of the package being published (for example, raisin_ros2_messages): keep it
         # excluded from CMake discovery above, but read its interface definitions here.
@@ -2300,21 +2295,6 @@ def setup(
     else:
         interface_dirs = ["src"]
         interface_repos_to_ignore = repos_to_ignore
-    # Which definitions the installed package carries: in a package publish only this package's
-    # own (its source, and what its own actions generate); otherwise all that is generated.
-    # Every other interface gets a header to build against and no copy (install_dir None).
-    archive_root = (Path(g.script_directory) / src_dir).resolve() if package_name and not cross else None
-    own_generated = set()
-
-    def archive_dir(interface_file):
-        if (
-            archive_root is None
-            or interface_file in own_generated
-            or Path(interface_file).resolve().is_relative_to(archive_root)
-        ):
-            return install_dir
-        return None
-
     action_files = find_interface_files(
         interface_dirs, ["action"], packages_to_ignore,
         interface_repos_to_ignore, packages_allowed
@@ -2331,13 +2311,10 @@ def setup(
     # The shared temp tree may contain older actions from the same ROS package.
     generated_msgs, generated_srvs = [], []
     for action_file in action_files:
-        action_archive = archive_dir(action_file)
-        generated = create_action_file(action_file, Path(action_file).parent.parent, action_archive)
+        generated = create_action_file(action_file, Path(action_file).parent.parent)
         if generated:
             generated_msgs.extend(generated[0])
             generated_srvs.extend(generated[1])
-            if action_archive is not None:
-                own_generated.update(generated[0] + generated[1])
 
     if cross:
         temp_dirs = [f"temp/{name}" for name in source_packages]
@@ -2356,11 +2333,24 @@ def setup(
 
     # Handle .msg files
     for msg_file in msg_files:
-        create_message_file(msg_file, Path(msg_file).parent.parent, archive_dir(msg_file))
+        create_message_file(msg_file, Path(msg_file).parent.parent)
 
     # Handle .srv files
     for srv_file in srv_files:
-        create_service_file(srv_file, Path(srv_file).parent.parent, archive_dir(srv_file))
+        create_service_file(srv_file, Path(srv_file).parent.parent)
+
+    # Every interface above has a header to build against. The install carries the definitions
+    # of the interface packages it defines: in a package publish those under its own source (an
+    # action's generated messages belong to the action's package), otherwise all of them.
+    definitions = action_files + msg_files + srv_files
+    if package_name and not cross:
+        own_source = (Path(g.script_directory) / src_dir).resolve()
+        own_packages = {
+            interface_package(definition) for definition in definitions
+            if Path(definition).resolve().is_relative_to(own_source)
+        }
+        definitions = [d for d in definitions if interface_package(d) in own_packages]
+    install_interface_definitions(definitions, install_dir)
 
     # SDK CMake generation belongs to build_sdk and its platform templates.
     if not cross:
