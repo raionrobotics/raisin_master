@@ -73,7 +73,7 @@ endif()
 
 update_build_dir_in_yaml(${CMAKE_CURRENT_SOURCE_DIR}/configuration_setting.yaml)
 
-install(DIRECTORY generated/include/
+install(DIRECTORY @@GENERATED_INSTALL_DIR@@/
         DESTINATION include  # where to install the headers
         FILES_MATCHING PATTERN "*.hpp"     # only install .hpp files
 )

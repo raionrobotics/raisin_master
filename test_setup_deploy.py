@@ -242,6 +242,83 @@ class TestSetupDeploy(unittest.TestCase):
         self.assertTrue((messages / "raisin_interfaces" / "msg" / "AudioData.msg").is_file())
         self.assertFalse((messages / "std_msgs").exists())
 
+    def _publish_in_two_repo_workspace(self, package_name):
+        """raisin_ros2_messages owns std_msgs; raisin owns raisin_interfaces, whose message uses
+        std_msgs/Header and whose package also provides include/raisin_thread_pool."""
+        header = self.root / "src" / "raisin_ros2_messages" / "messages" / "std_msgs" / "msg" / "Header.msg"
+        header.parent.mkdir(parents=True)
+        header.write_text("string frame_id\n", encoding="utf-8")
+        interfaces = self.root / "src" / "raisin" / "raisin_interfaces"
+        (interfaces / "msg").mkdir(parents=True)
+        (interfaces / "msg" / "AudioData.msg").write_text("std_msgs/Header header\n", encoding="utf-8")
+        provided = interfaces / "include" / "raisin_thread_pool" / "pool.hpp"
+        provided.parent.mkdir(parents=True)
+        provided.write_text("// provided by raisin_interfaces\n", encoding="utf-8")
+        templates = Path(__file__).parent / "templates"
+        (self.root / "templates").mkdir()
+        for name in (
+            "ActionTemplate.hpp", "MessageTemplate.hpp", "ServiceTemplate.hpp",
+            "raisin_serialization_base.hpp",
+        ):
+            (self.root / "templates" / name).write_bytes((templates / name).read_bytes())
+        (self.root / "configuration_setting.yaml").write_text(
+            "user_type: devel\npackages_to_ignore: []\nrepos_to_ignore: []\n",
+            encoding="utf-8",
+        )
+        with patch.object(cli_setup, "check_supported_architecture"), \
+                patch.object(cli_setup, "guard_src_repo_lfs_assets"), \
+                patch.object(cli_setup, "deploy_install_packages"), \
+                patch.object(cli_setup, "guard_src_repo_release_yaml_dependencies"), \
+                patch.object(cli_setup, "build_pure_cmake_projects", return_value=[]), \
+                patch.object(cli_setup, "update_cmake_file") as cmake, \
+                patch.object(cli_setup, "get_commit_hash", return_value=None), \
+                patch.object(cli_setup, "collect_src_vcpkg_dependencies"), \
+                patch.object(cli_setup, "generate_vcpkg_json"):
+            with chdir(self.root):
+                cli_setup.setup(
+                    package_name=package_name, build_type="release",
+                    build_dir=str(self.root / "release" / "build" / package_name / "release"),
+                )
+        installed = (
+            self.root / "release" / "install" / package_name / "ubuntu" / "24.04" / "x86_64"
+            / "release" / "generated" / "include"
+        )
+        return installed, cmake
+
+    @staticmethod
+    def _tree(root):
+        return sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+
+    def test_package_archive_carries_only_its_own_generated_headers(self):
+        # The workspace generates every interface's header to build with, but another
+        # repository's headers in this archive would change it whenever that repository moved.
+        installed, cmake = self._publish_in_two_repo_workspace("raisin_ros2_messages")
+
+        generated = self.root / "generated" / "include"
+        self.assertTrue((generated / "raisin_interfaces" / "msg" / "audio_data.hpp").is_file())
+        self.assertEqual(
+            self._tree(installed),
+            ["raisin_serialization_base.hpp", "std_msgs/msg/header.hpp"],
+        )
+        # CMake's install(DIRECTORY ...) of generated headers reads the same staged tree.
+        cmake_installs = Path(cmake.call_args.kwargs["generated_install_dir"])
+        self.assertEqual(self._tree(cmake_installs), self._tree(installed))
+
+    def test_package_archive_carries_the_include_directories_its_interfaces_provide(self):
+        installed, cmake = self._publish_in_two_repo_workspace("raisin")
+
+        self.assertEqual(
+            self._tree(installed),
+            [
+                "raisin_interfaces/msg/audio_data.hpp",
+                "raisin_serialization_base.hpp",
+                "raisin_thread_pool/pool.hpp",
+            ],
+        )
+        cmake_installs = Path(cmake.call_args.kwargs["generated_install_dir"])
+        self.assertEqual(self._tree(cmake_installs), self._tree(installed))
+        self.assertTrue((self.root / "generated" / "include" / "std_msgs" / "msg" / "header.hpp").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
