@@ -304,14 +304,27 @@ def process_build_targets(targets):
         g.build_pattern = found_patterns
 
 
-def create_service_file(srv_file, project_directory, install_dir):
+def interface_package(definition):
+    """The interface package a definition belongs to: <package>/<msg|srv|action>/<Name>.<kind>."""
+    return Path(definition).parent.parent.name
+
+
+def install_interface_definitions(definitions, install_dir):
+    """Copy each definition to <install_dir>/messages/<package>/<msg|srv|action>/."""
+    for definition in definitions:
+        path = Path(definition)
+        destination = Path(install_dir) / "messages" / interface_package(path) / path.suffix[1:]
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+
+
+def create_service_file(srv_file, project_directory):
     """
     Create a service file based on the template, replacing the appropriate placeholders.
     The file is saved in <g.script_directory>/include/<project_directory>/srv.
 
     :param srv_file: Path to the .srv file
     :param project_directory: Path to the project directory
-    :param install_dir: Installation directory
     """
     template_path = os.path.join(g.script_directory, "templates", "ServiceTemplate.hpp")
 
@@ -325,10 +338,6 @@ def create_service_file(srv_file, project_directory, install_dir):
 
     # Recreate the directory to ensure it's clean
     os.makedirs(include_project_srv_dir, exist_ok=True)
-
-    destination_file = os.path.join(install_dir, "messages", project_name, "srv", "")
-    os.makedirs(destination_file, exist_ok=True)
-    shutil.copy2(srv_file, destination_file)
 
     # Read the template
     with open(template_path, "r") as template_file:
@@ -1125,7 +1134,7 @@ def transform_data_type(data_type, project_name):
         return f"{project_name}::msg::{data_type}", data_type, subproject_path, False
 
 
-def create_action_file(action_file, project_directory, install_dir):
+def create_action_file(action_file, project_directory):
     """
     Create a message file based on the template, replacing '@@MESSAGE_NAME@@' with the message file name.
     The file is saved in <g.script_directory>/include/<project_directory>/msg.
@@ -1139,9 +1148,6 @@ def create_action_file(action_file, project_directory, install_dir):
     include_project_msg_dir = os.path.join(
         g.generated_dir, "include", project_name, "action"
     )
-    destination_file = os.path.join(install_dir, "messages", project_name, "action", "")
-    os.makedirs(destination_file, exist_ok=True)
-    shutil.copy2(action_file, destination_file)
 
     # Delete the entire include directory before generating new files
     os.makedirs(include_project_msg_dir, exist_ok=True)  # Recreate it
@@ -1238,7 +1244,7 @@ def create_action_file(action_file, project_directory, install_dir):
     )
 
 
-def create_message_file(msg_file, project_directory, install_dir):
+def create_message_file(msg_file, project_directory):
     """
     Create a message file based on the template, replacing '@@MESSAGE_NAME@@' with the message file name.
     The file is saved in <g.script_directory>/include/<project_directory>/msg.
@@ -1252,9 +1258,6 @@ def create_message_file(msg_file, project_directory, install_dir):
     include_project_msg_dir = os.path.join(
         g.generated_dir, "include", project_name, "msg"
     )
-    destination_file = os.path.join(install_dir, "messages", project_name, "msg", "")
-    os.makedirs(destination_file, exist_ok=True)
-    shutil.copy2(msg_file, destination_file)
 
     # Delete the entire include directory before generating new files
     os.makedirs(include_project_msg_dir, exist_ok=True)  # Recreate it
@@ -2277,12 +2280,14 @@ def setup(
         interface_dirs = [str(path) for path in source_packages.values()]
         interface_repos_to_ignore = repos_to_ignore
     elif package_name:
-        # Package publishing reads only this checkout. A repository can be
-        # excluded from the aggregate workspace build while still being the
-        # source of the package currently being published (for example,
-        # raisin_ros2_messages). Keep it excluded from CMake discovery above,
-        # but allow its interface definitions into this package's archive.
-        interface_dirs = [src_dir]
+        # Package publishing generates headers for every interface in the workspace, as a
+        # workspace build does: this package's own messages include the ones they use from other
+        # repositories (std_msgs, geometry_msgs, ...), so those headers must exist to build it.
+        # Only this package's own interfaces go into its archive (see below). A
+        # repository can be excluded from the aggregate workspace build while still being the
+        # source of the package being published (for example, raisin_ros2_messages): keep it
+        # excluded from CMake discovery above, but read its interface definitions here.
+        interface_dirs = ["src"]
         source_repo = get_repo_name_from_path(Path(g.script_directory) / src_dir)
         interface_repos_to_ignore = [
             repo for repo in repos_to_ignore if repo != source_repo
@@ -2306,7 +2311,7 @@ def setup(
     # The shared temp tree may contain older actions from the same ROS package.
     generated_msgs, generated_srvs = [], []
     for action_file in action_files:
-        generated = create_action_file(action_file, Path(action_file).parent.parent, install_dir)
+        generated = create_action_file(action_file, Path(action_file).parent.parent)
         if generated:
             generated_msgs.extend(generated[0])
             generated_srvs.extend(generated[1])
@@ -2328,11 +2333,24 @@ def setup(
 
     # Handle .msg files
     for msg_file in msg_files:
-        create_message_file(msg_file, Path(msg_file).parent.parent, install_dir)
+        create_message_file(msg_file, Path(msg_file).parent.parent)
 
     # Handle .srv files
     for srv_file in srv_files:
-        create_service_file(srv_file, Path(srv_file).parent.parent, install_dir)
+        create_service_file(srv_file, Path(srv_file).parent.parent)
+
+    # Every interface above has a header to build against. The install carries the definitions
+    # of the interface packages it defines: in a package publish those under its own source (an
+    # action's generated messages belong to the action's package), otherwise all of them.
+    definitions = action_files + msg_files + srv_files
+    if package_name and not cross:
+        own_source = (Path(g.script_directory) / src_dir).resolve()
+        own_packages = {
+            interface_package(definition) for definition in definitions
+            if Path(definition).resolve().is_relative_to(own_source)
+        }
+        definitions = [d for d in definitions if interface_package(d) in own_packages]
+    install_interface_definitions(definitions, install_dir)
 
     # SDK CMake generation belongs to build_sdk and its platform templates.
     if not cross:
