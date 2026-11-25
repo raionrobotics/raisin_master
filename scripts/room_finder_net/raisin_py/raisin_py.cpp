@@ -6,9 +6,11 @@
 //   net.subscribe_odometry(conn, "/Odometry/base", cb)   # cb(stamp, frame_id, (x y z qx qy qz qw), (vx vy vz wx wy wz))
 //   net.subscribe_cloud(conn, "cloud_registered", cb)    # cb(stamp, frame_id, points: float32[N,3])
 //   net.subscribe_nav_status(conn, "navigation/status", cb)  # cb(has_goal, has_plan, current_index, waypoint_count)
+//   net.subscribe_velocity(conn, "vel_cmd/autonomy", cb)     # cb(x_vel, y_vel, yaw_rate)  (raisin_interfaces VelocityCommand)
 //   net.subscribe_string(conn, topic, cb) / net.publisher_string(topic).publish(str)
 //   net.subscribe_grid(conn, topic, cb)                  # cb(stamp, frame_id, resolution, x0, y0, int8[h,w])
 //   net.publisher_grid(topic).publish(frame_id, resolution, x0, y0, int8[h,w])
+//   net.publisher_velocity(topic).publish(x_vel, y_vel, yaw_rate, body_height)   (raisin_interfaces VelocityCommand)
 //   net.service_string(name, fn)                         # fn(str) -> (bool, str)   (server side)
 //   net.call_string(conn, name, data, timeout) -> (ok, msg);  call_trigger;  call_string_and_bool
 //   net.call_set_waypoints(conn, name, [(frame, x, y, use_yaw, yaw)], timeout) -> (ok, msg)
@@ -34,6 +36,7 @@
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "raisin_interfaces/msg/navigation_status.hpp"
+#include "raisin_interfaces/msg/velocity_command.hpp"
 #include "raisin_interfaces/msg/waypoint.hpp"
 #include "raisin_interfaces/srv/set_waypoints.hpp"
 #include "raisin_interfaces/srv/string.hpp"
@@ -163,6 +166,13 @@ class Net {
       }));
   }
 
+  void subscribe_velocity(Conn c, const std::string& topic, py::function cb) {
+    keep(node_->createSubscriber<raisin::raisin_interfaces::msg::VelocityCommand>(
+      topic, c, [cb](std::shared_ptr<raisin::raisin_interfaces::msg::VelocityCommand> m) {
+        guarded([&] { cb(m->x_vel, m->y_vel, m->yaw_rate); });
+      }));
+  }
+
   void subscribe_nav_status(Conn c, const std::string& topic, py::function cb) {
     keep(node_->createSubscriber<raisin::raisin_interfaces::msg::NavigationStatus>(
       topic, c, [cb](std::shared_ptr<raisin::raisin_interfaces::msg::NavigationStatus> m) {
@@ -198,6 +208,12 @@ class Net {
   std::shared_ptr<PyPublisher<raisin::nav_msgs::msg::OccupancyGrid>> publisher_grid(const std::string& topic) {
     auto p = std::make_shared<PyPublisher<raisin::nav_msgs::msg::OccupancyGrid>>();
     p->pub = node_->createPublisher<raisin::nav_msgs::msg::OccupancyGrid>(topic);
+    return p;
+  }
+
+  std::shared_ptr<PyPublisher<raisin::raisin_interfaces::msg::VelocityCommand>> publisher_velocity(const std::string& topic) {
+    auto p = std::make_shared<PyPublisher<raisin::raisin_interfaces::msg::VelocityCommand>>();
+    p->pub = node_->createPublisher<raisin::raisin_interfaces::msg::VelocityCommand>(topic);
     return p;
   }
 
@@ -311,6 +327,17 @@ PYBIND11_MODULE(raisin_py, m) {
       py::gil_scoped_release release;
       p.pub->publish(msg);
     });
+  py::class_<PyPublisher<raisin::raisin_interfaces::msg::VelocityCommand>,
+             std::shared_ptr<PyPublisher<raisin::raisin_interfaces::msg::VelocityCommand>>>(m, "VelocityPublisher")
+    .def("publish", [](PyPublisher<raisin::raisin_interfaces::msg::VelocityCommand>& p, double x, double y, double yaw, double body_height) {
+      raisin::raisin_interfaces::msg::VelocityCommand msg;
+      msg.x_vel = x;
+      msg.y_vel = y;
+      msg.yaw_rate = yaw;
+      msg.body_height = body_height;
+      py::gil_scoped_release release;
+      p.pub->publish(msg);
+    }, py::arg("x_vel"), py::arg("y_vel"), py::arg("yaw_rate"), py::arg("body_height") = 0.5);
   py::class_<Net>(m, "Net")
     .def(py::init<const std::string&, const std::vector<std::string>&>(), py::arg("id"), py::arg("interfaces") = std::vector<std::string>{})
     .def("close", &Net::close)
@@ -319,10 +346,12 @@ PYBIND11_MODULE(raisin_py, m) {
     .def("subscribe_odometry", &Net::subscribe_odometry)
     .def("subscribe_cloud", &Net::subscribe_cloud)
     .def("subscribe_nav_status", &Net::subscribe_nav_status)
+    .def("subscribe_velocity", &Net::subscribe_velocity)
     .def("subscribe_string", &Net::subscribe_string)
     .def("subscribe_grid", &Net::subscribe_grid)
     .def("publisher_string", &Net::publisher_string)
     .def("publisher_grid", &Net::publisher_grid)
+    .def("publisher_velocity", &Net::publisher_velocity)
     .def("service_string", &Net::service_string)
     .def("call_string", &Net::call_string, py::arg("conn"), py::arg("name"), py::arg("data"), py::arg("timeout") = 5.0)
     .def("call_trigger", &Net::call_trigger, py::arg("conn"), py::arg("name"), py::arg("timeout") = 30.0)

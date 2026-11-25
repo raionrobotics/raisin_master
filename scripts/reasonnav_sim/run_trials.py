@@ -12,13 +12,16 @@ import re, argparse, json, math, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WS = os.path.expanduser("~/raisin_ws")
-GT = json.load(open(os.path.join(HERE, "gt", "hospital_rooms.json")))
+GT = json.load(open(os.path.join(HERE, "gt", os.environ.get("TRIALS_GT", "hospital_rooms.json"))))   # --world replaces it
 SPAWN = GT["spawn_xy"]
 
 
-def gt_xy(num):
-    x, y = GT["rooms"][str(num)]["xy"]
-    return x - SPAWN[0], y - SPAWN[1]
+def gt_xy(num, near=None):
+    """plate centre in the map frame; a room with several plates (one per door) -> the one nearest `near`"""
+    room = GT["rooms"][str(num)]
+    pts = room.get("all_xy") or [room["xy"]]
+    pts = [(x - SPAWN[0], y - SPAWN[1]) for x, y in pts]
+    return min(pts, key=lambda p: math.hypot(p[0] - near[0], p[1] - near[1])) if near else pts[0]
 
 
 def run(cmd, **kw):
@@ -27,9 +30,9 @@ def run(cmd, **kw):
 
 def save_video(logdir, target, video_dir):
     """wait for the recorder to finalise search.mp4, re-encode it as h264 (plays in browsers) and drop the raw file"""
-    raw, rec_log = f"{logdir}/search.mp4", f"{logdir}/recorder.log"
+    raw, rec_log = f"{logdir}/search.mp4", f"{logdir}/{'ai' if NET else 'recorder'}.log"
     for _ in range(40):
-        if os.path.exists(rec_log) and "saved" in open(rec_log).read():
+        if os.path.exists(rec_log) and "saved " in open(rec_log).read():
             break
         time.sleep(1)
     if not os.path.exists(raw):
@@ -55,14 +58,14 @@ def trial(target, max_time, tol, env_extra="", video_dir=None, extra=""):
     launcher_kill()
     # the previous sim must be fully gone: a lingering process keeps the livox UDP ports and the next lidar fails to bind
     for _ in range(30):
-        if run("pgrep -f '[r]aisin_raibo2_node|[r]aisin_bridge_node|[r]aisin_gui|[a]i_main.py|[r]obot_gateway.py' > /dev/null").returncode != 0:
+        if run("pgrep -f '[r]aisin_raibo2_node|[r]aisin_bridge_node|[r]aisin_gui|[a]i_pc/ai_main|[r]obot_gateway.py' > /dev/null").returncode != 0:
             break
-        run("pkill -f '[r]aisin_raibo2_node'; pkill -f '[r]aisin_bridge_node'; pkill -f '[r]aisin_gui'; pkill -f '[a]i_main.py'; pkill -f '[r]obot_gateway.py'; sleep 2")
+        run("pkill -f '[r]aisin_raibo2_node'; pkill -f '[r]aisin_bridge_node'; pkill -f '[r]aisin_gui'; pkill -f '[a]i_pc/ai_main'; pkill -f '[r]obot_gateway.py'; sleep 2")
     time.sleep(8)
     t0 = time.time()
     rec_flag = "--record" if video_dir else ""
     if NET:
-        run(f"cd {WS} && FINDER_MAX_TIME={max_time} {env_extra} {NETSH} --goal {target} < /dev/null > /dev/null 2>&1")
+        run(f"cd {WS} && FINDER_MAX_TIME={max_time} {env_extra} {NETSH} --goal {target} {rec_flag} < /dev/null > /dev/null 2>&1")
     else:
         run(f"cd {WS} && FINDER_MAX_TIME={max_time} {env_extra} {HERE}/run_reasonnav_sim.sh --goal {target} --no-gui --no-rviz {rec_flag} {extra} "
             f"< /dev/null > /dev/null 2>&1")
@@ -92,7 +95,7 @@ def trial(target, max_time, tol, env_extra="", video_dir=None, extra=""):
         except ValueError:
             time.sleep(5)
     if r is None:
-        gave_up = re.search(r"GAVE UP on room \d+ after (\d+) s, (\d+) m", open(f"{logdir}/finder/finder.log").read() if os.path.exists(f"{logdir}/finder/finder.log") else "")
+        gave_up = re.search(r"GAVE UP on room \S+ after (\d+) s, (\d+) m", open(f"{logdir}/finder/finder.log").read() if os.path.exists(f"{logdir}/finder/finder.log") else "")
         row.update(found=False, success=False, claimed=False, elapsed_s=float(gave_up.group(1)) if gave_up else max_time, path_len_m=float(gave_up.group(2)) if gave_up else 0.0,
                    dist_label_to_gt=None, dist_robot_to_gt=None, reason="result.json unreadable; reconstructed from the finder log")
         return row
@@ -100,7 +103,7 @@ def trial(target, max_time, tol, env_extra="", video_dir=None, extra=""):
         row["video"] = save_video(logdir, target, video_dir)
     row.update(claimed=r["found"], elapsed_s=r["elapsed_s"], path_len_m=r["path_len_m"], label_xy=r["label_xy"],
                robot_xy=r["robot_xy"], n_labels=r["n_labels"], n_doors=r["n_doors"])
-    gx, gy = gt_xy(target)
+    gx, gy = gt_xy(target, r["label_xy"] or r["robot_xy"])
     d_lab = math.hypot(r["label_xy"][0] - gx, r["label_xy"][1] - gy) if r["label_xy"] else None
     d_rob = math.hypot(r["robot_xy"][0] - gx, r["robot_xy"][1] - gy) if r["robot_xy"] else None
     row.update(dist_label_to_gt=None if d_lab is None else round(d_lab, 2), dist_robot_to_gt=None if d_rob is None else round(d_rob, 2))
@@ -117,9 +120,14 @@ if __name__ == "__main__":
     ap.add_argument("--record", action="store_true", help="save a video of every search to log/reasonnav_sim/full_eval/<tag>/videos/")
     ap.add_argument("--extra", default="", help="extra launcher flags, e.g. --rn for the ReasonNav vlm_nav stack")
     ap.add_argument("--env", default="", help="extra VAR=value words for the launcher environment")
+    ap.add_argument("--world", default="hospital", help="sim world (--net only): hospital | jinri_1f; picks gt/<world>_rooms.json")
     ap.add_argument("--net", action="store_true", help="use the ROS-free two-PC stack (robot gateway + AI PC process over raisin_network)")
     a = ap.parse_args()
     NET = a.net
+    if a.world != "hospital":
+        GT = json.load(open(os.path.join(HERE, "gt", "%s_rooms.json" % a.world)))
+        SPAWN = GT["spawn_xy"]
+        a.env = ("WORLD=%s " % a.world) + a.env
     os.makedirs(f"{WS}/log/reasonnav_sim/trials", exist_ok=True)
     out = f"{WS}/log/reasonnav_sim/trials/{a.tag}.jsonl"
     for tgt in a.targets:

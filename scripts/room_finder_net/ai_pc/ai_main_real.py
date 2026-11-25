@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""AI PC process of the room finder: runs ReasonNav's room_perception + room_finder (YOLO, Grounding DINO client, VLM, belief
+policy ...) with raisin_network as the only middleware -- no ROS 2 anywhere.
+
+  robot PC  ──raisin_network──►  oak_*/rgb|depth, /Odometry/base          (read directly from the robot's raisin node)
+  robot PC  ──raisin_network──►  room_finder/map (occupancy grid built on the robot), service room_finder/goal
+  this process: perception + finder in one process, the goal is sent as a service call to the robot gateway.
+
+  ai_main.py --target 3018 --robot-id <robot nickname> --gateway-id room_finder_gw [--iface eth0 ...]
+"""
+import argparse
+import bisect
+import collections
+import json
+import logging
+import math
+import os
+import sys
+import threading
+import time
+
+import numpy as np
+import yaml
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "raisin_py", "build"))   # built module; PYTHONPATH also works
+import rosless  # noqa: E402
+
+
+def quat_mul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz)
+
+
+def quat_rot(q, v):
+    x, y, z, w = q
+    R = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                  [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                  [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+    return R @ np.asarray(v, dtype=float)
+
+
+def yaw_quat(yaw):
+    return (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2))
+
+
+class PoseModel:
+    """map <- base_link from the robot's odometry (history kept for image-time lookups), map <- camera = base pose * static mount"""
+
+    def __init__(self, rig):
+        self.hist_t, self.hist = [], []
+        self.lock = threading.Lock()
+        self.frame_id = None
+        self.off_hist = collections.deque()   # (arrival time, arrival - stamp): robot clock -> this PC's clock
+        self.offset, self.t_off_log = None, 0.0
+        self.host_stamps = True   # image stamps are this PC's clock (local cameras); False: robot clock (images over the network)
+        m, off = rig["mount_xyz"], rig["sensor_offset"]
+        self.static = {"base_link": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))}
+        for name, c in rig["cameras"].items():
+            y = float(c["yaw"])
+            if "xyz" in c:   # measured position of this camera (overrides mount_xyz + sensor_offset)
+                self.static[name] = (tuple(float(v) for v in c["xyz"]), yaw_quat(y))
+            else:
+                self.static[name] = ((m[0] + off * math.cos(y), m[1] + off * math.sin(y), m[2]), yaw_quat(y))
+
+    def on_odom(self, stamp, frame_id, pq):
+        now = time.time()
+        with self.lock:
+            self.frame_id = frame_id
+            # the PCs' clocks are not synchronised: the smallest (arrival - stamp) over the last 20 s is the clock offset plus
+            # the fastest delivery; image capture times (this PC's clock) are mapped onto odometry stamps with it
+            if not self.off_hist or now - self.off_hist[-1][0] > 0.05:
+                self.off_hist.append((now, now - stamp))
+                while now - self.off_hist[0][0] > 20.0:
+                    self.off_hist.popleft()
+                self.offset = min(d for _, d in self.off_hist)
+                if now - self.t_off_log > 30.0:
+                    self.t_off_log = now
+                    logging.info("odometry clock: robot -> AI PC offset %.3f s" % self.offset)
+            if self.hist_t and stamp <= self.hist_t[-1]:
+                return
+            self.hist_t.append(stamp)
+            self.hist.append(np.asarray(pq, dtype=float))
+            if len(self.hist) > 3000:
+                del self.hist_t[:500], self.hist[:500]
+
+    def base_pose(self, stamp=None):
+        with self.lock:
+            if not self.hist:
+                return None
+            if stamp is None or stamp >= self.hist_t[-1]:
+                return self.hist[-1] if (stamp is None or stamp - self.hist_t[-1] < 0.5) else None
+            i = bisect.bisect_left(self.hist_t, stamp)
+            if i == 0:
+                return self.hist[0] if self.hist_t[0] - stamp < 0.5 else None
+            t0, t1 = self.hist_t[i - 1], self.hist_t[i]
+            a, b = self.hist[i - 1], self.hist[i]
+            w = (stamp - t0) / max(t1 - t0, 1e-6)
+            p = a[:3] * (1 - w) + b[:3] * w
+            q = a[3:] * (1 - w) + (b[3:] if np.dot(a[3:], b[3:]) >= 0 else -b[3:]) * w
+            return np.concatenate([p, q / np.linalg.norm(q)])
+
+    def lookup(self, frame, stamp=None):
+        if frame not in self.static:
+            return None
+        if stamp is not None and self.offset is not None and self.host_stamps:
+            stamp = stamp - self.offset       # this PC's clock -> robot clock
+        bp = self.base_pose(stamp)
+        if bp is None:
+            return None
+        t, q = self.static[frame]
+        pos = bp[:3] + quat_rot(tuple(bp[3:]), t)
+        return tuple(pos), quat_mul(tuple(bp[3:]), q)
+
+
+def apply_rig(rig):
+    """the geometry module hard-codes the simulated OAK rig; point it at the configured one before the nodes read it"""
+    from mm_dev.room_finder import camera_rig as cr
+    cr.CAMERAS = tuple(rig["cameras"].keys())
+    cr.COLOR_W, cr.COLOR_H = int(rig["color"]["width"]), int(rig["color"]["height"])
+    cr.DEPTH_W, cr.DEPTH_H = int(rig["depth"]["width"]), int(rig["depth"]["height"])
+    cr.HFOV = float(rig["hfov"])
+    cr.FX = (cr.COLOR_W / 2.0) / math.tan(cr.HFOV / 2.0)
+    cr.CX, cr.CY = cr.COLOR_W / 2.0, cr.COLOR_H / 2.0
+    cr.DEPTH_SCALE = cr.COLOR_W / cr.DEPTH_W
+
+
+def install_dummy_vlm():
+    """Replace the OpenAI call in ReasonNav's VLM client (this PC has no internet).  Answers are well-formed but empty:
+    plate -> number null, sign -> [], belief query -> no region, so the finder explores frontiers and never confirms a label."""
+    from mm_dev.room_finder import vlm as V
+
+    class _Client:
+        def with_options(self, **kw):
+            return self
+
+    def init(self, model=None):
+        self.model, self.client, self.calls = "dummy", _Client(), 0
+
+    def complete(self, content, max_tokens):
+        text = content if isinstance(content, str) else next((c["text"] for c in content if c.get("type") == "text"), "")
+        if text.startswith("The image is a crop of a hospital wall"):
+            return '{"number": null, "confidence": 0.0}'
+        if text.startswith("The image is a crop of a navigational sign"):
+            return "[]"
+        return '{"region": "", "patterns": "dummy VLM", "reasoning": "dummy VLM"}'
+
+    V.VLM.__init__, V.VLM._complete = init, complete
+    logging.warning("DUMMY VLM: no OpenAI calls; room numbers cannot be read through the VLM")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--target", required=True, help="room number to find")
+    ap.add_argument("--robot-id", required=True, help="raisin network id of the robot (its robot_nickname)")
+    ap.add_argument("--gateway-id", default="room_finder_gw", help="raisin network id of the robot-side gateway")
+    ap.add_argument("--id", default="room_finder_ai", help="raisin network id of this process")
+    ap.add_argument("--iface", nargs="*", default=["lo"], help="network interfaces for raisin discovery")
+    ap.add_argument("--rig", default=os.path.join(HERE, "rig.yaml"))
+    ap.add_argument("--mmdev", default=os.environ.get("MMDEV", "/home/user/tips_ws/src/ReasonNav/src/mm_dev"),
+                    help="ReasonNav's mm_dev source directory")
+    ap.add_argument("--out-dir", default="")
+    ap.add_argument("--max-time", type=float, default=1500.0)
+    ap.add_argument("--policy", default=os.environ.get("POLICY", "belief"))
+    ap.add_argument("--belief-signs", default=os.environ.get("BELIEF_SIGNS", "vlm"))
+    ap.add_argument("--yolo", default=os.environ.get("ROOM_FINDER_YOLO", ""), help="door YOLO weights (default: the repo copy)")
+    ap.add_argument("--exit-when-done", action="store_true")
+    ap.add_argument("--env-key", action="store_true", help="use OPENAI_API_KEY from the environment instead of mm_dev/config/.env")
+    ap.add_argument("--cameras", choices=("net", "local"), default="net",
+                    help="net: images come from the robot over raisin_network; local: OAK cameras (rig.yaml `ip`) attached to this PC")
+    ap.add_argument("--stamp-host", action="store_true", help="local cameras: stamp frames with this PC's clock (needs clocks synchronised with the robot; "
+                    "default stamp 0 = use the latest odometry pose)")
+    ap.add_argument("--dummy-vlm", action="store_true", default=os.environ.get("ROOM_FINDER_DUMMY_VLM", "") == "1",
+                    help="no OpenAI: plate reads return 'no plate', sign reads return no cues, belief queries return no region")
+    ap.add_argument("--debug-port", type=int, default=8082,
+                    help="MJPEG http stream of /room_finder/debug_image (camera tiles + detection boxes); 0 = off")
+    ap.add_argument("--record", default="", help="save the search as this mp4 (mm_dev's room_recorder layout: detections + map + reasoning)")
+    ap.add_argument("--record-view", default="-52,-8,30,40", help="map area of the video: xmin,ymin,xmax,ymax in the map frame")
+    a = ap.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
+    rig = yaml.safe_load(open(a.rig))
+
+    # ---- raisin network
+    import raisin_boot
+    raisin_boot.preload()
+    import raisin_py
+    net = raisin_py.Net(a.id, a.iface)
+    robot = gw = None
+    while robot is None or gw is None:
+        robot = robot or net.connect(a.robot_id)
+        gw = gw or net.connect(a.gateway_id)
+        if robot is None or gw is None:
+            logging.info("waiting for %s%s" % ("robot " + a.robot_id + " " if robot is None else "", "gateway " + a.gateway_id if gw is None else ""))
+            time.sleep(1.0)
+    logging.info("connected to robot '%s' and gateway '%s'" % (a.robot_id, a.gateway_id))
+
+    # ---- routing of the topics the nodes use
+    router = rosless.Router()
+    poses = PoseModel(rig)
+    poses.host_stamps = a.cameras == "local"   # network images carry the robot's own stamps
+    router.pose_provider = lambda frame, stamp: poses.lookup(frame, stamp)
+    net.subscribe_odometry(robot, rig["topics"]["odom"], lambda t, f, pq, tw: poses.on_odom(t, f, pq))
+
+    def image_route(cam, kind):
+        topic = rig["topics"][kind].format(cam=cam)
+
+        def attach(deliver):
+            def cb(stamp, frame, h, w, enc, data):
+                m = rosless.Image()
+                m.header.stamp, m.header.frame_id = rosless.Stamp.from_seconds(stamp), frame
+                m.height, m.width, m.encoding, m.data = h, w, enc, data
+                deliver(m)
+            net.subscribe_image(robot, topic, cb)
+        return attach
+
+    oak = None
+    if a.cameras == "local":
+        import oak_local
+        oak = oak_local.OakLocal(rig, rosless, stamp_host=a.stamp_host)
+        oak.open()      # also sets rig["hfov"] from the camera calibration
+        for cam in rig["cameras"]:
+            router.sub_routes["/%s/rgb" % cam] = oak.route(cam, "rgb")
+            router.sub_routes["/%s/depth" % cam] = oak.route(cam, "depth")
+    else:
+        for cam in rig["cameras"]:
+            router.sub_routes["/%s/rgb" % cam] = image_route(cam, "rgb")
+            router.sub_routes["/%s/depth" % cam] = image_route(cam, "depth")
+
+    grid_subs = []      # one network subscription, fanned out (the finder, and the recorder with --record)
+
+    def grid_route(deliver):
+        def cb(stamp, frame, res, x0, y0, g):
+            m = rosless.OccupancyGrid()
+            m.header.frame_id = frame
+            m.info.resolution, m.info.height, m.info.width = res, g.shape[0], g.shape[1]
+            m.info.origin.position.x, m.info.origin.position.y = x0, y0
+            m.data = g.reshape(-1)
+            for d in grid_subs:
+                d(m)
+        if not grid_subs:
+            net.subscribe_grid(gw, "room_finder/map", cb)
+        grid_subs.append(deliver)
+    router.sub_routes["/global_costmap/costmap"] = grid_route
+    import sim_noise
+    if sim_noise.ON and a.cameras == "net":
+        sim_noise.wrap_depth_routes(router, rig["cameras"])
+        sim_noise.wrap_rgb_routes(router, rig["cameras"])
+
+    # goal: latest wins, sent from a worker so the finder's tick never blocks on the network
+    goal_box = {"msg": None}
+    goal_cv = threading.Condition()
+
+    def goal_send(msg, use_yaw):
+        with goal_cv:
+            goal_box["msg"] = (msg, use_yaw)
+            goal_cv.notify()
+
+    def goal_worker():
+        while rosless.ok():
+            with goal_cv:
+                while goal_box["msg"] is None and rosless.ok():
+                    goal_cv.wait(0.5)
+                item, goal_box["msg"] = goal_box["msg"], None
+            if item is None:
+                continue
+            m, use_yaw = item
+            payload = json.dumps({"x": m.pose.position.x, "y": m.pose.position.y, "yaw": rosless.quat_to_yaw(m.pose.orientation),
+                                  "use_yaw": bool(use_yaw), "t": time.time()})
+            ok, msg = net.call_string(gw, "room_finder/goal", payload, 3.0)
+            if not ok:
+                logging.warning("goal rejected / lost: %s" % msg)
+    threading.Thread(target=goal_worker, daemon=True).start()
+    router.pub_routes["/room_finder/goal"] = lambda m: goal_send(m, False)
+    router.pub_routes["/room_finder/goal_yaw"] = lambda m: goal_send(m, True)
+
+    # ---- landmarks + finder state for the gateway's map viewer (latest wins, ~1 Hz; the nodes keep their local delivery)
+    viz = {"registry": None, "finder": None}
+
+    def on_registry(m):
+        r = json.loads(m.data)
+        viz["registry"] = {
+            "doors": [{k: d.get(k) for k in ("id", "x", "y", "conf", "label", "nrm", "width")} for d in r.get("doors", [])],
+            "labels": [{k: lb.get(k) for k in ("id", "x", "y", "number", "score")} for lb in r.get("labels", [])],
+            "signs": [{"id": s["id"], "x": s["x"], "y": s["y"], "valid": s.get("valid"), "dead": s.get("dead"),
+                       "cues": [{k: c.get(k) for k in ("place", "bearing", "lo", "hi", "pre")} for c in s.get("cues", [])]}
+                      for s in r.get("signs", [])]}
+
+    def on_finder(m):
+        s = json.loads(m.data)
+        viz["finder"] = {k: s.get(k) for k in ("state", "target", "elapsed", "path_len", "item", "hint", "found", "label_xy")}
+        viz["finder"]["log"] = (s.get("log") or [])[-6:]
+
+    def viz_worker():
+        while rosless.ok():
+            time.sleep(1.0)
+            if viz["registry"] is None and viz["finder"] is None:
+                continue
+            ok, msg = net.call_string(gw, "room_finder/viz", json.dumps(viz), 2.0)
+            if not ok:
+                logging.debug("viz not delivered: %s" % msg)
+    router.subscribe("/room_finder/registry", on_registry)
+    router.subscribe("/room_finder/status", on_finder)
+    threading.Thread(target=viz_worker, daemon=True).start()
+
+    # ---- detection debug image (left | front | right with boxes) as an MJPEG stream; the robot PC forwards the port to the wifi
+    if a.debug_port:
+        import debug_stream
+        router.subscribe("/room_finder/debug_image", debug_stream.DebugStream(a.debug_port).on_image)
+
+    # ---- the nodes (imported unchanged from ReasonNav)
+    rosless.install(router)
+    sys.path.insert(0, a.mmdev)
+    sys.path.insert(0, os.path.join(a.mmdev, "nodes"))
+    apply_rig(rig)
+    if a.dummy_vlm:
+        install_dummy_vlm()
+    ws = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))   # the workspace holding this script
+    out = a.out_dir or os.path.join(ws, "log", "room_finder_net", "%s_T%s" % (time.strftime("%Y%m%d_%H%M%S"), a.target))
+    os.makedirs(out, exist_ok=True)
+    if oak is not None:
+        oak.expo_file = open(os.path.join(out, "camera_exposure.jsonl"), "a")
+    yolo = a.yolo
+    if not yolo:   # the copy shipped in the ReasonNav checkout, else the training machine's path
+        cand = os.path.abspath(os.path.join(a.mmdev, "..", "..", "room_finder_assets", "weights", "doordetect_oi", "best.pt"))
+        yolo = cand if os.path.exists(cand) else "/home/user/yolo_ws/runs/doordetect_oi/weights/best.pt"
+        # a TensorRT fp16 build of it next to it wins (Jetson: 42 vs 60 ms per 12 MP frame, and it leaves GPU time to GDINO):
+        # yolo export model=best.pt format=engine half=True imgsz=960 -> rename to best_960_fp16.engine
+        trt = os.path.join(os.path.dirname(yolo), "best_960_fp16.engine")
+        yolo = trt if os.path.exists(trt) else yolo
+    if not a.env_key:   # a stale OPENAI_API_KEY in the shell must not shadow mm_dev/config/.env
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.setdefault("REASONNAV_ENV", os.path.join(a.mmdev, "config", ".env"))   # the VLM's own default is the dev PC's path
+    rosless.Node.param_overrides = {
+        "room_perception": {"out_dir": out + "/perception", "yolo_weights": yolo,
+                            # one camera per call, round robin. 0 = no wait: each camera's newest frame once, GDINO_WORKERS requests in
+                            # flight (~1 Hz per camera with the 960x720 engine: gdino_trt/build_engine.sh, W=960 H=720 SHORT=720)
+                            "gdino_hz": float(os.environ.get("GDINO_HZ", "0")),
+                            "gdino_workers": int(os.environ.get("GDINO_WORKERS", "2")),
+                            "gdino_width": int(os.environ.get("GDINO_WIDTH", "960")),   # must match the engine's image size
+                            # pixel thresholds are given at 1280 px width; IMX378 (82.7 deg) at 1280 px: a 40 cm strip sign is ~116 px at 2.5 m.
+                            # 90 keeps the OV9782's cut (70 at 97 deg): signs count from ~3.2 m
+                            "sign_min_px": float(os.environ.get("SIGN_MIN_PX", "90")),
+                            # Tesseract word-count gate before the VLM sign read: off. On the 10-28 crops it passed 1 of 33 signs the VLM
+                            # read correctly (the T1xx~T1xx strips, Korean text), and three misses mark a sign "not a sign" for good
+                            "sign_ocr_words": int(os.environ.get("SIGN_OCR_WORDS", "0")),
+                            # crops for the VLM with median luma below this get a luma stretch + CLAHE (dim corridor, backlit doors:
+                            # 129 of 433 crops of the 11-04 T136 run had a median below 50 and the VLM read none of them); 0 = off
+                            "dark_enhance": float(os.environ.get("DARK_ENHANCE", "70")),
+                            # a later comparable sign read replaces unconfirmed entries (11-04 T140: T131~T150 was also kept as
+                            # "T135-T150" and "101~110" from two misreads); entries read the same way twice stay
+                            "sign_overwrite": os.environ.get("SIGN_OVERWRITE", "1") == "1",
+                            "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5")),
+                            "label_nearest_door": os.environ.get("LABEL_NEAREST_DOOR", "1") == "1",
+                            # detections beyond 5 m are ignored (door / plate / sign positions and sizes are least accurate there)
+                            "det_range": float(os.environ.get("DET_RANGE", "5.0")),
+                            "read_range": float(os.environ.get("READ_RANGE", "5.0")),
+                            "sign_range": float(os.environ.get("SIGN_RANGE", "5.0")),
+                            # an oblique view of a sign gives a wrong plane normal, and the arrow bearing is built from it
+                            "sign_max_angle_deg": float(os.environ.get("SIGN_MAX_ANGLE_DEG", "50"))},
+        "room_finder": {"target": a.target, "out_dir": out + "/finder", "max_time": float(a.max_time), "policy": a.policy,
+                        # real robot: a door needs a mapped wall next to it; go to a door without turning to face it (3 cameras)
+                        "door_wall_max": float(os.environ.get("DOOR_WALL_MAX", "0.5")),
+                        "door_face": os.environ.get("DOOR_FACE", "0") == "1",
+                        # unread lobby signs / doors outscored every frontier; favour frontiers that lead toward the hint
+                        "frontier_hint_bonus": float(os.environ.get("FRONTIER_HINT_BONUS", "40")),
+                        # dwelling at a sign / door to read it must not count as "stuck" on the next goal (it blocks that goal for 150 s)
+                        "stuck_per_item": os.environ.get("STUCK_PER_ITEM", "1") == "1",
+                     # a door / sign within 2 m is already in view of the 3 cameras: mark it seen after a short dwell instead of driving to the viewpoint
+                     "view_obj_dist": float(os.environ.get("VIEW_OBJ_DIST", "2.0")),
+                     "view_dwell": float(os.environ.get("VIEW_DWELL", "1.0")),
+                     # optional: items behind the travel direction lose points (off; PASS_SEEN_S is the preferred fix for going back and forth)
+                     "backtrack_penalty": float(os.environ.get("BACKTRACK_PENALTY", "0")),
+                     # a sign / door that was within view_obj_dist for this long while driving by is already read: do not go back to it
+                     # exploring a frontier had no reward: unread signs (+27) and doors always won, so the robot circled the lobby
+                     "frontier_bonus": float(os.environ.get("FRONTIER_BONUS", "15")),
+                     # a stuck frontier (e.g. the far end of a corridor) is retried after 20 s instead of 150 s
+                     "frontier_block_s": float(os.environ.get("FRONTIER_BLOCK_S", "20")),
+                     # plates read near the target number give a direction (T101 -15 m, T103 -25 m -> T106 near -40 m): frontiers / doors toward it gain, away lose
+                     "trend_weight": float(os.environ.get("TREND_WEIGHT", "0")),
+                     # the VLM gets rules for reading sign entries / plates and its earlier answers; signs listing the target are photographed first
+                     "belief_guide": os.environ.get("BELIEF_GUIDE", "1") == "1",
+                     "belief_weight": float(os.environ.get("BELIEF_WEIGHT", "100")),
+                     # the VLM also names a map position for the goal (e.g. the hallway a T101~T126 sign points into): a blob in the confidence grid
+                     "belief_point": os.environ.get("BELIEF_POINT", "1") == "1",
+                     # the VLM put the T101~T126 goal in the open lobby north of the sign: the frontier openings are lettered on its map, it names the one
+                     # to drive through (a sign stands at the hallway it points into; plates read in a hallway beat an arrow)
+                     "belief_openings": os.environ.get("BELIEF_OPENINGS", "1") == "1",
+                     # 11-04 T113: the west corridor end (2 m wide, walls inflated) had a 4-cell traversable frontier, dropped as noise
+                     "frontier_on_free": os.environ.get("FRONTIER_ON_FREE", "1") == "1",
+                     # VLM goals inside the looked-at area are moved on along robot -> goal (no confidence lands on looked cells)
+                     "goal_unlooked": os.environ.get("GOAL_UNLOOKED", "1") == "1",
+                     # a VLM goal gets the weight (answers among the last 4 that point within 10 m of it) / 4 (11-04 T113: three answers
+                     # in a row claimed the numbers grow eastward and sent the robot into the wrong wing); 0 = off
+                     "belief_consensus": int(os.environ.get("BELIEF_CONSENSUS", "4")),
+                     # unread signs scored 30 - path everywhere, so the lobby's decorations kept winning: lower base, plus the belief at the sign
+                     "sign_base": float(os.environ.get("SIGN_BASE", "10")),
+                     "sign_belief_w": float(os.environ.get("SIGN_BELIEF_W", "30")),
+                     # frontiers vanish when the lidar already sees down a corridor; the VLM's predicted place (belief peak) is a goal of its own
+                     "belief_peak": os.environ.get("BELIEF_PEAK", "1") == "1",
+                     # signs / doors in an area the robot has already been within 3 m of are not visited again
+                     "skip_looked": os.environ.get("SKIP_LOOKED", "0") == "1",       # old 3 m rule, off: the 2 m + camera view rule below is used
+                     # doors / signs farther than this from any traversable cell are ignored (room plates are always kept, ReasonNav
+                     # 3450477). The gateway inflates walls by
+                     # 0.5 m and the finder keeps 0.3 m clearance, so traversable cells start ~0.8 m from a wall: at 1.0 m the plates
+                     # on the walls were dropped (11-04 T145: T146 next to the target, T101/T102 in the west corridor). 1.5 m = ~0.7 m
+                     # beyond the wall line
+                     "det_reach_m": float(os.environ.get("DET_REACH_M", "1.5")),
+                     # corridor: the frontier ahead flickers away as the lidar sees further, and the only candidate left is a far one behind (turn around, then back)
+                     "frontier_match_m": float(os.environ.get("FRONTIER_MATCH_M", "6.0")),
+                     "frontier_hold_s": float(os.environ.get("FRONTIER_HOLD_S", "12")),
+                     # a person walking by can hold the robot up: only call it stuck after this many seconds without moving
+                     "stuck_s": float(os.environ.get("STUCK_S", "45")),
+                     "pass_seen_s": float(os.environ.get("PASS_SEEN_S", "0.5")),
+                     # seen = within VIEW_OBJ_DIST (2 m) and inside the 3 cameras' view (yaw 0 / +-90 deg, IMX378 lens edges at +-47 deg -> half angle ~137 deg)
+                     "view_half_fov": math.radians(float(os.environ.get("VIEW_HALF_FOV_DEG", "137"))),
+                        "belief_signs": a.belief_signs,
+                        "belief_commit": os.environ.get("BELIEF_COMMIT", "true").lower() == "true",
+                        "belief_range": float(os.environ.get("BELIEF_RANGE", "25")),
+                        "belief_numbers": os.environ.get("BELIEF_NUMBERS", "false").lower() == "true",
+                        "belief_verify_base": float(os.environ.get("BELIEF_VERIFY_BASE", "0")),
+                        "belief_verify_max": float(os.environ.get("BELIEF_VERIFY_MAX", "15")),
+                        "belief_alpha": float(os.environ.get("BELIEF_ALPHA", "0.92")),
+                        "exit_when_done": bool(a.exit_when_done)},
+    }
+    for kv in filter(None, os.environ.get("RF_PARAMS", "").split(",")):   # RF_PARAMS="room_finder.sign_seek=100,room_finder.sign_lock=true"
+        k, v = kv.split("=", 1)
+        node, name = k.split(".", 1)
+        v = {"true": True, "false": False}.get(v.lower(), v)
+        try:
+            v = float(v) if isinstance(v, str) else v
+        except ValueError:
+            pass
+        rosless.Node.param_overrides.setdefault(node, {})[name] = v
+    import room_perception  # noqa: E402
+    import room_finder  # noqa: E402
+    if sim_noise.ON and a.cameras == "net":
+        import mm_dev.room_finder.vlm as vlm_mod
+        sim_noise.patch_vlm(vlm_mod)
+        sim_noise.patch_finder(room_finder)
+        sim_noise.patch_vlm_latency(vlm_mod)
+        sim_noise.patch_perception(room_perception)
+        threading.Thread(target=lambda: [time.sleep(60) or logging.info(sim_noise.rates()) for _ in iter(int, 1)], daemon=True).start()
+        logging.info("SIM_NOISE on: " + sim_noise.summary())
+    recorder = None
+    if a.record:
+        x0, y0, x1, y1 = (float(v) for v in a.record_view.split(","))
+        rosless.Node.param_overrides["room_recorder"] = {"out": a.record, "target": a.target, "xmin": x0, "ymin": y0, "xmax": x1, "ymax": y1,
+                                                         "gt_json": os.environ.get("RECORD_GT", "")}
+        import room_recorder  # noqa: E402
+        recorder = room_recorder.Recorder()
+    perception = room_perception.RoomPerception()
+    finder = room_finder.RoomFinder()
+    logging.info("perception + finder up (target %s, out %s)" % (a.target, out))
+    rosless.spin()
+    if sim_noise.ON:
+        logging.info(sim_noise.summary())
+    if recorder is not None and recorder.status is not None:    # the finder's exit stops every executor: take its last status (DONE) and write the tail here
+        recorder._rl_worker.join(2.0)
+        for q, cb in recorder._rl_subs:
+            while q:
+                cb(q.popleft())
+        recorder.done_at = recorder.done_at or time.time()
+        try:
+            while True:
+                recorder._frame()
+                time.sleep(1.0 / recorder.fps)
+        except SystemExit:
+            pass
+        recorder.close()
+    if oak is not None:
+        oak.close()
+    net.close()
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    main()

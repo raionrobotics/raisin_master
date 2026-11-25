@@ -1,0 +1,86 @@
+# VLM Navigation Configuration
+# This file contains all configurable parameters for the VLM navigation system
+
+# Task Configuration
+task:
+  goal: 3018  # Default target room number (can be overridden)
+
+# Ablation Study Modes
+# 0 = none, 1 = no map, 2 = no info, 3 = no vlm (random),
+# 4 = no vlm (closest), 5 = no json
+ablation:
+  mode: 0
+
+  # Mode-specific detection overrides
+  no_info_detection:
+    query: "a door"
+    threshold: [0.4]
+
+# File Paths
+paths:
+  costmap_save_dir: "/home/raion/tips_ws/data"  # Directory to save costmap data
+
+# Navigation Parameters
+navigation:
+  update_threshold: 1.5  # Distance threshold in meters for landmark updates
+  robot_length: 1.2      # Footprint length (0.6 fore + 0.6 aft), metres
+  max_reposition_attempts: 0  # Maximum attempts to reposition for OCR
+
+  # Footprint in metres, x forward / y left. Used to decide whether the rig
+  # could actually stand at a candidate frontier (compute_footprint_cost).
+  # 0.6 fore and aft, 0.4 either side.
+  footprint:
+    - [0.6, 0.4]
+    - [0.6, -0.4]
+    - [-0.6, -0.4]
+    - [-0.6, 0.4]
+
+# Detection Parameters
+detection:
+  # Room labels are detected continuously, not only while a door is being
+  # inspected. The detector runs every class in one forward pass, so the extra
+  # phrase is nearly free -- and a number seen in passing is worth far more
+  # than one the rig has to walk up to and stand in front of.
+  default_query: "a person, a door, a directional sign, a room label"
+  default_threshold: [0.3, 0.4, 0.08, 0.06]
+
+  # Special detection modes
+  room_label_query: "a room label"
+  room_label_threshold: [0.04]
+
+# Approach Distances (negative values mean approach from front)
+approach:
+  door: -2.0
+  sign: -1.5
+  person: -2.5
+  frontier: 0.0  # Not used for frontiers
+
+# VLM Configuration
+vlm:
+  # Two models, because the two jobs have different constraints. Choosing the
+  # next landmark happens every loop and its latency is what the carrier feels;
+  # gpt-5.4-mini measured 1.6 s against 2.3 s for gpt-5.4, with the same answers
+  # on this map. Reading a room number happens once per door and is already the
+  # weakest link, so it keeps the stronger model -- measured 8/8 either way, but
+  # mini dropped the "T" prefix this building actually uses (T132 -> 132).
+  model: "gpt-5.4-mini"
+  ocr_model: "gpt-5.4"
+  use_vlm_for_sign_direction: false  # Use VLM vs TF-based direction conversion
+
+# Frontier Exploration
+frontier:
+  max_footprint_cost: 253  # reject only INSCRIBED/LETHAL at the frontier centre; inflation below that is fine to walk toward
+  spin_angle: 6.28  # Full rotation in radians (2*pi)
+
+# Timeouts
+timeouts:
+  navigation_timeout: 240.0  # Navigation timeout in seconds
+  pan_timeout: 5.0           # Pan-tilt timeout in seconds
+  detection_wait: 2.0        # Wait time for detection in seconds
+  detection_retry_wait: 4.0  # Wait time between detection retries
+
+# Update Distances
+person_update_distance: 4.0  # Increased update distance for people
+
+# Frequency
+update_frequency: 10.0  # Hz for pose updates

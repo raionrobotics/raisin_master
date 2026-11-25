@@ -1,0 +1,23 @@
+  <!-- Three simulated OAK-D Pro W on a mast: front / left / right (90 deg apart), 1.0 m above the top plate.
+       xy is directly above the Livox MID-360 (-0.0579, 0); the lidar is at z=0.209 in the same TORSO frame,
+       so lidar -> camera is (0, 0, +0.904). -->
+  <link name="oak_front" model="oak_front" sensor="oakd_pro_w_sim.xml" />
+  <joint name="oak_front_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="-0.0579 0.0 1.113"/>
+    <parent link="TORSO"/>
+    <child link="oak_front"/>
+  </joint>
+
+  <link name="oak_left" model="oak_left" sensor="oakd_pro_w_sim.xml" />
+  <joint name="oak_left_joint" type="fixed">
+    <origin rpy="0 0 1.5708" xyz="-0.0579 0.0 1.113"/>
+    <parent link="TORSO"/>
+    <child link="oak_left"/>
+  </joint>
+
+  <link name="oak_right" model="oak_right" sensor="oakd_pro_w_sim.xml" />
+  <joint name="oak_right_joint" type="fixed">
+    <origin rpy="0 0 -1.5708" xyz="-0.0579 0.0 1.113"/>
+    <parent link="TORSO"/>
+    <child link="oak_right"/>
+  </joint>

@@ -70,6 +70,10 @@ def main():
     print("[bringup] transition_to_state ->", res.get("r"), flush=True)
     call("set_listen", "vel_cmd/autonomy")
     call("start_mapping", 30.0, fn="call_trigger")
+    # start_mapping pauses the joystick for 1.5 s and then restores joy/gui as the listened source, which drops vel_cmd/autonomy
+    # (raisin build of 2026-10-15): select the autonomy source again once that is over
+    time.sleep(3.0)
+    call("set_listen", "vel_cmd/autonomy")
     net.close()
 
 

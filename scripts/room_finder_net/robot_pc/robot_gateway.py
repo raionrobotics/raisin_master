@@ -9,11 +9,14 @@ Runs next to the robot's raisin node and does the three things the AI PC should 
   2. exploration map : occupancy grid (unknown = -1) accumulated here from the lidar_slam registered cloud and published
                    as `room_finder/map` -- a compact grid instead of streaming raw clouds to the AI PC.
   3. status      : `room_finder/status` JSON (pose, has_goal, watchdog state), 2 Hz.
+  4. map viewer  : http://<robot PC>:8081 (--viz-port) -- map, robot trail, goal and the AI PC's landmarks (doors, room
+                   numbers, signs), which the AI PC pushes through service `room_finder/viz`.  Read-only, no camera images.
   Service `room_finder/stop` cancels the current goal.
 
   robot_gateway.py --robot-id <robot nickname> [--id room_finder_gw] [--iface lo]
 """
 import argparse
+import base64
 import json
 import logging
 import math
@@ -21,6 +24,7 @@ import os
 import sys
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
@@ -55,6 +59,11 @@ class Gateway:
         self.map_lock = threading.Lock()
         self.n_bins = 720
         self.scans = 0
+        # viewer state
+        self.viz = {}               # latest landmarks + finder state from the AI PC
+        self.viz_t = 0.0
+        self.trail = []             # robot xy every >= 0.2 m
+        self.map_viz = None         # (json bytes) latest cropped map for the viewer
 
         self.net = raisin_py.Net(a.id, a.iface)
         self.robot = None
@@ -71,8 +80,11 @@ class Gateway:
         self.pub_status = self.net.publisher_string("room_finder/status")
         self.net.service_string("room_finder/goal", self.srv_goal)
         self.net.service_string("room_finder/stop", self.srv_stop)
+        self.net.service_string("room_finder/viz", self.srv_viz)
         threading.Thread(target=self.sender, daemon=True).start()
         threading.Thread(target=self.loop, daemon=True).start()
+        if a.viz_port:
+            threading.Thread(target=self.serve_viewer, daemon=True).start()
         logging.info("gateway up: goals -> %s (frame from %s), map %dx%d @ %.2f m, watchdog %.0f s"
                      % (a.waypoint_service, a.odom_topic, self.w, self.h, res, a.watchdog))
 
@@ -82,6 +94,10 @@ class Gateway:
         yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
         with self.lock:
             self.pose, self.frame = (x, y, z, yaw, stamp), frame
+            if not self.trail or math.hypot(x - self.trail[-1][0], y - self.trail[-1][1]) >= 0.2:
+                self.trail.append((round(x, 2), round(y, 2)))
+                if len(self.trail) > 20000:
+                    self.trail = self.trail[::2]
 
     def on_status(self, has_goal, has_plan, idx, count):
         with self.lock:
@@ -141,7 +157,11 @@ class Gateway:
             data = np.full(sub.shape, -1, dtype=np.int8)
             data[sub <= -0.4] = 0
             data[sub >= 0.85] = 100
-        self.pub_map.publish("map", self.res, float(self.x0 + c0 * self.res), float(self.y0 + r0 * self.res), data)
+        x0, y0 = float(self.x0 + c0 * self.res), float(self.y0 + r0 * self.res)
+        self.pub_map.publish("map", self.res, x0, y0, data)
+        if self.a.viz_port:   # viewer: 0 free, 100 occupied, 255 unknown, row 0 = lowest y
+            self.map_viz = json.dumps({"res": self.res, "x0": x0, "y0": y0, "w": int(data.shape[1]), "h": int(data.shape[0]),
+                                       "data": base64.b64encode(data.view(np.uint8).tobytes()).decode()}).encode()
 
     # ---------------------------------------------------------------- goals
     def srv_goal(self, payload):
@@ -165,6 +185,53 @@ class Gateway:
             self.last_goal_t, self.watchdog_fired = time.time(), False
             self.cv.notify()
         return True, "accepted"
+
+    def srv_viz(self, payload):
+        try:
+            v = json.loads(payload)
+        except Exception as e:  # noqa: BLE001
+            return False, "bad viz: %r" % e
+        self.viz, self.viz_t = v, time.time()
+        return True, "ok"
+
+    # ---------------------------------------------------------------- map viewer (http)
+    def state_json(self):
+        with self.lock:
+            p, hg, trail = self.pose, self.has_goal, list(self.trail)
+        return json.dumps({"t": time.time(), "pose": None if p is None else [round(v, 3) for v in p[:4]], "has_goal": hg,
+                           "goal": self.goal, "watchdog_fired": self.watchdog_fired, "scans": self.scans, "trail": trail,
+                           "viz": self.viz, "viz_age": None if not self.viz_t else round(time.time() - self.viz_t, 1)}).encode()
+
+    def serve_viewer(self):
+        gw = self
+        page = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer.html")
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, body, ctype):
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                path = self.path.split("?")[0]
+                if path in ("/", "/index.html"):
+                    self._send(open(page, "rb").read(), "text/html; charset=utf-8")
+                elif path == "/state.json":
+                    self._send(gw.state_json(), "application/json")
+                elif path == "/map.json":
+                    self._send(gw.map_viz or b"null", "application/json")
+                else:
+                    self.send_error(404)
+
+        srv = ThreadingHTTPServer((self.a.viz_host, self.a.viz_port), H)
+        logging.info("map viewer: http://%s:%d" % (self.a.viz_host, self.a.viz_port))
+        srv.serve_forever()
 
     def srv_stop(self, _payload):
         with self.cv:
@@ -235,6 +302,8 @@ def main():
     ap.add_argument("--map-hz", type=float, default=2.0)
     ap.add_argument("--map-bounds", type=float, nargs=4, default=[-52.0, -8.0, 30.0, 40.0], metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
                     help="area (m, navigation frame) the map covers; default = the simulated hospital")
+    ap.add_argument("--viz-port", type=int, default=8081, help="map viewer http port (0 = off)")
+    ap.add_argument("--viz-host", default="0.0.0.0", help="address the viewer listens on")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     Gateway(a)

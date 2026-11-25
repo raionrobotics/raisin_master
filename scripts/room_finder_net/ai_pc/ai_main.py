@@ -10,6 +10,7 @@ policy ...) with raisin_network as the only middleware -- no ROS 2 anywhere.
 """
 import argparse
 import bisect
+import collections
 import json
 import logging
 import math
@@ -54,21 +55,38 @@ class PoseModel:
         self.hist_t, self.hist = [], []
         self.lock = threading.Lock()
         self.frame_id = None
+        self.off_hist = collections.deque()   # (arrival time, arrival - stamp): robot clock -> this PC's clock
+        self.offset, self.t_off_log = None, 0.0
+        self.host_stamps = True   # image stamps are this PC's clock (local cameras); False: robot clock (images over the network)
         m, off = rig["mount_xyz"], rig["sensor_offset"]
         self.static = {"base_link": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))}
         for name, c in rig["cameras"].items():
             y = float(c["yaw"])
-            self.static[name] = ((m[0] + off * math.cos(y), m[1] + off * math.sin(y), m[2]), yaw_quat(y))
+            if "xyz" in c:   # measured position of this camera (overrides mount_xyz + sensor_offset)
+                self.static[name] = (tuple(float(v) for v in c["xyz"]), yaw_quat(y))
+            else:
+                self.static[name] = ((m[0] + off * math.cos(y), m[1] + off * math.sin(y), m[2]), yaw_quat(y))
 
     def on_odom(self, stamp, frame_id, pq):
+        now = time.time()
         with self.lock:
             self.frame_id = frame_id
+            # the PCs' clocks are not synchronised: the smallest (arrival - stamp) over the last 20 s is the clock offset plus
+            # the fastest delivery; image capture times (this PC's clock) are mapped onto odometry stamps with it
+            if not self.off_hist or now - self.off_hist[-1][0] > 0.05:
+                self.off_hist.append((now, now - stamp))
+                while now - self.off_hist[0][0] > 20.0:
+                    self.off_hist.popleft()
+                self.offset = min(d for _, d in self.off_hist)
+                if now - self.t_off_log > 30.0:
+                    self.t_off_log = now
+                    logging.info("odometry clock: robot -> AI PC offset %.3f s" % self.offset)
             if self.hist_t and stamp <= self.hist_t[-1]:
                 return
             self.hist_t.append(stamp)
             self.hist.append(np.asarray(pq, dtype=float))
-            if len(self.hist) > 400:
-                del self.hist_t[:100], self.hist[:100]
+            if len(self.hist) > 3000:
+                del self.hist_t[:500], self.hist[:500]
 
     def base_pose(self, stamp=None):
         with self.lock:
@@ -89,6 +107,8 @@ class PoseModel:
     def lookup(self, frame, stamp=None):
         if frame not in self.static:
             return None
+        if stamp is not None and self.offset is not None and self.host_stamps:
+            stamp = stamp - self.offset       # this PC's clock -> robot clock
         bp = self.base_pose(stamp)
         if bp is None:
             return None
@@ -131,6 +151,18 @@ def install_dummy_vlm():
 
     V.VLM.__init__, V.VLM._complete = init, complete
     logging.warning("DUMMY VLM: no OpenAI calls; room numbers cannot be read through the VLM")
+
+
+# Lobby fixes of 2026-10-28 (the real robot wandered a cluttered lobby and left corridors it should have followed):
+#   STUCK_PER_ITEM  restart the stuck timer when the goal changes (reading a sign / door is not being stuck)
+#   NUMBER_PULL     score bonus toward where the plate numbers of the current corridor run (T101 -> T103 => T106 further on)
+#   SIGN_GOAL_*     score and range of "read this sign" goals (was +30 within 35 m: any poster pulled the robot back)
+#   DOOR_MIN_OBS    detections a door needs before it becomes a goal;  GOAL_LOS  doors / signs must be visible from their viewpoint
+# The values here reproduce the behaviour before the fixes; the real-robot settings are in REAL_ROBOT below.
+LOBBY_DEFAULTS = {"STUCK_PER_ITEM": "0", "NUMBER_PULL": "0", "SIGN_GOAL_BONUS": "30", "SIGN_GOAL_RANGE": "35", "DOOR_MIN_OBS": "3", "GOAL_LOS": "0",
+                  "BELIEF_ANCHOR": "robot", "FRONTIER_BLOCK_S": "150", "BELIEF_SIGN_FIRST": "0"}
+REAL_ROBOT = {"STUCK_PER_ITEM": "1", "NUMBER_PULL": "40", "SIGN_GOAL_BONUS": "12", "SIGN_GOAL_RANGE": "15", "DOOR_MIN_OBS": "5", "GOAL_LOS": "1",
+              "BELIEF_ANCHOR": "evidence", "FRONTIER_BLOCK_S": "20", "BELIEF_SIGN_FIRST": "1"}
 
 
 def main():
@@ -177,6 +209,7 @@ def main():
     # ---- routing of the topics the nodes use
     router = rosless.Router()
     poses = PoseModel(rig)
+    poses.host_stamps = a.cameras == "local"   # network images carry the robot's own stamps
     router.pose_provider = lambda frame, stamp: poses.lookup(frame, stamp)
     net.subscribe_odometry(robot, rig["topics"]["odom"], lambda t, f, pq, tw: poses.on_odom(t, f, pq))
 
@@ -243,6 +276,35 @@ def main():
     router.pub_routes["/room_finder/goal"] = lambda m: goal_send(m, False)
     router.pub_routes["/room_finder/goal_yaw"] = lambda m: goal_send(m, True)
 
+    # ---- landmarks + finder state for the gateway's map viewer (latest wins, ~1 Hz; the nodes keep their local delivery)
+    viz = {"registry": None, "finder": None}
+
+    def on_registry(m):
+        r = json.loads(m.data)
+        viz["registry"] = {
+            "doors": [{k: d.get(k) for k in ("id", "x", "y", "conf", "label", "nrm", "width")} for d in r.get("doors", [])],
+            "labels": [{k: lb.get(k) for k in ("id", "x", "y", "number", "score")} for lb in r.get("labels", [])],
+            "signs": [{"id": s["id"], "x": s["x"], "y": s["y"], "valid": s.get("valid"), "dead": s.get("dead"),
+                       "cues": [{k: c.get(k) for k in ("place", "bearing", "lo", "hi")} for c in s.get("cues", [])]}
+                      for s in r.get("signs", [])]}
+
+    def on_finder(m):
+        s = json.loads(m.data)
+        viz["finder"] = {k: s.get(k) for k in ("state", "target", "elapsed", "path_len", "item", "hint", "found", "label_xy")}
+        viz["finder"]["log"] = (s.get("log") or [])[-6:]
+
+    def viz_worker():
+        while rosless.ok():
+            time.sleep(1.0)
+            if viz["registry"] is None and viz["finder"] is None:
+                continue
+            ok, msg = net.call_string(gw, "room_finder/viz", json.dumps(viz), 2.0)
+            if not ok:
+                logging.debug("viz not delivered: %s" % msg)
+    router.subscribe("/room_finder/registry", on_registry)
+    router.subscribe("/room_finder/status", on_finder)
+    threading.Thread(target=viz_worker, daemon=True).start()
+
     # ---- the nodes (imported unchanged from ReasonNav)
     rosless.install(router)
     sys.path.insert(0, a.mmdev)
@@ -258,8 +320,15 @@ def main():
         yolo = cand if os.path.exists(cand) else "/home/user/yolo_ws/runs/doordetect_oi/weights/best.pt"
     if not a.env_key:   # a stale OPENAI_API_KEY in the shell must not shadow mm_dev/config/.env
         os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.setdefault("REASONNAV_ENV", os.path.join(a.mmdev, "config", ".env"))   # the VLM's own default is the dev PC's path
+    env = lambda k: os.environ.get(k, LOBBY_DEFAULTS[k])  # noqa: E731
     rosless.Node.param_overrides = {
-        "room_perception": {"out_dir": out + "/perception", "yolo_weights": yolo},
+        "room_perception": {"out_dir": out + "/perception", "yolo_weights": yolo,
+                            # one camera per call, round robin; the loop sleeps 1/gdino_hz and then waits for the reply
+                            "gdino_hz": float(os.environ.get("GDINO_HZ", "1.0")),
+                            # the real cameras are 1280 px wide: a 40 cm strip sign is ~90 px at 2.5 m
+                            "sign_min_px": float(os.environ.get("SIGN_MIN_PX", "70")),
+                            "door_min_valid": float(os.environ.get("DOOR_MIN_VALID", "0.5"))},
         "room_finder": {"target": a.target, "out_dir": out + "/finder", "max_time": float(a.max_time), "policy": a.policy,
                         "belief_signs": a.belief_signs,
                         "belief_commit": os.environ.get("BELIEF_COMMIT", "true").lower() == "true",
@@ -268,6 +337,15 @@ def main():
                         "belief_verify_base": float(os.environ.get("BELIEF_VERIFY_BASE", "0")),
                         "belief_verify_max": float(os.environ.get("BELIEF_VERIFY_MAX", "15")),
                         "belief_alpha": float(os.environ.get("BELIEF_ALPHA", "0.92")),
+                        "stuck_per_item": env("STUCK_PER_ITEM") == "1",
+                        "number_pull": float(env("NUMBER_PULL")),
+                        "sign_goal_bonus": float(env("SIGN_GOAL_BONUS")),
+                        "sign_goal_range": float(env("SIGN_GOAL_RANGE")),
+                        "door_min_obs": int(env("DOOR_MIN_OBS")),
+                        "goal_los": env("GOAL_LOS") == "1",
+                        "belief_anchor": env("BELIEF_ANCHOR"),
+                        "frontier_block_s": float(env("FRONTIER_BLOCK_S")),
+                        "belief_sign_first": env("BELIEF_SIGN_FIRST") == "1",
                         "exit_when_done": bool(a.exit_when_done)},
     }
     import room_perception  # noqa: E402
